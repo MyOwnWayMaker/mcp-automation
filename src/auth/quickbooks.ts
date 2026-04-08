@@ -1,3 +1,4 @@
+import "dotenv/config";
 import fs from "fs";
 import http from "http";
 import { URL } from "url";
