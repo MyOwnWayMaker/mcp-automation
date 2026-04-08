@@ -3,4 +3,6 @@ dist/
 .env
 credentials.json
 token.json
+quickbooks_token.json
+.DS_Store
 gh
