@@ -50,7 +50,7 @@ export async function getNotaryGmailClient(): Promise<OAuth2Client> {
 }
 
 // Run to authenticate: npm run auth:notary-gmail
-if (process.argv[1].endsWith("google-notary.ts") || process.argv[1].endsWith("google-notary.js")) {
+if (process.argv[1]?.endsWith("google-notary.ts") || process.argv[1]?.endsWith("google-notary.js")) {
   (async () => {
     const credentials = loadCredentials();
     const { client_secret, client_id, redirect_uris } =

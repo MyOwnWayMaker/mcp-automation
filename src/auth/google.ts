@@ -74,7 +74,7 @@ export async function getGoogleAuthClient(): Promise<OAuth2Client> {
 }
 
 // Run this script directly to authorize: npm run auth:google
-if (process.argv[1].endsWith("google.ts") || process.argv[1].endsWith("google.js")) {
+if (process.argv[1]?.endsWith("google.ts") || process.argv[1]?.endsWith("google.js")) {
   (async () => {
     const credentials = loadCredentials();
     const { client_secret, client_id, redirect_uris } =
