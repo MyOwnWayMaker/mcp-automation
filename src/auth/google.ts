@@ -9,6 +9,8 @@ const SCOPES = [
   "https://www.googleapis.com/auth/calendar",
   "https://www.googleapis.com/auth/drive",
   "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/tasks",
 ];
 
 const MCP_DIR = "/Users/hakielmcqueen/mcp-automation";
@@ -16,14 +18,27 @@ const CREDENTIALS_PATH = process.env.GOOGLE_CREDENTIALS_PATH ?? `${MCP_DIR}/cred
 const TOKEN_PATH = process.env.GOOGLE_TOKEN_PATH ?? `${MCP_DIR}/token.json`;
 
 function loadCredentials() {
+  // Support credentials stored as env var (for Railway/cloud deployment)
+  if (process.env.GOOGLE_CREDENTIALS_JSON) {
+    return JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+  }
   const credPath = path.resolve(CREDENTIALS_PATH);
   if (!fs.existsSync(credPath)) {
-    throw new Error(
-      `Google credentials file not found at: ${credPath}\n` +
-      `Run: cp .env.example .env and set GOOGLE_CREDENTIALS_PATH`
-    );
+    throw new Error(`Google credentials not found. Set GOOGLE_CREDENTIALS_JSON env var.`);
   }
   return JSON.parse(fs.readFileSync(credPath, "utf-8"));
+}
+
+function loadToken() {
+  // Support token stored as env var (for Railway/cloud deployment)
+  if (process.env.GOOGLE_TOKEN_JSON) {
+    return JSON.parse(process.env.GOOGLE_TOKEN_JSON);
+  }
+  const tokenPath = path.resolve(TOKEN_PATH);
+  if (fs.existsSync(tokenPath)) {
+    return JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+  }
+  return null;
 }
 
 export async function getGoogleAuthClient(): Promise<OAuth2Client> {
@@ -37,23 +52,25 @@ export async function getGoogleAuthClient(): Promise<OAuth2Client> {
     redirect_uris[0]
   );
 
-  const tokenPath = path.resolve(TOKEN_PATH);
-  if (fs.existsSync(tokenPath)) {
-    const token = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
-    oAuth2Client.setCredentials(token);
-
-    // Auto-refresh if expired
-    oAuth2Client.on("tokens", (tokens) => {
-      const existing = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
-      fs.writeFileSync(tokenPath, JSON.stringify({ ...existing, ...tokens }));
-    });
-
-    return oAuth2Client;
+  const token = loadToken();
+  if (!token) {
+    throw new Error("Google token not found. Run: npm run auth:google to authenticate.");
   }
 
-  throw new Error(
-    "Google token not found. Run: npm run auth:google to authenticate."
-  );
+  oAuth2Client.setCredentials(token);
+
+  // Auto-refresh if expired (local only)
+  if (!process.env.GOOGLE_TOKEN_JSON) {
+    const tokenPath = path.resolve(TOKEN_PATH);
+    oAuth2Client.on("tokens", (tokens) => {
+      if (fs.existsSync(tokenPath)) {
+        const existing = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+        fs.writeFileSync(tokenPath, JSON.stringify({ ...existing, ...tokens }));
+      }
+    });
+  }
+
+  return oAuth2Client;
 }
 
 // Run this script directly to authorize: npm run auth:google
@@ -78,11 +95,7 @@ if (process.argv[1].endsWith("google.ts") || process.argv[1].endsWith("google.js
     console.log(authUrl);
     console.log();
 
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.question("Enter the code from that page here: ", async (code) => {
       rl.close();
       const { tokens } = await oAuth2Client.getToken(code);

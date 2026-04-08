@@ -1,11 +1,13 @@
+import "dotenv/config";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
+import express from "express";
 
 // Tool implementations
 import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail } from "./tools/gmail.js";
@@ -14,432 +16,221 @@ import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMov
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
 import { imessageSend, imessageGetRecentChats } from "./tools/imessage.js";
 import { httpRequest } from "./tools/http.js";
+import { gdocsCreateDocument, gdocsGetDocument, gdocsFindDocument, gdocsAppendText, gdocsFindAndReplace } from "./tools/gdocs.js";
+import { tasksListTasklists, tasksListTasks, tasksCreateTask, tasksUpdateTask, tasksCompleteTask, tasksDeleteTask } from "./tools/tasks.js";
+import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/meet.js";
+import { notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem } from "./tools/notion.js";
+import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
+import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 
 // ─── Tool Definitions ──────────────────────────────────────────────────────────
 
 const TOOLS: Tool[] = [
   // Gmail
-  {
-    name: "gmail_send_email",
-    description: "Send an email via Gmail",
-    inputSchema: {
-      type: "object",
-      properties: {
-        to: { type: "string", description: "Recipient email address" },
-        subject: { type: "string", description: "Email subject" },
-        body: { type: "string", description: "Email body (plain text)" },
-        cc: { type: "string", description: "CC email address (optional)" },
-      },
-      required: ["to", "subject", "body"],
-    },
-  },
-  {
-    name: "gmail_find_email",
-    description: "Search for emails using Gmail search syntax (e.g. 'from:alice subject:invoice')",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Gmail search query" },
-        max_results: { type: "number", description: "Max number of results (default 10)" },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "gmail_get_email",
-    description: "Get the full content of an email by message ID",
-    inputSchema: {
-      type: "object",
-      properties: {
-        message_id: { type: "string", description: "Gmail message ID" },
-      },
-      required: ["message_id"],
-    },
-  },
-  {
-    name: "gmail_reply_to_email",
-    description: "Reply to an existing email thread",
-    inputSchema: {
-      type: "object",
-      properties: {
-        message_id: { type: "string", description: "Gmail message ID to reply to" },
-        body: { type: "string", description: "Reply body text" },
-      },
-      required: ["message_id", "body"],
-    },
-  },
-  {
-    name: "gmail_archive_email",
-    description: "Archive (remove from inbox) an email by message ID",
-    inputSchema: {
-      type: "object",
-      properties: {
-        message_id: { type: "string", description: "Gmail message ID" },
-      },
-      required: ["message_id"],
-    },
-  },
+  { name: "gmail_send_email", description: "Send an email via Gmail", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" } }, required: ["to", "subject", "body"] } },
+  { name: "gmail_find_email", description: "Search for emails using Gmail search syntax", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
+  { name: "gmail_get_email", description: "Get full content of an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
+  { name: "gmail_reply_to_email", description: "Reply to an existing email thread", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
+  { name: "gmail_archive_email", description: "Archive an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
 
   // Calendar
-  {
-    name: "calendar_list_events",
-    description: "List calendar events within a time range",
-    inputSchema: {
-      type: "object",
-      properties: {
-        calendar_id: { type: "string", description: "Calendar ID (default: 'primary')" },
-        time_min: { type: "string", description: "Start time in ISO 8601 format (default: now)" },
-        time_max: { type: "string", description: "End time in ISO 8601 format" },
-        query: { type: "string", description: "Free-text search query" },
-        max_results: { type: "number", description: "Max events to return (default 20)" },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "calendar_create_event",
-    description: "Create a new calendar event",
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Event title" },
-        start: { type: "string", description: "Start time in ISO 8601 format (e.g. 2026-04-10T14:00:00-05:00)" },
-        end: { type: "string", description: "End time in ISO 8601 format" },
-        description: { type: "string", description: "Event description" },
-        location: { type: "string", description: "Event location" },
-        attendees: { type: "array", items: { type: "string" }, description: "List of attendee email addresses" },
-        calendar_id: { type: "string", description: "Calendar ID (default: 'primary')" },
-      },
-      required: ["title", "start", "end"],
-    },
-  },
-  {
-    name: "calendar_update_event",
-    description: "Update an existing calendar event",
-    inputSchema: {
-      type: "object",
-      properties: {
-        event_id: { type: "string", description: "Event ID" },
-        title: { type: "string" },
-        start: { type: "string" },
-        end: { type: "string" },
-        description: { type: "string" },
-        location: { type: "string" },
-        calendar_id: { type: "string" },
-      },
-      required: ["event_id"],
-    },
-  },
-  {
-    name: "calendar_delete_event",
-    description: "Delete a calendar event",
-    inputSchema: {
-      type: "object",
-      properties: {
-        event_id: { type: "string", description: "Event ID to delete" },
-        calendar_id: { type: "string" },
-      },
-      required: ["event_id"],
-    },
-  },
-  {
-    name: "calendar_list_calendars",
-    description: "List all calendars accessible to the authenticated user",
-    inputSchema: { type: "object", properties: {}, required: [] },
-  },
+  { name: "calendar_list_events", description: "List calendar events within a time range", inputSchema: { type: "object", properties: { calendar_id: { type: "string" }, time_min: { type: "string" }, time_max: { type: "string" }, query: { type: "string" }, max_results: { type: "number" } }, required: [] } },
+  { name: "calendar_create_event", description: "Create a new calendar event", inputSchema: { type: "object", properties: { title: { type: "string" }, start: { type: "string" }, end: { type: "string" }, description: { type: "string" }, location: { type: "string" }, attendees: { type: "array", items: { type: "string" } }, calendar_id: { type: "string" } }, required: ["title", "start", "end"] } },
+  { name: "calendar_update_event", description: "Update an existing calendar event", inputSchema: { type: "object", properties: { event_id: { type: "string" }, title: { type: "string" }, start: { type: "string" }, end: { type: "string" }, description: { type: "string" }, location: { type: "string" }, calendar_id: { type: "string" } }, required: ["event_id"] } },
+  { name: "calendar_delete_event", description: "Delete a calendar event", inputSchema: { type: "object", properties: { event_id: { type: "string" }, calendar_id: { type: "string" } }, required: ["event_id"] } },
+  { name: "calendar_list_calendars", description: "List all accessible calendars", inputSchema: { type: "object", properties: {}, required: [] } },
 
   // Drive
-  {
-    name: "drive_find_file",
-    description: "Search for files in Google Drive using Drive query syntax",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Drive query (e.g. \"name contains 'report'\" or \"mimeType='application/pdf'\")" },
-        max_results: { type: "number", description: "Max results (default 10)" },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "drive_get_file",
-    description: "Get metadata for a specific file by ID",
-    inputSchema: {
-      type: "object",
-      properties: {
-        file_id: { type: "string", description: "Google Drive file ID" },
-      },
-      required: ["file_id"],
-    },
-  },
-  {
-    name: "drive_create_file",
-    description: "Create a new text file in Google Drive",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "File name" },
-        content: { type: "string", description: "File text content" },
-        mime_type: { type: "string", description: "MIME type (default: text/plain)" },
-        folder_id: { type: "string", description: "Parent folder ID (optional)" },
-      },
-      required: ["name", "content"],
-    },
-  },
-  {
-    name: "drive_delete_file",
-    description: "Delete a file from Google Drive",
-    inputSchema: {
-      type: "object",
-      properties: {
-        file_id: { type: "string" },
-      },
-      required: ["file_id"],
-    },
-  },
-  {
-    name: "drive_move_file",
-    description: "Move a file to a different folder in Google Drive",
-    inputSchema: {
-      type: "object",
-      properties: {
-        file_id: { type: "string" },
-        new_folder_id: { type: "string" },
-      },
-      required: ["file_id", "new_folder_id"],
-    },
-  },
-  {
-    name: "drive_create_folder",
-    description: "Create a folder in Google Drive",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string" },
-        parent_id: { type: "string", description: "Parent folder ID (optional)" },
-      },
-      required: ["name"],
-    },
-  },
+  { name: "drive_find_file", description: "Search for files in Google Drive", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
+  { name: "drive_get_file", description: "Get metadata for a file by ID", inputSchema: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] } },
+  { name: "drive_create_file", description: "Create a new text file in Google Drive", inputSchema: { type: "object", properties: { name: { type: "string" }, content: { type: "string" }, mime_type: { type: "string" }, folder_id: { type: "string" } }, required: ["name", "content"] } },
+  { name: "drive_delete_file", description: "Delete a file from Google Drive", inputSchema: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] } },
+  { name: "drive_move_file", description: "Move a file to a different folder", inputSchema: { type: "object", properties: { file_id: { type: "string" }, new_folder_id: { type: "string" } }, required: ["file_id", "new_folder_id"] } },
+  { name: "drive_create_folder", description: "Create a folder in Google Drive", inputSchema: { type: "object", properties: { name: { type: "string" }, parent_id: { type: "string" } }, required: ["name"] } },
 
   // Sheets
-  {
-    name: "sheets_get_rows",
-    description: "Read rows from a Google Sheets range (e.g. 'Sheet1!A1:D10')",
-    inputSchema: {
-      type: "object",
-      properties: {
-        spreadsheet_id: { type: "string" },
-        range: { type: "string", description: "A1 notation range (e.g. 'Sheet1!A:Z')" },
-      },
-      required: ["spreadsheet_id", "range"],
-    },
-  },
-  {
-    name: "sheets_append_row",
-    description: "Append a new row to a Google Sheet",
-    inputSchema: {
-      type: "object",
-      properties: {
-        spreadsheet_id: { type: "string" },
-        sheet_name: { type: "string", description: "Sheet tab name (default: Sheet1)" },
-        values: { type: "array", items: { type: "string" }, description: "List of cell values for the row" },
-      },
-      required: ["spreadsheet_id", "values"],
-    },
-  },
-  {
-    name: "sheets_update_row",
-    description: "Update cells in a specific range of a Google Sheet",
-    inputSchema: {
-      type: "object",
-      properties: {
-        spreadsheet_id: { type: "string" },
-        range: { type: "string", description: "A1 notation range to update (e.g. 'Sheet1!A2:C2')" },
-        values: { type: "array", items: { type: "string" } },
-      },
-      required: ["spreadsheet_id", "range", "values"],
-    },
-  },
-  {
-    name: "sheets_clear_range",
-    description: "Clear all values in a range of a Google Sheet",
-    inputSchema: {
-      type: "object",
-      properties: {
-        spreadsheet_id: { type: "string" },
-        range: { type: "string" },
-      },
-      required: ["spreadsheet_id", "range"],
-    },
-  },
-  {
-    name: "sheets_lookup_row",
-    description: "Find rows in a sheet where a column matches a value",
-    inputSchema: {
-      type: "object",
-      properties: {
-        spreadsheet_id: { type: "string" },
-        sheet_name: { type: "string" },
-        column_header: { type: "string", description: "Column header to search in" },
-        search_value: { type: "string", description: "Value to search for" },
-      },
-      required: ["spreadsheet_id", "column_header", "search_value"],
-    },
-  },
-  {
-    name: "sheets_create_spreadsheet",
-    description: "Create a new Google Sheets spreadsheet",
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string" },
-        sheet_name: { type: "string", description: "First sheet tab name (default: Sheet1)" },
-      },
-      required: ["title"],
-    },
-  },
+  { name: "sheets_get_rows", description: "Read rows from a Google Sheets range", inputSchema: { type: "object", properties: { spreadsheet_id: { type: "string" }, range: { type: "string" } }, required: ["spreadsheet_id", "range"] } },
+  { name: "sheets_append_row", description: "Append a new row to a Google Sheet", inputSchema: { type: "object", properties: { spreadsheet_id: { type: "string" }, sheet_name: { type: "string" }, values: { type: "array", items: { type: "string" } } }, required: ["spreadsheet_id", "values"] } },
+  { name: "sheets_update_row", description: "Update cells in a specific range", inputSchema: { type: "object", properties: { spreadsheet_id: { type: "string" }, range: { type: "string" }, values: { type: "array", items: { type: "string" } } }, required: ["spreadsheet_id", "range", "values"] } },
+  { name: "sheets_clear_range", description: "Clear all values in a range", inputSchema: { type: "object", properties: { spreadsheet_id: { type: "string" }, range: { type: "string" } }, required: ["spreadsheet_id", "range"] } },
+  { name: "sheets_lookup_row", description: "Find rows where a column matches a value", inputSchema: { type: "object", properties: { spreadsheet_id: { type: "string" }, sheet_name: { type: "string" }, column_header: { type: "string" }, search_value: { type: "string" } }, required: ["spreadsheet_id", "column_header", "search_value"] } },
+  { name: "sheets_create_spreadsheet", description: "Create a new Google Sheets spreadsheet", inputSchema: { type: "object", properties: { title: { type: "string" }, sheet_name: { type: "string" } }, required: ["title"] } },
+
+  // Google Docs
+  { name: "gdocs_create_document", description: "Create a new Google Docs document", inputSchema: { type: "object", properties: { title: { type: "string" }, content: { type: "string" } }, required: ["title"] } },
+  { name: "gdocs_get_document", description: "Get the content of a Google Doc by ID", inputSchema: { type: "object", properties: { document_id: { type: "string" } }, required: ["document_id"] } },
+  { name: "gdocs_find_document", description: "Search for Google Docs documents", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
+  { name: "gdocs_append_text", description: "Append text to the end of a Google Doc", inputSchema: { type: "object", properties: { document_id: { type: "string" }, text: { type: "string" } }, required: ["document_id", "text"] } },
+  { name: "gdocs_find_and_replace", description: "Find and replace text in a Google Doc", inputSchema: { type: "object", properties: { document_id: { type: "string" }, find: { type: "string" }, replace: { type: "string" } }, required: ["document_id", "find", "replace"] } },
+
+  // Google Tasks
+  { name: "tasks_list_tasklists", description: "List all Google Task lists", inputSchema: { type: "object", properties: {}, required: [] } },
+  { name: "tasks_list_tasks", description: "List tasks in a task list", inputSchema: { type: "object", properties: { tasklist_id: { type: "string" }, show_completed: { type: "boolean" } }, required: [] } },
+  { name: "tasks_create_task", description: "Create a new Google Task", inputSchema: { type: "object", properties: { title: { type: "string" }, notes: { type: "string" }, due: { type: "string", description: "Due date in RFC 3339 format" }, tasklist_id: { type: "string" } }, required: ["title"] } },
+  { name: "tasks_update_task", description: "Update an existing Google Task", inputSchema: { type: "object", properties: { task_id: { type: "string" }, title: { type: "string" }, notes: { type: "string" }, due: { type: "string" }, status: { type: "string", enum: ["needsAction", "completed"] }, tasklist_id: { type: "string" } }, required: ["task_id"] } },
+  { name: "tasks_complete_task", description: "Mark a Google Task as completed", inputSchema: { type: "object", properties: { task_id: { type: "string" }, tasklist_id: { type: "string" } }, required: ["task_id"] } },
+  { name: "tasks_delete_task", description: "Delete a Google Task", inputSchema: { type: "object", properties: { task_id: { type: "string" }, tasklist_id: { type: "string" } }, required: ["task_id"] } },
+
+  // Google Meet
+  { name: "meet_schedule_meeting", description: "Schedule a Google Meet meeting via Google Calendar", inputSchema: { type: "object", properties: { title: { type: "string" }, start: { type: "string", description: "ISO 8601 datetime" }, end: { type: "string" }, attendees: { type: "array", items: { type: "string" } }, description: { type: "string" }, calendar_id: { type: "string" } }, required: ["title", "start", "end"] } },
+  { name: "meet_get_meeting", description: "Get details and Meet link for a scheduled meeting", inputSchema: { type: "object", properties: { event_id: { type: "string" }, calendar_id: { type: "string" } }, required: ["event_id"] } },
+  { name: "meet_cancel_meeting", description: "Cancel a Google Meet meeting", inputSchema: { type: "object", properties: { event_id: { type: "string" }, calendar_id: { type: "string" } }, required: ["event_id"] } },
+
+  // Notion
+  { name: "notion_find_page", description: "Search for pages in Notion", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
+  { name: "notion_get_page", description: "Get the content of a Notion page by ID", inputSchema: { type: "object", properties: { page_id: { type: "string" } }, required: ["page_id"] } },
+  { name: "notion_create_page", description: "Create a new Notion page", inputSchema: { type: "object", properties: { title: { type: "string" }, parent_page_id: { type: "string" }, parent_database_id: { type: "string" }, content: { type: "string" } }, required: ["title"] } },
+  { name: "notion_append_to_page", description: "Append content to a Notion page", inputSchema: { type: "object", properties: { page_id: { type: "string" }, content: { type: "string" } }, required: ["page_id", "content"] } },
+  { name: "notion_query_database", description: "Query items in a Notion database", inputSchema: { type: "object", properties: { database_id: { type: "string" }, max_results: { type: "number" } }, required: ["database_id"] } },
+  { name: "notion_create_database_item", description: "Create a new item in a Notion database", inputSchema: { type: "object", properties: { database_id: { type: "string" }, title: { type: "string" }, properties: { type: "object", additionalProperties: { type: "string" } } }, required: ["database_id", "title"] } },
+
+  // HubSpot
+  { name: "hubspot_find_contact", description: "Find a HubSpot contact by email", inputSchema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] } },
+  { name: "hubspot_create_contact", description: "Create a new HubSpot contact", inputSchema: { type: "object", properties: { email: { type: "string" }, first_name: { type: "string" }, last_name: { type: "string" }, phone: { type: "string" }, company: { type: "string" } }, required: ["email"] } },
+  { name: "hubspot_update_contact", description: "Update a HubSpot contact", inputSchema: { type: "object", properties: { contact_id: { type: "string" }, first_name: { type: "string" }, last_name: { type: "string" }, phone: { type: "string" }, company: { type: "string" }, email: { type: "string" } }, required: ["contact_id"] } },
+  { name: "hubspot_create_deal", description: "Create a new HubSpot deal", inputSchema: { type: "object", properties: { name: { type: "string" }, stage: { type: "string" }, amount: { type: "string" }, close_date: { type: "string" } }, required: ["name", "stage"] } },
+  { name: "hubspot_find_deal", description: "Find a HubSpot deal by name", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "hubspot_update_deal", description: "Update a HubSpot deal", inputSchema: { type: "object", properties: { deal_id: { type: "string" }, name: { type: "string" }, stage: { type: "string" }, amount: { type: "string" }, close_date: { type: "string" } }, required: ["deal_id"] } },
+  { name: "hubspot_create_company", description: "Create a new HubSpot company", inputSchema: { type: "object", properties: { name: { type: "string" }, domain: { type: "string" }, industry: { type: "string" } }, required: ["name"] } },
+  { name: "hubspot_find_company", description: "Find a HubSpot company by name", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "hubspot_create_note", description: "Create a note in HubSpot, optionally linked to a contact or deal", inputSchema: { type: "object", properties: { body: { type: "string" }, contact_id: { type: "string" }, deal_id: { type: "string" } }, required: ["body"] } },
+
+  // Gemini
+  { name: "gemini_send_prompt", description: "Send a prompt to Google Gemini and get a response", inputSchema: { type: "object", properties: { prompt: { type: "string" }, model: { type: "string", description: "Model to use (default: gemini-2.0-flash)" }, system_instruction: { type: "string" } }, required: ["prompt"] } },
+  { name: "gemini_chat", description: "Have a multi-turn conversation with Google Gemini", inputSchema: { type: "object", properties: { messages: { type: "array", items: { type: "object", properties: { role: { type: "string", enum: ["user", "model"] }, content: { type: "string" } }, required: ["role", "content"] } }, model: { type: "string" }, system_instruction: { type: "string" } }, required: ["messages"] } },
+  { name: "gemini_analyze_text", description: "Ask Gemini to analyze or transform a piece of text", inputSchema: { type: "object", properties: { text: { type: "string" }, task: { type: "string", description: "What to do with the text (e.g. 'summarize', 'translate to Spanish', 'extract action items')" }, model: { type: "string" } }, required: ["text", "task"] } },
 
   // iMessage
-  {
-    name: "imessage_send",
-    description: "Send an iMessage or SMS via macOS Messages app (requires macOS with Messages logged in)",
-    inputSchema: {
-      type: "object",
-      properties: {
-        recipient: { type: "string", description: "Phone number (e.g. +12025551234) or Apple ID email" },
-        message: { type: "string", description: "Message text to send" },
-      },
-      required: ["recipient", "message"],
-    },
-  },
-  {
-    name: "imessage_get_recent_chats",
-    description: "List recent chats from macOS Messages app",
-    inputSchema: {
-      type: "object",
-      properties: {
-        max_results: { type: "number", description: "Max chats to return (default 10)" },
-      },
-      required: [],
-    },
-  },
+  { name: "imessage_send", description: "Send an iMessage or SMS via macOS Messages app", inputSchema: { type: "object", properties: { recipient: { type: "string" }, message: { type: "string" } }, required: ["recipient", "message"] } },
+  { name: "imessage_get_recent_chats", description: "List recent chats from macOS Messages app", inputSchema: { type: "object", properties: { max_results: { type: "number" } }, required: [] } },
 
   // HTTP
-  {
-    name: "http_request",
-    description: "Make an HTTP request to any URL (useful for custom APIs and webhooks)",
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "Full URL to request" },
-        method: { type: "string", description: "HTTP method: GET, POST, PUT, PATCH, DELETE (default: GET)" },
-        headers: {
-          type: "object",
-          additionalProperties: { type: "string" },
-          description: "Request headers as key-value pairs",
-        },
-        body: { type: "string", description: "Request body (for POST/PUT/PATCH)" },
-        timeout_ms: { type: "number", description: "Timeout in milliseconds (default: 30000)" },
-      },
-      required: ["url"],
-    },
-  },
+  { name: "http_request", description: "Make an HTTP request to any URL", inputSchema: { type: "object", properties: { url: { type: "string" }, method: { type: "string" }, headers: { type: "object", additionalProperties: { type: "string" } }, body: { type: "string" }, timeout_ms: { type: "number" } }, required: ["url"] } },
 ];
 
 // ─── Tool Router ───────────────────────────────────────────────────────────────
 
 async function callTool(name: string, args: Record<string, unknown>) {
   switch (name) {
-    // Gmail
-    case "gmail_send_email":
-      return gmailSendEmail(args as Parameters<typeof gmailSendEmail>[0]);
-    case "gmail_find_email":
-      return gmailFindEmail(args as Parameters<typeof gmailFindEmail>[0]);
-    case "gmail_get_email":
-      return gmailGetEmail(args as Parameters<typeof gmailGetEmail>[0]);
-    case "gmail_reply_to_email":
-      return gmailReplyToEmail(args as Parameters<typeof gmailReplyToEmail>[0]);
-    case "gmail_archive_email":
-      return gmailArchiveEmail(args as Parameters<typeof gmailArchiveEmail>[0]);
-
-    // Calendar
-    case "calendar_list_events":
-      return calendarListEvents(args as Parameters<typeof calendarListEvents>[0]);
-    case "calendar_create_event":
-      return calendarCreateEvent(args as Parameters<typeof calendarCreateEvent>[0]);
-    case "calendar_update_event":
-      return calendarUpdateEvent(args as Parameters<typeof calendarUpdateEvent>[0]);
-    case "calendar_delete_event":
-      return calendarDeleteEvent(args as Parameters<typeof calendarDeleteEvent>[0]);
-    case "calendar_list_calendars":
-      return calendarListCalendars();
-
-    // Drive
-    case "drive_find_file":
-      return driveFindFile(args as Parameters<typeof driveFindFile>[0]);
-    case "drive_get_file":
-      return driveGetFile(args as Parameters<typeof driveGetFile>[0]);
-    case "drive_create_file":
-      return driveCreateFile(args as Parameters<typeof driveCreateFile>[0]);
-    case "drive_delete_file":
-      return driveDeleteFile(args as Parameters<typeof driveDeleteFile>[0]);
-    case "drive_move_file":
-      return driveMoveFile(args as Parameters<typeof driveMoveFile>[0]);
-    case "drive_create_folder":
-      return driveCreateFolder(args as Parameters<typeof driveCreateFolder>[0]);
-
-    // Sheets
-    case "sheets_get_rows":
-      return sheetsGetRows(args as Parameters<typeof sheetsGetRows>[0]);
-    case "sheets_append_row":
-      return sheetsAppendRow(args as Parameters<typeof sheetsAppendRow>[0]);
-    case "sheets_update_row":
-      return sheetsUpdateRow(args as Parameters<typeof sheetsUpdateRow>[0]);
-    case "sheets_clear_range":
-      return sheetsClearRange(args as Parameters<typeof sheetsClearRange>[0]);
-    case "sheets_lookup_row":
-      return sheetsLookupRow(args as Parameters<typeof sheetsLookupRow>[0]);
-    case "sheets_create_spreadsheet":
-      return sheetsCreateSpreadsheet(args as Parameters<typeof sheetsCreateSpreadsheet>[0]);
-
-    // iMessage
-    case "imessage_send":
-      return imessageSend(args as Parameters<typeof imessageSend>[0]);
-    case "imessage_get_recent_chats":
-      return imessageGetRecentChats(args as Parameters<typeof imessageGetRecentChats>[0]);
-
-    // HTTP
-    case "http_request":
-      return httpRequest(args as Parameters<typeof httpRequest>[0]);
-
-    default:
-      throw new Error(`Unknown tool: ${name}`);
+    case "gmail_send_email": return gmailSendEmail(args as any);
+    case "gmail_find_email": return gmailFindEmail(args as any);
+    case "gmail_get_email": return gmailGetEmail(args as any);
+    case "gmail_reply_to_email": return gmailReplyToEmail(args as any);
+    case "gmail_archive_email": return gmailArchiveEmail(args as any);
+    case "calendar_list_events": return calendarListEvents(args as any);
+    case "calendar_create_event": return calendarCreateEvent(args as any);
+    case "calendar_update_event": return calendarUpdateEvent(args as any);
+    case "calendar_delete_event": return calendarDeleteEvent(args as any);
+    case "calendar_list_calendars": return calendarListCalendars();
+    case "drive_find_file": return driveFindFile(args as any);
+    case "drive_get_file": return driveGetFile(args as any);
+    case "drive_create_file": return driveCreateFile(args as any);
+    case "drive_delete_file": return driveDeleteFile(args as any);
+    case "drive_move_file": return driveMoveFile(args as any);
+    case "drive_create_folder": return driveCreateFolder(args as any);
+    case "sheets_get_rows": return sheetsGetRows(args as any);
+    case "sheets_append_row": return sheetsAppendRow(args as any);
+    case "sheets_update_row": return sheetsUpdateRow(args as any);
+    case "sheets_clear_range": return sheetsClearRange(args as any);
+    case "sheets_lookup_row": return sheetsLookupRow(args as any);
+    case "sheets_create_spreadsheet": return sheetsCreateSpreadsheet(args as any);
+    case "gdocs_create_document": return gdocsCreateDocument(args as any);
+    case "gdocs_get_document": return gdocsGetDocument(args as any);
+    case "gdocs_find_document": return gdocsFindDocument(args as any);
+    case "gdocs_append_text": return gdocsAppendText(args as any);
+    case "gdocs_find_and_replace": return gdocsFindAndReplace(args as any);
+    case "tasks_list_tasklists": return tasksListTasklists();
+    case "tasks_list_tasks": return tasksListTasks(args as any);
+    case "tasks_create_task": return tasksCreateTask(args as any);
+    case "tasks_update_task": return tasksUpdateTask(args as any);
+    case "tasks_complete_task": return tasksCompleteTask(args as any);
+    case "tasks_delete_task": return tasksDeleteTask(args as any);
+    case "meet_schedule_meeting": return meetScheduleMeeting(args as any);
+    case "meet_get_meeting": return meetGetMeeting(args as any);
+    case "meet_cancel_meeting": return meetCancelMeeting(args as any);
+    case "notion_find_page": return notionFindPage(args as any);
+    case "notion_get_page": return notionGetPage(args as any);
+    case "notion_create_page": return notionCreatePage(args as any);
+    case "notion_append_to_page": return notionAppendToPage(args as any);
+    case "notion_query_database": return notionQueryDatabase(args as any);
+    case "notion_create_database_item": return notionCreateDatabaseItem(args as any);
+    case "hubspot_find_contact": return hubspotFindContact(args as any);
+    case "hubspot_create_contact": return hubspotCreateContact(args as any);
+    case "hubspot_update_contact": return hubspotUpdateContact(args as any);
+    case "hubspot_create_deal": return hubspotCreateDeal(args as any);
+    case "hubspot_find_deal": return hubspotFindDeal(args as any);
+    case "hubspot_update_deal": return hubspotUpdateDeal(args as any);
+    case "hubspot_create_company": return hubspotCreateCompany(args as any);
+    case "hubspot_find_company": return hubspotFindCompany(args as any);
+    case "hubspot_create_note": return hubspotCreateNote(args as any);
+    case "gemini_send_prompt": return geminiSendPrompt(args as any);
+    case "gemini_chat": return geminiChat(args as any);
+    case "gemini_analyze_text": return geminiAnalyzeText(args as any);
+    case "imessage_send": return imessageSend(args as any);
+    case "imessage_get_recent_chats": return imessageGetRecentChats(args as any);
+    case "http_request": return httpRequest(args as any);
+    default: throw new Error(`Unknown tool: ${name}`);
   }
 }
 
-// ─── Server Setup ──────────────────────────────────────────────────────────────
+// ─── Server Factory ────────────────────────────────────────────────────────────
 
-const server = new Server(
-  { name: "mcp-automation", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+function createServer() {
+  const server = new Server(
+    { name: "mcp-automation", version: "2.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  try {
-    return await callTool(name, (args ?? {}) as Record<string, unknown>);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      content: [{ type: "text", text: `Error: ${message}` }],
-      isError: true,
-    };
-  }
-});
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      return await callTool(name, (args ?? {}) as Record<string, unknown>);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
+    }
+  });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error("mcp-automation server running on stdio");
+  return server;
+}
+
+// ─── Transport: HTTP/SSE (Railway) or stdio (local) ───────────────────────────
+
+const PORT = process.env.PORT;
+
+if (PORT) {
+  // Cloud mode: HTTP + SSE
+  const app = express();
+  const transports = new Map<string, SSEServerTransport>();
+
+  app.get("/sse", async (req, res) => {
+    const transport = new SSEServerTransport("/messages", res);
+    transports.set(transport.sessionId, transport);
+
+    res.on("close", () => transports.delete(transport.sessionId));
+
+    const server = createServer();
+    await server.connect(transport);
+  });
+
+  app.post("/messages", express.json(), async (req, res) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = transports.get(sessionId);
+    if (!transport) { res.status(404).send("Session not found"); return; }
+    await transport.handlePostMessage(req, res);
+  });
+
+  app.get("/health", (_req, res) => res.json({ status: "ok", tools: TOOLS.length }));
+
+  app.listen(Number(PORT), () => {
+    console.log(`mcp-automation server running on port ${PORT} (HTTP/SSE mode)`);
+  });
+} else {
+  // Local mode: stdio
+  const server = createServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("mcp-automation server running on stdio");
+}
