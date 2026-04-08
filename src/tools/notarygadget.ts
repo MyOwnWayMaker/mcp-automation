@@ -15,14 +15,18 @@ async function getPage() {
   }
 
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  });
   const page = await context.newPage();
 
-  // Login
-  await page.goto(`${NG_URL}/Account/Login`);
-  await page.fill('input[name="Email"], input[type="email"], #Email', email);
-  await page.fill('input[name="Password"], input[type="password"], #Password', password);
-  await page.click('button[type="submit"], input[type="submit"], .login-btn');
+  // Login — NotaryGadget uses classic ASP with login at /UserLogin
+  await page.goto(`${NG_URL}/UserLogin`);
+  await page.waitForLoadState("networkidle");
+  await page.waitForSelector('#txtUsername', { timeout: 15000 });
+  await page.fill('#txtUsername', email);
+  await page.fill('#txtPassword', password);
+  await page.click('button:has-text("Login"), input[type="submit"][value*="Login" i], input[type="submit"]');
   await page.waitForLoadState("networkidle");
 
   return { browser, page };
