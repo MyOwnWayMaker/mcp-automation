@@ -215,7 +215,7 @@ if (PORT) {
     await server.connect(transport);
   });
 
-  app.post("/messages", express.json(), async (req, res) => {
+  app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId as string;
     const transport = transports.get(sessionId);
     if (!transport) { res.status(404).send("Session not found"); return; }

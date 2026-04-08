@@ -17,6 +17,7 @@
     "dotenv": "^17.4.1",
     "express": "^5.2.1",
     "googleapis": "^144.0.0",
+    "mcp-remote": "^0.1.38",
     "zod": "^3.23.8"
   },
   "devDependencies": {
