@@ -22,13 +22,15 @@ async function getPage() {
 
   // Login — NotaryGadget uses classic ASP with login at /UserLogin
   await page.goto(`${NG_URL}/UserLogin`);
-  await page.waitForLoadState("networkidle");
-  await page.waitForSelector('#txtUsername', { timeout: 15000 });
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForSelector('#txtUsername', { timeout: 20000 });
   await page.fill('#txtUsername', email);
   await page.fill('#txtPassword', password);
-  // NotaryGadget uses a <div onclick="Login();"> not a real button
+  // NotaryGadget uses a <div onclick="Login();"> not a real button — call it directly
   await page.evaluate(() => (window as any).Login());
-  await page.waitForURL(url => !url.href.includes("UserLogin"), { timeout: 15000 });
+  // Wait up to 30s for redirect away from login page
+  await page.waitForURL(url => !url.href.includes("UserLogin"), { timeout: 30000 });
+  await page.waitForLoadState("domcontentloaded");
 
   return { browser, page };
 }
