@@ -26,8 +26,9 @@ async function getPage() {
   await page.waitForSelector('#txtUsername', { timeout: 15000 });
   await page.fill('#txtUsername', email);
   await page.fill('#txtPassword', password);
-  await page.click('button:has-text("Login"), input[type="submit"][value*="Login" i], input[type="submit"]');
-  await page.waitForLoadState("networkidle");
+  // NotaryGadget uses a <div onclick="Login();"> not a real button
+  await page.evaluate(() => (window as any).Login());
+  await page.waitForURL(url => !url.includes("UserLogin"), { timeout: 15000 });
 
   return { browser, page };
 }
