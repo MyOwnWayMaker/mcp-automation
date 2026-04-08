@@ -22,6 +22,8 @@ import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/
 import { notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem } from "./tools/notion.js";
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
+import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
+import { notarygadgetCreateSigning, notarygadgetCompleteSigning, notarygadgetRecordPayment, notarygadgetGetSignings } from "./tools/notarygadget.js";
 import { qbFindCustomer, qbCreateCustomer, qbUpdateCustomer, qbFindVendor, qbCreateVendor, qbFindInvoice, qbCreateInvoice, qbSendInvoice, qbVoidInvoice, qbUpdateInvoice, qbCreateExpense, qbFindExpenses, qbCreatePayment, qbFindPayments, qbProfitAndLoss, qbCashFlow, qbBalanceSheet } from "./tools/quickbooks.js";
 
 // ─── Tool Definitions ──────────────────────────────────────────────────────────
@@ -100,6 +102,19 @@ const TOOLS: Tool[] = [
   { name: "gemini_send_prompt", description: "Send a prompt to Google Gemini and get a response", inputSchema: { type: "object", properties: { prompt: { type: "string" }, model: { type: "string", description: "Model to use (default: gemini-2.0-flash)" }, system_instruction: { type: "string" } }, required: ["prompt"] } },
   { name: "gemini_chat", description: "Have a multi-turn conversation with Google Gemini", inputSchema: { type: "object", properties: { messages: { type: "array", items: { type: "object", properties: { role: { type: "string", enum: ["user", "model"] }, content: { type: "string" } }, required: ["role", "content"] } }, model: { type: "string" }, system_instruction: { type: "string" } }, required: ["messages"] } },
   { name: "gemini_analyze_text", description: "Ask Gemini to analyze or transform a piece of text", inputSchema: { type: "object", properties: { text: { type: "string" }, task: { type: "string", description: "What to do with the text (e.g. 'summarize', 'translate to Spanish', 'extract action items')" }, model: { type: "string" } }, required: ["text", "task"] } },
+
+  // Notary Email & Availability
+  { name: "notary_get_new_emails", description: "Check drupenterprise1@gmail.com for new notary assignment emails", inputSchema: { type: "object", properties: { max_results: { type: "number" }, include_read: { type: "boolean" } }, required: [] } },
+  { name: "notary_send_email", description: "Send an email from drupenterprise1@gmail.com", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, reply_to_message_id: { type: "string" }, thread_id: { type: "string" } }, required: ["to", "subject", "body"] } },
+  { name: "notary_mark_email_read", description: "Mark a notary email as read after processing", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
+  { name: "notary_check_availability", description: "Check calendar availability and calculate travel time for a signing request", inputSchema: { type: "object", properties: { requested_date: { type: "string", description: "YYYY-MM-DD" }, requested_time: { type: "string", description: "HH:MM AM/PM" }, signing_address: { type: "string" }, estimated_duration_minutes: { type: "number" } }, required: ["requested_date", "requested_time", "signing_address"] } },
+  { name: "notary_get_travel_time", description: "Calculate driving time between two addresses", inputSchema: { type: "object", properties: { origin: { type: "string" }, destination: { type: "string" } }, required: ["origin", "destination"] } },
+
+  // NotaryGadget
+  { name: "notarygadget_create_signing", description: "Create a new signing order in NotaryGadget", inputSchema: { type: "object", properties: { customer: { type: "string", description: "Company name (e.g. Pickford Escrow)" }, date: { type: "string", description: "YYYY-MM-DD" }, time: { type: "string", description: "HH:MM" }, fee: { type: "number", description: "Fee amount (e.g. 150, 250, 75)" }, location: { type: "string", description: "Full signing address" }, signer_names: { type: "array", items: { type: "string" } }, package_type: { type: "string", description: "e.g. Seller's package, Buyer's package, Single document" }, notes: { type: "string" } }, required: ["customer", "date", "time", "fee", "location", "signer_names"] } },
+  { name: "notarygadget_complete_signing", description: "Mark a signing as complete and record notarization count", inputSchema: { type: "object", properties: { signing_id: { type: "string" }, notarization_count: { type: "number" }, date_completed: { type: "string" }, notes: { type: "string" } }, required: ["notarization_count"] } },
+  { name: "notarygadget_record_payment", description: "Record a payment received for a signing in NotaryGadget", inputSchema: { type: "object", properties: { signing_id: { type: "string" }, amount: { type: "number" }, payment_date: { type: "string" }, payment_method: { type: "string" } }, required: ["amount"] } },
+  { name: "notarygadget_get_signings", description: "Get recent signing orders from NotaryGadget", inputSchema: { type: "object", properties: { max_results: { type: "number" }, status: { type: "string", enum: ["pending", "completed", "all"] } }, required: [] } },
 
   // QuickBooks
   { name: "qb_find_customer", description: "Find a QuickBooks customer by name", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
@@ -186,6 +201,15 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "gemini_send_prompt": return geminiSendPrompt(args as any);
     case "gemini_chat": return geminiChat(args as any);
     case "gemini_analyze_text": return geminiAnalyzeText(args as any);
+    case "notary_get_new_emails": return notaryGetNewEmails(args as any);
+    case "notary_send_email": return notarySendEmail(args as any);
+    case "notary_mark_email_read": return notaryMarkEmailRead(args as any);
+    case "notary_check_availability": return notaryCheckAvailability(args as any);
+    case "notary_get_travel_time": return notaryGetTravelTime(args as any);
+    case "notarygadget_create_signing": return notarygadgetCreateSigning(args as any);
+    case "notarygadget_complete_signing": return notarygadgetCompleteSigning(args as any);
+    case "notarygadget_record_payment": return notarygadgetRecordPayment(args as any);
+    case "notarygadget_get_signings": return notarygadgetGetSignings(args as any);
     case "qb_find_customer": return qbFindCustomer(args as any);
     case "qb_create_customer": return qbCreateCustomer(args as any);
     case "qb_update_customer": return qbUpdateCustomer(args as any);
