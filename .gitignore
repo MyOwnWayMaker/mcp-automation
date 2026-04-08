@@ -4,5 +4,6 @@ dist/
 credentials.json
 token.json
 quickbooks_token.json
+token_notary.json
 .DS_Store
 gh
