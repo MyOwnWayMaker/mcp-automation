@@ -61,6 +61,7 @@ async function uploadFile(filePath, folderId) {
 }
 
 const FILES_TO_UPLOAD = [
+  `${MCP_DIR}/XACTIMATE_PROJECT.md`,
   `${MCP_DIR}/src/index.ts`,
   `${MCP_DIR}/src/auth/google.ts`,
   `${MCP_DIR}/src/tools/gmail.ts`,

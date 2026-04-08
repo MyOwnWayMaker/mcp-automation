@@ -22,6 +22,7 @@ import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/
 import { notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem } from "./tools/notion.js";
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
+import { qbFindCustomer, qbCreateCustomer, qbUpdateCustomer, qbFindVendor, qbCreateVendor, qbFindInvoice, qbCreateInvoice, qbSendInvoice, qbVoidInvoice, qbUpdateInvoice, qbCreateExpense, qbFindExpenses, qbCreatePayment, qbFindPayments, qbProfitAndLoss, qbCashFlow, qbBalanceSheet } from "./tools/quickbooks.js";
 
 // ─── Tool Definitions ──────────────────────────────────────────────────────────
 
@@ -100,6 +101,25 @@ const TOOLS: Tool[] = [
   { name: "gemini_chat", description: "Have a multi-turn conversation with Google Gemini", inputSchema: { type: "object", properties: { messages: { type: "array", items: { type: "object", properties: { role: { type: "string", enum: ["user", "model"] }, content: { type: "string" } }, required: ["role", "content"] } }, model: { type: "string" }, system_instruction: { type: "string" } }, required: ["messages"] } },
   { name: "gemini_analyze_text", description: "Ask Gemini to analyze or transform a piece of text", inputSchema: { type: "object", properties: { text: { type: "string" }, task: { type: "string", description: "What to do with the text (e.g. 'summarize', 'translate to Spanish', 'extract action items')" }, model: { type: "string" } }, required: ["text", "task"] } },
 
+  // QuickBooks
+  { name: "qb_find_customer", description: "Find a QuickBooks customer by name", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "qb_create_customer", description: "Create a new QuickBooks customer", inputSchema: { type: "object", properties: { name: { type: "string" }, email: { type: "string" }, phone: { type: "string" }, company: { type: "string" } }, required: ["name"] } },
+  { name: "qb_update_customer", description: "Update an existing QuickBooks customer", inputSchema: { type: "object", properties: { customer_id: { type: "string" }, name: { type: "string" }, email: { type: "string" }, phone: { type: "string" }, company: { type: "string" } }, required: ["customer_id"] } },
+  { name: "qb_find_vendor", description: "Find a QuickBooks vendor by name", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "qb_create_vendor", description: "Create a new QuickBooks vendor", inputSchema: { type: "object", properties: { name: { type: "string" }, email: { type: "string" }, phone: { type: "string" }, company: { type: "string" } }, required: ["name"] } },
+  { name: "qb_find_invoice", description: "Find QuickBooks invoices", inputSchema: { type: "object", properties: { customer_name: { type: "string" }, invoice_number: { type: "string" }, max_results: { type: "number" } }, required: [] } },
+  { name: "qb_create_invoice", description: "Create a new QuickBooks invoice", inputSchema: { type: "object", properties: { customer_id: { type: "string" }, line_items: { type: "array", items: { type: "object", properties: { description: { type: "string" }, amount: { type: "number" }, quantity: { type: "number" } }, required: ["description", "amount"] } }, due_date: { type: "string" }, memo: { type: "string" } }, required: ["customer_id", "line_items"] } },
+  { name: "qb_send_invoice", description: "Send a QuickBooks invoice by email", inputSchema: { type: "object", properties: { invoice_id: { type: "string" }, email: { type: "string" } }, required: ["invoice_id", "email"] } },
+  { name: "qb_update_invoice", description: "Update a QuickBooks invoice", inputSchema: { type: "object", properties: { invoice_id: { type: "string" }, due_date: { type: "string" }, memo: { type: "string" } }, required: ["invoice_id"] } },
+  { name: "qb_void_invoice", description: "Void a QuickBooks invoice", inputSchema: { type: "object", properties: { invoice_id: { type: "string" } }, required: ["invoice_id"] } },
+  { name: "qb_create_expense", description: "Record a new expense in QuickBooks", inputSchema: { type: "object", properties: { amount: { type: "number" }, vendor_id: { type: "string" }, account_name: { type: "string" }, memo: { type: "string" }, payment_type: { type: "string", enum: ["Cash", "Check", "CreditCard"] } }, required: ["amount"] } },
+  { name: "qb_find_expenses", description: "Find recent expenses in QuickBooks", inputSchema: { type: "object", properties: { max_results: { type: "number" } }, required: [] } },
+  { name: "qb_create_payment", description: "Record a customer payment in QuickBooks", inputSchema: { type: "object", properties: { customer_id: { type: "string" }, amount: { type: "number" }, invoice_id: { type: "string" }, memo: { type: "string" } }, required: ["customer_id", "amount"] } },
+  { name: "qb_find_payments", description: "Find recent payments in QuickBooks", inputSchema: { type: "object", properties: { max_results: { type: "number" } }, required: [] } },
+  { name: "qb_profit_and_loss", description: "Get QuickBooks Profit & Loss report", inputSchema: { type: "object", properties: { start_date: { type: "string", description: "YYYY-MM-DD" }, end_date: { type: "string", description: "YYYY-MM-DD" } }, required: [] } },
+  { name: "qb_cash_flow", description: "Get QuickBooks Cash Flow report", inputSchema: { type: "object", properties: { start_date: { type: "string" }, end_date: { type: "string" } }, required: [] } },
+  { name: "qb_balance_sheet", description: "Get QuickBooks Balance Sheet report", inputSchema: { type: "object", properties: { as_of_date: { type: "string", description: "YYYY-MM-DD" } }, required: [] } },
+
   // iMessage
   { name: "imessage_send", description: "Send an iMessage or SMS via macOS Messages app", inputSchema: { type: "object", properties: { recipient: { type: "string" }, message: { type: "string" } }, required: ["recipient", "message"] } },
   { name: "imessage_get_recent_chats", description: "List recent chats from macOS Messages app", inputSchema: { type: "object", properties: { max_results: { type: "number" } }, required: [] } },
@@ -166,6 +186,23 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "gemini_send_prompt": return geminiSendPrompt(args as any);
     case "gemini_chat": return geminiChat(args as any);
     case "gemini_analyze_text": return geminiAnalyzeText(args as any);
+    case "qb_find_customer": return qbFindCustomer(args as any);
+    case "qb_create_customer": return qbCreateCustomer(args as any);
+    case "qb_update_customer": return qbUpdateCustomer(args as any);
+    case "qb_find_vendor": return qbFindVendor(args as any);
+    case "qb_create_vendor": return qbCreateVendor(args as any);
+    case "qb_find_invoice": return qbFindInvoice(args as any);
+    case "qb_create_invoice": return qbCreateInvoice(args as any);
+    case "qb_send_invoice": return qbSendInvoice(args as any);
+    case "qb_update_invoice": return qbUpdateInvoice(args as any);
+    case "qb_void_invoice": return qbVoidInvoice(args as any);
+    case "qb_create_expense": return qbCreateExpense(args as any);
+    case "qb_find_expenses": return qbFindExpenses(args as any);
+    case "qb_create_payment": return qbCreatePayment(args as any);
+    case "qb_find_payments": return qbFindPayments(args as any);
+    case "qb_profit_and_loss": return qbProfitAndLoss(args as any);
+    case "qb_cash_flow": return qbCashFlow(args as any);
+    case "qb_balance_sheet": return qbBalanceSheet(args as any);
     case "imessage_send": return imessageSend(args as any);
     case "imessage_get_recent_chats": return imessageGetRecentChats(args as any);
     case "http_request": return httpRequest(args as any);
