@@ -15,6 +15,9 @@ const CREDENTIALS_PATH = `${MCP_DIR}/credentials.json`;
 const TOKEN_PATH = process.env.GOOGLE_TOKEN_PATH_NOTARY ?? `${MCP_DIR}/token_notary.json`;
 
 function loadCredentials() {
+  if (process.env.GOOGLE_CREDENTIALS_JSON) {
+    return JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+  }
   if (!fs.existsSync(CREDENTIALS_PATH)) {
     throw new Error(`credentials.json not found at ${CREDENTIALS_PATH}`);
   }
