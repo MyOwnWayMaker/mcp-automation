@@ -96,6 +96,9 @@ export async function notarygadgetCreateSigning(args: {
   time: string;
   fee: number;
   location: string;
+  city?: string;
+  state?: string;
+  zip?: string;
   signer_names: string[];
   package_type?: string;
   notes?: string;
@@ -105,33 +108,72 @@ export async function notarygadgetCreateSigning(args: {
   try {
     await goToSignings(page);
 
-    // Click "New Signing" button
-    await page.click('#tdNewSigningBtn');
+    // Open new signing form via JS
+    await page.evaluate(() => (window as any).EditSigning('New'));
+    await page.waitForTimeout(3000);
+
+    // Customer: open selector popup, search, click match
+    await page.evaluate(() => (window as any).ShowCustomerSelector());
     await page.waitForTimeout(2000);
 
-    // Customer (title company / escrow company)
-    try {
-      await page.fill('#txtSearchCustomerSelector', args.customer);
-      await page.waitForTimeout(1000);
-      // Select first autocomplete result if it appears
-      const suggestion = page.locator('.DropDownOption, .autocomplete-option, [class*="DropDown"]:visible').first();
-      if (await suggestion.isVisible().catch(() => false)) await suggestion.click();
-    } catch { /* customer field may vary */ }
+    const searchInput = page.locator('#txtCustomerSelectorSearch, input[id*="CustomerSelector"]').first();
+    if (await searchInput.isVisible().catch(() => false)) {
+      await searchInput.fill(args.customer);
+      await page.waitForTimeout(1500);
+    }
+
+    const customerOption = page.locator('div[onclick*="SelectCustomer"], td[onclick*="SelectCustomer"]')
+      .filter({ hasText: new RegExp(args.customer.split(" ")[0], "i") }).first();
+    if (await customerOption.isVisible().catch(() => false)) {
+      await customerOption.click();
+    } else {
+      // Fallback: click first visible result containing customer text
+      await page.locator(`text=${args.customer.split(" ")[0]}`).first().click().catch(() => {});
+    }
+    await page.waitForTimeout(1000);
 
     // Signer names
     if (args.signer_names.length > 0) {
       const parts = args.signer_names[0].split(" ");
-      await page.fill('#txtSigner1First', parts[0] ?? "").catch(() => {});
-      await page.fill('#txtSigner1Last', parts.slice(1).join(" ") ?? "").catch(() => {});
+      await page.fill('#txtSigner1First', parts[0] ?? "");
+      await page.fill('#txtSigner1Last', parts.slice(1).join(" ") ?? "");
     }
 
-    // Address — fill street address in add1 field
-    await page.fill('#txtSigningAdd1', args.location).catch(() => {});
+    // Parse location into street / city / state / zip if not provided separately
+    // location can be "4328 Ben Ave, Studio City, CA 91604" or just a street address
+    let street = args.location;
+    let city = args.city ?? "";
+    let state = args.state ?? "CA";
+    let zip = args.zip ?? "";
 
-    // Date (expects MM/DD/YYYY format)
-    const dateParts = args.date.split("-"); // YYYY-MM-DD
+    if (!city) {
+      // Try to parse "Street, City, ST Zip" format
+      const parts = args.location.split(",").map(s => s.trim());
+      if (parts.length >= 2) {
+        street = parts[0];
+        const cityStateZip = parts.slice(1).join(", ");
+        // Match "City, CA 12345" or "City CA 12345"
+        const m = cityStateZip.match(/^(.+?)[,\s]+([A-Z]{2})[,\s]*(\d{5})?/);
+        if (m) {
+          city = m[1].trim();
+          state = m[2];
+          zip = m[3] ?? "";
+        } else {
+          city = cityStateZip.split(",")[0]?.trim() ?? cityStateZip;
+        }
+      }
+    }
+
+    await page.fill('#txtSigningAdd1', street);
+    await page.fill('#txtSigningCty', city).catch(() => {});
+    // State is a <select>
+    await page.selectOption('#txtSigningSt', state).catch(() => {});
+    if (zip) await page.fill('#txtSigningZp', zip).catch(() => {});
+
+    // Date (accepts MM/DD/YYYY; also handle YYYY-MM-DD input)
+    const dateParts = args.date.split("-");
     const formattedDate = dateParts.length === 3 ? `${dateParts[1]}/${dateParts[2]}/${dateParts[0]}` : args.date;
-    await page.fill('#txtSigningDate', formattedDate).catch(() => {});
+    await page.fill('#txtSigningDate', formattedDate);
 
     // Time — split into hour, minutes, AM/PM
     const timeParts = args.time.split(":");
@@ -141,28 +183,39 @@ export async function notarygadgetCreateSigning(args: {
       const ampm = hour >= 12 ? "PM" : "AM";
       if (hour > 12) hour -= 12;
       if (hour === 0) hour = 12;
-      await page.fill('#txtSigningHour', String(hour)).catch(() => {});
-      await page.fill('#txtSigningMinutes', minutes).catch(() => {});
-      await page.fill('#txtSigningAMPM', ampm).catch(() => {});
+      await page.fill('#txtSigningHour', String(hour));
+      await page.fill('#txtSigningMinutes', minutes);
+      await page.fill('#txtSigningAMPM', ampm);
     }
 
     // Fee
-    await page.fill('#txtSigningFee', String(args.fee)).catch(() => {});
+    await page.fill('#txtSigningFee', String(args.fee));
 
     // Loan type (package type)
     if (args.package_type) {
       await page.fill('#txtLoanType', args.package_type).catch(() => {});
     }
 
-    // Save — NotaryGadget uses div buttons with onclick
-    await page.click('div[onclick*="SaveSigning"], div[onclick*="AddSigning"], div:has-text("Save"), div:has-text("Add Signing")').catch(() => {});
-    await page.waitForTimeout(3000);
+    // Save via JS — same as clicking the Save button
+    await page.evaluate(() => (window as any).SaveSigning());
+    await page.waitForTimeout(5000);
+
+    // Verify: page should show a signing summary with the signer name
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    const saved = bodyText.toLowerCase().includes(args.signer_names[0]?.split(" ").pop()?.toLowerCase() ?? "");
+
+    if (!saved) {
+      return ok(
+        `⚠️ Signing may not have saved — could not confirm in NotaryGadget.\n` +
+        `Customer: ${args.customer} | Signer: ${args.signer_names.join(", ")} | Date: ${formattedDate} @ ${args.time} | Fee: $${args.fee}`
+      );
+    }
 
     return ok(
-      `Signing order created in NotaryGadget!\n` +
+      `✅ Signing created in NotaryGadget!\n` +
       `Customer: ${args.customer}\n` +
-      `Date: ${args.date} at ${args.time}\n` +
-      `Location: ${args.location}\n` +
+      `Date: ${formattedDate} at ${args.time}\n` +
+      `Location: ${street}${city ? `, ${city}` : ""}${state ? `, ${state}` : ""}${zip ? ` ${zip}` : ""}\n` +
       `Signers: ${args.signer_names.join(", ")}\n` +
       `Fee: $${args.fee}`
     );
