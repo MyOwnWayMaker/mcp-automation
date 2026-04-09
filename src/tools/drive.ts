@@ -17,8 +17,15 @@ export async function driveFindFile(args: {
   max_results?: number;
 }): Promise<CallToolResult> {
   const drive = await getDrive();
+
+  // If the query looks like plain text (no Drive query operators), convert it
+  const isDriveQuery = /\b(contains|=|!=|in|has|trashed|mimeType|parents|name|fullText)\b/.test(args.query);
+  const q = isDriveQuery
+    ? args.query
+    : `(name contains '${args.query.replace(/'/g, "\\'")}' or fullText contains '${args.query.replace(/'/g, "\\'")}') and trashed = false`;
+
   const res = await drive.files.list({
-    q: args.query,
+    q,
     pageSize: args.max_results ?? 10,
     fields: "files(id, name, mimeType, size, modifiedTime, webViewLink)",
   });
