@@ -285,6 +285,61 @@ if (PORT) {
 
   app.get("/health", (_req, res) => res.json({ status: "ok", tools: TOOLS.length }));
 
+  // QuickBooks OAuth callback — used during production auth flow
+  app.get("/qb-callback", async (req, res) => {
+    const code = req.query.code as string;
+    const realmId = req.query.realmId as string;
+    const error = req.query.error as string;
+
+    if (error) {
+      res.send(`<h2>QuickBooks auth error: ${error}</h2>`);
+      return;
+    }
+    if (!code || !realmId) {
+      res.send("<h2>Missing code or realmId</h2>");
+      return;
+    }
+
+    const clientId = process.env.QUICKBOOKS_CLIENT_ID!;
+    const clientSecret = process.env.QUICKBOOKS_CLIENT_SECRET!;
+    const redirectUri = `https://mcp-automation-production.up.railway.app/qb-callback`;
+    const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+    const tokenRes = await fetch("https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer", {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${basic}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+      }),
+    });
+
+    const tokens = await tokenRes.json() as any;
+    if (tokens.error) {
+      res.send(`<h2>Token exchange failed: ${tokens.error}</h2><pre>${JSON.stringify(tokens, null, 2)}</pre>`);
+      return;
+    }
+
+    const tokenData = {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expiry_date: Date.now() + tokens.expires_in * 1000,
+      realm_id: realmId,
+    };
+
+    res.send(`
+      <h2>QuickBooks Connected!</h2>
+      <p>Copy the token below and paste it into Railway as <strong>QUICKBOOKS_TOKEN_JSON</strong>:</p>
+      <textarea rows="10" cols="80" onclick="this.select()">${JSON.stringify(tokenData)}</textarea>
+      <p>After updating Railway, you can close this page.</p>
+    `);
+  });
+
   app.get("/diagnose", async (_req, res) => {
     const results: Record<string, string> = {};
 
