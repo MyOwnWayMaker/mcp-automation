@@ -59,7 +59,27 @@ export async function getGoogleAuthClient(): Promise<OAuth2Client> {
 
   oAuth2Client.setCredentials(token);
 
-  // Auto-refresh if expired (local only)
+  // Always refresh if the access token is expired or about to expire (within 60s).
+  // The refresh_token is permanent — this means Railway never needs a manual token update.
+  const isExpired = !token.access_token || (token.expiry_date && token.expiry_date < Date.now() + 60000);
+  if (isExpired && token.refresh_token) {
+    try {
+      const { credentials: fresh } = await oAuth2Client.refreshAccessToken();
+      oAuth2Client.setCredentials(fresh);
+      // Persist locally so the file stays fresh too
+      if (!process.env.GOOGLE_TOKEN_JSON) {
+        const tokenPath = path.resolve(TOKEN_PATH);
+        const existing = fs.existsSync(tokenPath)
+          ? JSON.parse(fs.readFileSync(tokenPath, "utf-8"))
+          : {};
+        fs.writeFileSync(tokenPath, JSON.stringify({ ...existing, ...fresh }));
+      }
+    } catch {
+      // Refresh failed — proceed anyway, googleapis may still recover
+    }
+  }
+
+  // Also save any future token refreshes locally
   if (!process.env.GOOGLE_TOKEN_JSON) {
     const tokenPath = path.resolve(TOKEN_PATH);
     oAuth2Client.on("tokens", (tokens) => {

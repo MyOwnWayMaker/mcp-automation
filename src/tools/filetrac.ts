@@ -3,6 +3,46 @@ import fs from "fs";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const SESSION_PATH = process.env.FILETRAC_SESSION_PATH || "/Users/hakielmcqueen/mcp-automation/filetrac_session.json";
+const COGNITO_CLIENT_ID = "1frtspmi2af7o8hqtfsfebrc6";
+const COGNITO_REGION = "us-east-1";
+
+/**
+ * Use the Cognito refresh token to silently get fresh access + id tokens.
+ * The refresh token is valid for 30 days — no user interaction needed.
+ */
+async function refreshCognitoTokens(
+  localStorage: Record<string, string>
+): Promise<Record<string, string>> {
+  const refreshKey = Object.keys(localStorage).find(k => k.endsWith(".refreshToken"));
+  const deviceKey  = Object.keys(localStorage).find(k => k.endsWith(".deviceKey"));
+  if (!refreshKey) throw new Error("No Cognito refresh token in session.");
+
+  const authParams: Record<string, string> = { REFRESH_TOKEN: localStorage[refreshKey] };
+  if (deviceKey) authParams.DEVICE_KEY = localStorage[deviceKey];
+
+  const res = await fetch(`https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-amz-json-1.1",
+      "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth",
+    },
+    body: JSON.stringify({
+      AuthFlow: "REFRESH_TOKEN_AUTH",
+      ClientId: COGNITO_CLIENT_ID,
+      AuthParameters: authParams,
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Cognito refresh failed: ${await res.text()}`);
+  const { AuthenticationResult: r } = await res.json() as any;
+
+  const updated = { ...localStorage };
+  const idKey     = Object.keys(updated).find(k => k.endsWith(".idToken"));
+  const accessKey = Object.keys(updated).find(k => k.endsWith(".accessToken"));
+  if (idKey)     updated[idKey]     = r.IdToken;
+  if (accessKey) updated[accessKey] = r.AccessToken;
+  return updated;
+}
 
 function ok(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -39,18 +79,28 @@ async function getFiletracPage(companyIndex = 0): Promise<{
     );
   }
 
+  // Proactively refresh Cognito tokens — access/id tokens expire every hour
+  // but refresh tokens last 30 days, so this is silent and automatic.
+  let localStorage = session.localStorage;
+  try {
+    localStorage = await refreshCognitoTokens(localStorage);
+  } catch {
+    // If refresh fails (refresh token also expired), proceed with existing tokens
+    // and let the auth check below catch it with a clear error
+  }
+
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   });
   const page = await context.newPage();
 
-  // Inject Cognito tokens
+  // Inject fresh Cognito tokens
   await page.goto("https://ftevolve.com");
   await page.waitForLoadState("domcontentloaded");
   await page.evaluate((ls: Record<string, string>) => {
     for (const [k, v] of Object.entries(ls)) window.localStorage.setItem(k, v);
-  }, session.localStorage);
+  }, localStorage);
   await page.reload();
   await page.waitForLoadState("networkidle");
   await page.waitForTimeout(4000);
@@ -64,7 +114,10 @@ async function getFiletracPage(companyIndex = 0): Promise<{
   const currentUrl = page.url();
   if (currentUrl.includes("/auth/")) {
     await browser.close();
-    throw new Error("FileTrac session expired. Re-run auth-filetrac.mjs to refresh.");
+    throw new Error(
+      "FileTrac Cognito refresh token has expired (30-day limit). " +
+      "Re-run: node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs"
+    );
   }
 
   // Click "See Jobs" for the requested company
