@@ -204,6 +204,18 @@ export async function notarygadgetCreateSigning(args: {
     const bodyText = await page.locator("body").innerText().catch(() => "");
     const saved = bodyText.toLowerCase().includes(args.signer_names[0]?.split(" ").pop()?.toLowerCase() ?? "");
 
+    // Calculate follow-up time (1 hour after signing)
+    const followUpTime = (() => {
+      try {
+        const [h, mRaw] = args.time.split(":");
+        const m = mRaw?.substring(0, 2) ?? "00";
+        const followUpHour = (parseInt(h) + 1) % 24;
+        const fh = followUpHour % 12 || 12;
+        const fampm = followUpHour >= 12 ? "PM" : "AM";
+        return `${fh}:${m} ${fampm}`;
+      } catch { return "1 hour after signing"; }
+    })();
+
     if (!saved) {
       return ok(
         `⚠️ Signing may not have saved — could not confirm in NotaryGadget.\n` +
@@ -217,7 +229,8 @@ export async function notarygadgetCreateSigning(args: {
       `Date: ${formattedDate} at ${args.time}\n` +
       `Location: ${street}${city ? `, ${city}` : ""}${state ? `, ${state}` : ""}${zip ? ` ${zip}` : ""}\n` +
       `Signers: ${args.signer_names.join(", ")}\n` +
-      `Fee: $${args.fee}`
+      `Fee: $${args.fee}\n\n` +
+      `📋 Follow-up at ${followUpTime}: Ask how many notarial acts were performed, then record them and send the invoice.`
     );
   } finally {
     await browser.close();
@@ -268,10 +281,31 @@ export async function notarygadgetCompleteSigning(args: {
     await page.evaluate(() => (window as any).SaveNotarialFees(''));
     await page.waitForTimeout(3000);
 
+    // Close the notarial acts modal and get back to signing summary
+    await page.evaluate(() => (window as any).CloseOperationWindow && (window as any).CloseOperationWindow());
+    await page.waitForTimeout(1000);
+
+    // Send the invoice automatically
+    await page.evaluate(() => (window as any).ShowInvoice('', 'Invoicing'));
+    await page.waitForTimeout(2000);
+    await page.evaluate(() => (window as any).CheckForUnsupportedEmailProvider('SendInvoice'));
+    await page.waitForTimeout(2000);
+
+    const toEmail = await page.inputValue('#txtEmailTo').catch(() => "");
+    const subject = await page.inputValue('#txtEmailSubject').catch(() => "");
+
+    await page.evaluate(() => (window as any).SendInvoice(false, undefined));
+    await page.waitForTimeout(3000);
+
+    const actsMsg = args.notarization_count > 0
+      ? `${args.notarization_count} notarial acts recorded.`
+      : `No notarial acts recorded.`;
+
     return ok(
-      args.notarization_count > 0
-        ? `✅ Notarial acts saved: ${args.notarization_count} acts recorded.`
-        : `✅ Notarial acts saved: marked as no notarial acts.`
+      `✅ Signing completed!\n` +
+      `${actsMsg}\n` +
+      `📧 Invoice emailed to: ${toEmail || "customer on file"}\n` +
+      `Subject: ${subject}`
     );
   } finally {
     await browser.close();
