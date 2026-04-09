@@ -25,6 +25,7 @@ import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
 import { notarygadgetCreateSigning, notarygadgetCompleteSigning, notarygadgetRecordPayment, notarygadgetGetSignings } from "./tools/notarygadget.js";
 import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense } from "./tools/filetrac.js";
+import { xactListAssignments, xactGetAssignment, xactUpdateDates, xactUpdateWorkflowStatus, xactAddNote, xactGetNotes } from "./tools/xactanalysis.js";
 import { qbFindCustomer, qbCreateCustomer, qbUpdateCustomer, qbFindVendor, qbCreateVendor, qbFindInvoice, qbCreateInvoice, qbSendInvoice, qbVoidInvoice, qbUpdateInvoice, qbCreateExpense, qbFindExpenses, qbCreatePayment, qbFindPayments, qbProfitAndLoss, qbCashFlow, qbBalanceSheet } from "./tools/quickbooks.js";
 
 // ─── Tool Definitions ──────────────────────────────────────────────────────────
@@ -110,6 +111,14 @@ const TOOLS: Tool[] = [
   { name: "notary_mark_email_read", description: "Mark a notary email as read after processing", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "notary_check_availability", description: "Check calendar availability and calculate travel time for a signing request", inputSchema: { type: "object", properties: { requested_date: { type: "string", description: "YYYY-MM-DD" }, requested_time: { type: "string", description: "HH:MM AM/PM" }, signing_address: { type: "string" }, estimated_duration_minutes: { type: "number" } }, required: ["requested_date", "requested_time", "signing_address"] } },
   { name: "notary_get_travel_time", description: "Calculate driving time between two addresses", inputSchema: { type: "object", properties: { origin: { type: "string" }, destination: { type: "string" } }, required: ["origin", "destination"] } },
+
+  // XactAnalysis
+  { name: "xact_list_assignments", description: "List XactAnalysis assignments (in_progress, returned, or all)", inputSchema: { type: "object", properties: { status: { type: "string", enum: ["in_progress", "returned", "all"] }, max_results: { type: "number" } }, required: [] } },
+  { name: "xact_get_assignment", description: "Get full detail for a XactAnalysis assignment by MFN code", inputSchema: { type: "object", properties: { mfn: { type: "string", description: "MFN code from the assignment URL (e.g. 06SSNJ3)" } }, required: ["mfn"] } },
+  { name: "xact_update_dates", description: "Update Customer Contacted and/or Site Inspected dates on a XactAnalysis assignment", inputSchema: { type: "object", properties: { mfn: { type: "string" }, customer_contacted_date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, site_inspected_date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, note: { type: "string", description: "Optional note to attach to the status update" } }, required: ["mfn"] } },
+  { name: "xact_update_workflow_status", description: "Set any workflow status date on a XactAnalysis assignment (customer_contacted, site_inspected, job_sold, job_started, job_not_sold)", inputSchema: { type: "object", properties: { mfn: { type: "string" }, status: { type: "string", enum: ["customer_contacted", "site_inspected", "job_sold", "job_started", "job_not_sold"] }, date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, time: { type: "string", description: "HH:MM in 24h format (optional, defaults to 09:00)" }, note: { type: "string" } }, required: ["mfn", "status", "date"] } },
+  { name: "xact_add_note", description: "Add a note to a XactAnalysis assignment", inputSchema: { type: "object", properties: { mfn: { type: "string" }, note: { type: "string" } }, required: ["mfn", "note"] } },
+  { name: "xact_get_notes", description: "Get all notes for a XactAnalysis assignment", inputSchema: { type: "object", properties: { mfn: { type: "string" } }, required: ["mfn"] } },
 
   // FileTrac
   { name: "filetrac_list_companies", description: "List all FileTrac linked companies and their job counts", inputSchema: { type: "object", properties: {}, required: [] } },
@@ -215,6 +224,12 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notary_mark_email_read": return notaryMarkEmailRead(args as any);
     case "notary_check_availability": return notaryCheckAvailability(args as any);
     case "notary_get_travel_time": return notaryGetTravelTime(args as any);
+    case "xact_list_assignments": return xactListAssignments(args as any);
+    case "xact_get_assignment": return xactGetAssignment(args as any);
+    case "xact_update_dates": return xactUpdateDates(args as any);
+    case "xact_update_workflow_status": return xactUpdateWorkflowStatus(args as any);
+    case "xact_add_note": return xactAddNote(args as any);
+    case "xact_get_notes": return xactGetNotes(args as any);
     case "filetrac_list_companies": return filetracListCompanies(args as any);
     case "filetrac_list_claims": return filetracListClaims(args as any);
     case "filetrac_get_claim": return filetracGetClaim(args as any);
