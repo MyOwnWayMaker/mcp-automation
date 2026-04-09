@@ -270,7 +270,7 @@ export async function notarygadgetRecordPayment(args: {
   signing_id?: string;
   amount: number;
   payment_date?: string;
-  payment_method?: string;
+  check_number?: string;
 }): Promise<CallToolResult> {
   const { browser, page } = await getPage();
 
@@ -279,31 +279,43 @@ export async function notarygadgetRecordPayment(args: {
 
     // Open the signing row
     if (args.signing_id) {
-      await page.locator(`#trSigning${args.signing_id}`).click();
+      const row = page.locator(`#trSigning${args.signing_id}`);
+      if (await row.count() === 0) return ok(`Signing ID ${args.signing_id} not found.`);
+      await row.click();
     } else {
-      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader)').first().click();
+      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader):not(#trTooManyOldUnpaidSignings)').first().click();
     }
     await page.waitForTimeout(2000);
 
-    // Look for payment button/section
-    await page.click('div[onclick*="Payment"], div[onclick*="RecordPayment"], div:has-text("Record Payment"), div:has-text("Enter Payment")').catch(() => {});
-    await page.waitForTimeout(1000);
+    // Open payments panel, then new payment form
+    await page.evaluate(() => (window as any).ShowSigningPayments());
+    await page.waitForTimeout(2000);
+    await page.evaluate(() => (window as any).EditPayment('New'));
+    await page.waitForTimeout(2000);
+
+    // Date (pre-filled with today; override if provided)
+    if (args.payment_date) {
+      // Accept YYYY-MM-DD or MM/DD/YYYY
+      const parts = args.payment_date.split("-");
+      const formatted = parts.length === 3 ? `${parts[1]}/${parts[2]}/${parts[0]}` : args.payment_date;
+      await page.fill('#txtSPmtDate', formatted);
+    }
 
     // Amount
-    await page.fill('#txtPaymentAmount, input[id*="PaymentAmount"], input[id*="Amount"]', String(args.amount)).catch(() => {});
+    await page.fill('#txtSPmtAmt', String(args.amount));
 
-    if (args.payment_date) {
-      await page.fill('#txtPaymentDate, input[id*="PaymentDate"]', args.payment_date).catch(() => {});
+    // Check number (optional)
+    if (args.check_number) {
+      await page.fill('#txtSPmtChkNo', args.check_number);
     }
 
-    if (args.payment_method) {
-      await page.selectOption('#txtPaymentMethod, select[id*="PaymentMethod"]', args.payment_method).catch(() => {});
-    }
+    // Save
+    await page.evaluate(() => (window as any).SavePayment('New'));
+    await page.waitForTimeout(3000);
 
-    await page.click('div[onclick*="Save"], div:has-text("Save")').catch(() => {});
-    await page.waitForTimeout(2000);
-
-    return ok(`Payment of $${args.amount} recorded${args.payment_date ? ` for ${args.payment_date}` : ""}.`);
+    return ok(
+      `✅ Payment of $${args.amount} recorded${args.payment_date ? ` for ${args.payment_date}` : ""}${args.check_number ? ` (Check #${args.check_number})` : ""}.`
+    );
   } finally {
     await browser.close();
   }
