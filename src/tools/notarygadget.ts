@@ -255,3 +255,98 @@ export async function notarygadgetRecordPayment(args: {
     await browser.close();
   }
 }
+
+export async function notarygadgetSendInvoice(args: {
+  signing_id?: string;
+  to_email?: string;
+  subject?: string;
+  body?: string;
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+
+  try {
+    await goToSignings(page);
+
+    // Open the target signing row
+    if (args.signing_id) {
+      const row = page.locator(`#trSigning${args.signing_id}`);
+      if (await row.count() === 0) return ok(`Signing ID ${args.signing_id} not found.`);
+      await row.click();
+    } else {
+      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader):not(#trTooManyOldUnpaidSignings)').first().click();
+    }
+    await page.waitForTimeout(2000);
+
+    // Open the invoice panel
+    await page.evaluate(() => (window as any).ShowInvoice('', 'Invoicing'));
+    await page.waitForTimeout(2000);
+
+    // Open the email invoice dialog
+    await page.evaluate(() => (window as any).CheckForUnsupportedEmailProvider('SendInvoice'));
+    await page.waitForTimeout(2000);
+
+    // Capture the pre-filled values before any overrides
+    const defaultTo = await page.inputValue('#txtEmailTo').catch(() => "");
+    const defaultSubject = await page.inputValue('#txtEmailSubject').catch(() => "");
+    const defaultBody = await page.evaluate(() => {
+      const el = document.getElementById('txtEmailBody') as HTMLTextAreaElement;
+      return el ? el.value : "";
+    }).catch(() => "");
+
+    // Apply overrides if provided
+    if (args.to_email) await page.fill('#txtEmailTo', args.to_email);
+    if (args.subject) await page.fill('#txtEmailSubject', args.subject);
+    if (args.body) {
+      await page.evaluate((txt: string) => {
+        const el = document.getElementById('txtEmailBody') as HTMLTextAreaElement;
+        if (el) el.value = txt;
+      }, args.body);
+    }
+
+    const finalTo = args.to_email ?? defaultTo;
+    const finalSubject = args.subject ?? defaultSubject;
+
+    // Click Send Invoice
+    await page.evaluate(() => (window as any).SendInvoice(false, undefined));
+    await page.waitForTimeout(3000);
+
+    return ok(
+      `✅ Invoice emailed successfully!\n` +
+      `To: ${finalTo}\n` +
+      `Subject: ${finalSubject}`
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+export async function notarygadgetDeleteSigning(args: {
+  signing_id: string;
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+
+  try {
+    await goToSignings(page);
+
+    const row = page.locator(`#trSigning${args.signing_id}`);
+    if (await row.count() === 0) return ok(`Signing ID ${args.signing_id} not found.`);
+
+    // Get signer name for confirmation message before deleting
+    const rowText = (await row.innerText().catch(() => "")).trim().replace(/\s+/g, " ").substring(0, 100);
+
+    await row.click();
+    await page.waitForTimeout(2000);
+
+    // Open the More menu and click Delete Signing to trigger confirmation dialog
+    await page.evaluate(() => (window as any).ConfirmDeleteSigning());
+    await page.waitForTimeout(1500);
+
+    // Confirm by clicking the Delete button (calls ChangeSigningStatus('Deleted'))
+    await page.evaluate(() => (window as any).ChangeSigningStatus('Deleted'));
+    await page.waitForTimeout(3000);
+
+    return ok(`✅ Signing ${args.signing_id} deleted.\nRow was: ${rowText}`);
+  } finally {
+    await browser.close();
+  }
+}

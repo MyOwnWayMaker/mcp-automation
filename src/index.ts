@@ -23,7 +23,7 @@ import { notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, no
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
-import { notarygadgetCreateSigning, notarygadgetCompleteSigning, notarygadgetRecordPayment, notarygadgetGetSignings } from "./tools/notarygadget.js";
+import { notarygadgetCreateSigning, notarygadgetCompleteSigning, notarygadgetRecordPayment, notarygadgetGetSignings, notarygadgetSendInvoice, notarygadgetDeleteSigning } from "./tools/notarygadget.js";
 import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense } from "./tools/filetrac.js";
 import { xactListAssignments, xactGetAssignment, xactUpdateDates, xactUpdateWorkflowStatus, xactAddNote, xactGetNotes } from "./tools/xactanalysis.js";
 import { qbFindCustomer, qbCreateCustomer, qbUpdateCustomer, qbFindVendor, qbCreateVendor, qbFindInvoice, qbCreateInvoice, qbSendInvoice, qbVoidInvoice, qbUpdateInvoice, qbCreateExpense, qbFindExpenses, qbCreatePayment, qbFindPayments, qbProfitAndLoss, qbCashFlow, qbBalanceSheet } from "./tools/quickbooks.js";
@@ -133,6 +133,8 @@ const TOOLS: Tool[] = [
   { name: "notarygadget_complete_signing", description: "Mark a signing as complete and record notarization count", inputSchema: { type: "object", properties: { signing_id: { type: "string" }, notarization_count: { type: "number" }, date_completed: { type: "string" }, notes: { type: "string" } }, required: ["notarization_count"] } },
   { name: "notarygadget_record_payment", description: "Record a payment received for a signing in NotaryGadget", inputSchema: { type: "object", properties: { signing_id: { type: "string" }, amount: { type: "number" }, payment_date: { type: "string" }, payment_method: { type: "string" } }, required: ["amount"] } },
   { name: "notarygadget_get_signings", description: "Get recent signing orders from NotaryGadget", inputSchema: { type: "object", properties: { max_results: { type: "number" }, status: { type: "string", enum: ["pending", "completed", "all"] } }, required: [] } },
+  { name: "notarygadget_send_invoice", description: "Email the invoice for a NotaryGadget signing to the customer", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (leave blank for most recent)" }, to_email: { type: "string", description: "Override recipient email (optional — uses customer email on file by default)" }, subject: { type: "string", description: "Override email subject (optional)" }, body: { type: "string", description: "Override email body (optional)" } }, required: [] } },
+  { name: "notarygadget_delete_signing", description: "Permanently delete a signing from NotaryGadget", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID to delete (required)" } }, required: ["signing_id"] } },
 
   // QuickBooks
   { name: "qb_find_customer", description: "Find a QuickBooks customer by name", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
@@ -240,6 +242,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notarygadget_complete_signing": return notarygadgetCompleteSigning(args as any);
     case "notarygadget_record_payment": return notarygadgetRecordPayment(args as any);
     case "notarygadget_get_signings": return notarygadgetGetSignings(args as any);
+    case "notarygadget_send_invoice": return notarygadgetSendInvoice(args as any);
+    case "notarygadget_delete_signing": return notarygadgetDeleteSigning(args as any);
     case "qb_find_customer": return qbFindCustomer(args as any);
     case "qb_create_customer": return qbCreateCustomer(args as any);
     case "qb_update_customer": return qbUpdateCustomer(args as any);
