@@ -226,7 +226,7 @@ export async function notarygadgetCreateSigning(args: {
 
 export async function notarygadgetCompleteSigning(args: {
   signing_id?: string;
-  notarization_count?: number;
+  notarization_count: number;
   date?: string;
 }): Promise<CallToolResult> {
   const { browser, page } = await getPage();
@@ -247,16 +247,14 @@ export async function notarygadgetCompleteSigning(args: {
     await page.evaluate(() => (window as any).EditNotarialFees());
     await page.waitForTimeout(2000);
 
-    const notarizationCount = args.notarization_count ?? 0;
-
-    if (notarizationCount > 0) {
+    if (args.notarization_count > 0) {
       // Override date if provided
       if (args.date) {
         const parts = args.date.split("-");
         const formatted = parts.length === 3 ? `${parts[1]}/${parts[2]}/${parts[0]}` : args.date;
         await page.fill('#txtNotarialDate1', formatted);
       }
-      await page.fill('#txtNotarialActs1', String(notarizationCount));
+      await page.fill('#txtNotarialActs1', String(args.notarization_count));
       // Amount per act is pre-filled from account settings ($15.00) — leave as-is
     } else {
       // Check "I did not have any notarial acts for this signing"
@@ -271,8 +269,8 @@ export async function notarygadgetCompleteSigning(args: {
     await page.waitForTimeout(3000);
 
     return ok(
-      notarizationCount > 0
-        ? `✅ Notarial acts saved: ${notarizationCount} acts recorded.`
+      args.notarization_count > 0
+        ? `✅ Notarial acts saved: ${args.notarization_count} acts recorded.`
         : `✅ Notarial acts saved: marked as no notarial acts.`
     );
   } finally {
