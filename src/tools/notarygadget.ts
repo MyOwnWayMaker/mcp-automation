@@ -227,40 +227,102 @@ export async function notarygadgetCreateSigning(args: {
 export async function notarygadgetCompleteSigning(args: {
   signing_id?: string;
   notarization_count: number;
-  date_completed?: string;
-  notes?: string;
+  date?: string;
 }): Promise<CallToolResult> {
   const { browser, page } = await getPage();
 
   try {
     await goToSignings(page);
 
-    // Open the signing row
     if (args.signing_id) {
       const row = page.locator(`#trSigning${args.signing_id}`);
+      if (await row.count() === 0) return ok(`Signing ID ${args.signing_id} not found.`);
       await row.click();
     } else {
-      // Click first signing row
-      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader)').first().click();
+      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader):not(#trTooManyOldUnpaidSignings)').first().click();
     }
     await page.waitForTimeout(2000);
 
-    // Look for complete/status button
-    await page.click('div[onclick*="Complete"], div[onclick*="MarkComplete"], div:has-text("Mark Complete"), div:has-text("Complete Signing")').catch(() => {});
-    await page.waitForTimeout(1000);
-
-    // Notarization count
-    await page.fill('#txtNotarizationCount, input[id*="Notariz"], input[id*="notariz"]', String(args.notarization_count)).catch(() => {});
-
-    if (args.date_completed) {
-      await page.fill('#txtCompletedDate, input[id*="CompletedDate"], input[id*="DateCompleted"]', args.date_completed).catch(() => {});
-    }
-
-    // Save
-    await page.click('div[onclick*="Save"], div:has-text("Save")').catch(() => {});
+    // Open notarial acts form
+    await page.evaluate(() => (window as any).EditNotarialFees());
     await page.waitForTimeout(2000);
 
-    return ok(`Signing marked complete. Notarizations recorded: ${args.notarization_count}`);
+    if (args.notarization_count > 0) {
+      // Override date if provided
+      if (args.date) {
+        const parts = args.date.split("-");
+        const formatted = parts.length === 3 ? `${parts[1]}/${parts[2]}/${parts[0]}` : args.date;
+        await page.fill('#txtNotarialDate1', formatted);
+      }
+      await page.fill('#txtNotarialActs1', String(args.notarization_count));
+      // Amount per act is pre-filled from account settings ($15.00) — leave as-is
+    } else {
+      // Check "I did not have any notarial acts for this signing"
+      await page.evaluate(() => {
+        const div = document.getElementById('divchkZeroNotarialFees');
+        if (div) div.click();
+      });
+      await page.waitForTimeout(500);
+    }
+
+    await page.evaluate(() => (window as any).SaveNotarialFees(''));
+    await page.waitForTimeout(3000);
+
+    return ok(
+      args.notarization_count > 0
+        ? `✅ Notarial acts saved: ${args.notarization_count} acts recorded.`
+        : `✅ Notarial acts saved: marked as no notarial acts.`
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+export async function notarygadgetEnterMileage(args: {
+  signing_id?: string;
+  miles?: number;
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+
+  try {
+    await goToSignings(page);
+
+    if (args.signing_id) {
+      const row = page.locator(`#trSigning${args.signing_id}`);
+      if (await row.count() === 0) return ok(`Signing ID ${args.signing_id} not found.`);
+      await row.click();
+    } else {
+      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader):not(#trTooManyOldUnpaidSignings)').first().click();
+    }
+    await page.waitForTimeout(2000);
+
+    await page.evaluate(() => (window as any).EditSigningMileage());
+    await page.waitForTimeout(2000);
+
+    const miles = args.miles ?? 0;
+
+    if (miles > 0) {
+      await page.fill('#txtMileage1', String(miles));
+    } else {
+      // Check "I did not have any mileage for this signing"
+      await page.evaluate(() => {
+        const chk = document.getElementById('chkNoMileage') as HTMLInputElement;
+        if (chk && !chk.checked) {
+          chk.checked = true;
+          (window as any).SelectNoMileage();
+        }
+      });
+      await page.waitForTimeout(500);
+    }
+
+    await page.evaluate(() => (window as any).SaveMileage());
+    await page.waitForTimeout(3000);
+
+    return ok(
+      miles > 0
+        ? `✅ Mileage saved: ${miles} miles recorded.`
+        : `✅ Mileage saved: marked as no mileage for this signing.`
+    );
   } finally {
     await browser.close();
   }
