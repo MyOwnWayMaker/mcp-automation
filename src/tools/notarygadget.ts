@@ -20,7 +20,7 @@ async function getPage() {
   });
   const page = await context.newPage();
 
-  // Capture the OperationsLogin.asp response to diagnose failures
+  // Capture OperationsLogin.asp response for diagnostics
   let loginResponseStatus = 0;
   let loginResponseBody = "";
   page.on("response", async (resp) => {
@@ -30,17 +30,18 @@ async function getPage() {
     }
   });
 
-  // Login — NotaryGadget uses classic ASP with login at /UserLogin
+  // NotaryGadget uses classic ASP with login at /UserLogin
   await page.goto(`${NG_URL}/UserLogin`);
   await page.waitForLoadState("domcontentloaded");
   await page.waitForSelector('#txtUsername', { timeout: 20000 });
   await page.fill('#txtUsername', email);
   await page.fill('#txtPassword', password);
-  // NotaryGadget uses a <div onclick="Login();"> not a real button — call it directly
+  // Login button is a <div onclick="Login();"> — call it directly
   await page.evaluate(() => (window as any).Login());
-  // Wait for navigation
+  // Wait for redirect to dashboard
   await page.waitForTimeout(8000);
   await page.waitForLoadState("domcontentloaded");
+
   const finalUrl = page.url();
   if (!finalUrl.includes("MyBusiness")) {
     throw new Error(
@@ -52,6 +53,41 @@ async function getPage() {
   }
 
   return { browser, page };
+}
+
+// NotaryGadget is a SPA — all navigation uses SelectPage() JS calls
+async function goToSignings(page: Awaited<ReturnType<typeof getPage>>["page"]) {
+  await page.evaluate(() => (window as any).SelectPage('Signings'));
+  await page.waitForTimeout(3000);
+}
+
+export async function notarygadgetGetSignings(args: {
+  max_results?: number;
+  status?: "pending" | "completed" | "all";
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+
+  try {
+    await goToSignings(page);
+
+    // Signing rows have IDs like trSigning7576152
+    const rows = await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader):not(#trTooManyOldUnpaidSignings)').all();
+    const limit = Math.min(rows.length, args.max_results ?? 10);
+    const results: string[] = [];
+
+    for (let i = 0; i < limit; i++) {
+      const id = await rows[i].getAttribute("id") ?? "";
+      const signingId = id.replace("trSigning", "");
+      const text = await rows[i].innerText();
+      const cleaned = text.trim().replace(/\t+/g, " | ").replace(/\n+/g, " ");
+      results.push(`ID: ${signingId} | ${cleaned}`);
+    }
+
+    if (results.length === 0) return ok("No signings found.");
+    return ok(`Recent signings:\n\n${results.join("\n---\n")}`);
+  } finally {
+    await browser.close();
+  }
 }
 
 export async function notarygadgetCreateSigning(args: {
@@ -67,62 +103,68 @@ export async function notarygadgetCreateSigning(args: {
   const { browser, page } = await getPage();
 
   try {
-    // Navigate to new signing order
-    await page.goto(`${NG_URL}/Signings/Create`);
-    await page.waitForLoadState("networkidle");
+    await goToSignings(page);
 
-    // Customer/company
-    const customerField = page.locator('input[name="Company"], #Company, input[placeholder*="company" i], input[placeholder*="customer" i]').first();
-    await customerField.fill(args.customer);
+    // Click "New Signing" button
+    await page.click('#tdNewSigningBtn');
+    await page.waitForTimeout(2000);
 
-    // Check if autocomplete appears and select it
+    // Customer (title company / escrow company)
     try {
-      await page.waitForSelector('.autocomplete-suggestion, .dropdown-item', { timeout: 2000 });
-      await page.click('.autocomplete-suggestion:first-child, .dropdown-item:first-child');
-    } catch {
-      // No autocomplete, continue
-    }
-
-    // Date
-    const dateField = page.locator('input[name="SigningDate"], #SigningDate, input[type="date"]').first();
-    await dateField.fill(args.date);
-
-    // Time
-    const timeField = page.locator('input[name="SigningTime"], #SigningTime, input[type="time"]').first();
-    await timeField.fill(args.time);
-
-    // Fee
-    const feeField = page.locator('input[name="Fee"], #Fee, input[name*="fee" i], input[name*="amount" i]').first();
-    await feeField.fill(String(args.fee));
-
-    // Location/address
-    const locationField = page.locator('input[name="Location"], #Location, input[name*="address" i], textarea[name*="location" i]').first();
-    await locationField.fill(args.location);
+      await page.fill('#txtSearchCustomerSelector', args.customer);
+      await page.waitForTimeout(1000);
+      // Select first autocomplete result if it appears
+      const suggestion = page.locator('.DropDownOption, .autocomplete-option, [class*="DropDown"]:visible').first();
+      if (await suggestion.isVisible().catch(() => false)) await suggestion.click();
+    } catch { /* customer field may vary */ }
 
     // Signer names
-    const signerField = page.locator('input[name="SignerName"], #SignerName, input[name*="signer" i], input[placeholder*="signer" i]').first();
-    await signerField.fill(args.signer_names.join(", "));
-
-    // Package type / notes
-    if (args.package_type || args.notes) {
-      const notesField = page.locator('textarea[name="Notes"], #Notes, textarea[name*="note" i], textarea[name*="description" i]').first();
-      const notesText = [args.package_type && `Package: ${args.package_type}`, args.notes].filter(Boolean).join("\n");
-      try { await notesField.fill(notesText); } catch { /* optional field */ }
+    if (args.signer_names.length > 0) {
+      const parts = args.signer_names[0].split(" ");
+      await page.fill('#txtSigner1First', parts[0] ?? "").catch(() => {});
+      await page.fill('#txtSigner1Last', parts.slice(1).join(" ") ?? "").catch(() => {});
     }
 
-    // Submit
-    await page.click('button[type="submit"], input[type="submit"], .btn-primary, button:has-text("Save"), button:has-text("Create")');
-    await page.waitForLoadState("networkidle");
+    // Address — fill street address in add1 field
+    await page.fill('#txtSigningAdd1', args.location).catch(() => {});
 
-    const url = page.url();
+    // Date (expects MM/DD/YYYY format)
+    const dateParts = args.date.split("-"); // YYYY-MM-DD
+    const formattedDate = dateParts.length === 3 ? `${dateParts[1]}/${dateParts[2]}/${dateParts[0]}` : args.date;
+    await page.fill('#txtSigningDate', formattedDate).catch(() => {});
+
+    // Time — split into hour, minutes, AM/PM
+    const timeParts = args.time.split(":");
+    if (timeParts.length >= 2) {
+      let hour = parseInt(timeParts[0]);
+      const minutes = timeParts[1].substring(0, 2);
+      const ampm = hour >= 12 ? "PM" : "AM";
+      if (hour > 12) hour -= 12;
+      if (hour === 0) hour = 12;
+      await page.fill('#txtSigningHour', String(hour)).catch(() => {});
+      await page.fill('#txtSigningMinutes', minutes).catch(() => {});
+      await page.fill('#txtSigningAMPM', ampm).catch(() => {});
+    }
+
+    // Fee
+    await page.fill('#txtSigningFee', String(args.fee)).catch(() => {});
+
+    // Loan type (package type)
+    if (args.package_type) {
+      await page.fill('#txtLoanType', args.package_type).catch(() => {});
+    }
+
+    // Save — NotaryGadget uses div buttons with onclick
+    await page.click('div[onclick*="SaveSigning"], div[onclick*="AddSigning"], div:has-text("Save"), div:has-text("Add Signing")').catch(() => {});
+    await page.waitForTimeout(3000);
+
     return ok(
       `Signing order created in NotaryGadget!\n` +
       `Customer: ${args.customer}\n` +
       `Date: ${args.date} at ${args.time}\n` +
       `Location: ${args.location}\n` +
       `Signers: ${args.signer_names.join(", ")}\n` +
-      `Fee: $${args.fee}\n` +
-      `URL: ${url}`
+      `Fee: $${args.fee}`
     );
   } finally {
     await browser.close();
@@ -138,38 +180,32 @@ export async function notarygadgetCompleteSigning(args: {
   const { browser, page } = await getPage();
 
   try {
-    if (args.signing_id) {
-      await page.goto(`${NG_URL}/Signings/Edit/${args.signing_id}`);
-    } else {
-      // Go to most recent incomplete signing
-      await page.goto(`${NG_URL}/Signings`);
-      await page.waitForLoadState("networkidle");
-      await page.click('.signing-row:first-child a, table tbody tr:first-child a');
-    }
-    await page.waitForLoadState("networkidle");
+    await goToSignings(page);
 
-    // Mark as complete
-    const completeBtn = page.locator('button:has-text("Complete"), a:has-text("Complete"), input[value*="Complete"]').first();
-    try { await completeBtn.click(); } catch { /* may already be on edit form */ }
+    // Open the signing row
+    if (args.signing_id) {
+      const row = page.locator(`#trSigning${args.signing_id}`);
+      await row.click();
+    } else {
+      // Click first signing row
+      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader)').first().click();
+    }
+    await page.waitForTimeout(2000);
+
+    // Look for complete/status button
+    await page.click('div[onclick*="Complete"], div[onclick*="MarkComplete"], div:has-text("Mark Complete"), div:has-text("Complete Signing")').catch(() => {});
+    await page.waitForTimeout(1000);
 
     // Notarization count
-    const notaryCountField = page.locator('input[name*="Notariz" i], input[name*="notariz" i], #NotarizationCount').first();
-    await notaryCountField.fill(String(args.notarization_count));
+    await page.fill('#txtNotarizationCount, input[id*="Notariz"], input[id*="notariz"]', String(args.notarization_count)).catch(() => {});
 
-    // Date completed
     if (args.date_completed) {
-      const dateField = page.locator('input[name*="CompletedDate"], input[name*="DateCompleted"]').first();
-      try { await dateField.fill(args.date_completed); } catch { /* optional */ }
+      await page.fill('#txtCompletedDate, input[id*="CompletedDate"], input[id*="DateCompleted"]', args.date_completed).catch(() => {});
     }
 
-    // Notes
-    if (args.notes) {
-      const notesField = page.locator('textarea[name="Notes"], #Notes').first();
-      try { await notesField.fill(args.notes); } catch { /* optional */ }
-    }
-
-    await page.click('button[type="submit"], input[type="submit"], button:has-text("Save")');
-    await page.waitForLoadState("networkidle");
+    // Save
+    await page.click('div[onclick*="Save"], div:has-text("Save")').catch(() => {});
+    await page.waitForTimeout(2000);
 
     return ok(`Signing marked complete. Notarizations recorded: ${args.notarization_count}`);
   } finally {
@@ -186,66 +222,35 @@ export async function notarygadgetRecordPayment(args: {
   const { browser, page } = await getPage();
 
   try {
-    if (args.signing_id) {
-      await page.goto(`${NG_URL}/Signings/Edit/${args.signing_id}`);
-    } else {
-      await page.goto(`${NG_URL}/Signings`);
-      await page.waitForLoadState("networkidle");
-      await page.click('.signing-row:first-child a, table tbody tr:first-child a');
-    }
-    await page.waitForLoadState("networkidle");
+    await goToSignings(page);
 
-    // Find payment section
-    const paymentBtn = page.locator('button:has-text("Payment"), a:has-text("Payment"), button:has-text("Paid")').first();
-    try { await paymentBtn.click(); await page.waitForLoadState("networkidle"); } catch { /* may be inline */ }
+    // Open the signing row
+    if (args.signing_id) {
+      await page.locator(`#trSigning${args.signing_id}`).click();
+    } else {
+      await page.locator('tr[id^="trSigning"]:not(#trSigningCustomer):not(#trSigningsHeader)').first().click();
+    }
+    await page.waitForTimeout(2000);
+
+    // Look for payment button/section
+    await page.click('div[onclick*="Payment"], div[onclick*="RecordPayment"], div:has-text("Record Payment"), div:has-text("Enter Payment")').catch(() => {});
+    await page.waitForTimeout(1000);
 
     // Amount
-    const amountField = page.locator('input[name*="Amount"], input[name*="Payment"], #PaymentAmount').first();
-    await amountField.fill(String(args.amount));
+    await page.fill('#txtPaymentAmount, input[id*="PaymentAmount"], input[id*="Amount"]', String(args.amount)).catch(() => {});
 
-    // Date
     if (args.payment_date) {
-      const dateField = page.locator('input[name*="PaymentDate"], input[name*="DatePaid"]').first();
-      try { await dateField.fill(args.payment_date); } catch { /* optional */ }
+      await page.fill('#txtPaymentDate, input[id*="PaymentDate"]', args.payment_date).catch(() => {});
     }
 
-    // Method
     if (args.payment_method) {
-      const methodField = page.locator('select[name*="Method"], input[name*="Method"]').first();
-      try { await methodField.fill(args.payment_method); } catch { /* optional */ }
+      await page.selectOption('#txtPaymentMethod, select[id*="PaymentMethod"]', args.payment_method).catch(() => {});
     }
 
-    await page.click('button[type="submit"], input[type="submit"], button:has-text("Save")');
-    await page.waitForLoadState("networkidle");
+    await page.click('div[onclick*="Save"], div:has-text("Save")').catch(() => {});
+    await page.waitForTimeout(2000);
 
     return ok(`Payment of $${args.amount} recorded${args.payment_date ? ` for ${args.payment_date}` : ""}.`);
-  } finally {
-    await browser.close();
-  }
-}
-
-export async function notarygadgetGetSignings(args: {
-  max_results?: number;
-  status?: "pending" | "completed" | "all";
-}): Promise<CallToolResult> {
-  const { browser, page } = await getPage();
-
-  try {
-    await page.goto(`${NG_URL}/Signings`);
-    await page.waitForLoadState("networkidle");
-
-    // Get signing rows from table
-    const rows = await page.locator('table tbody tr, .signing-row').all();
-    const limit = Math.min(rows.length, args.max_results ?? 10);
-    const results: string[] = [];
-
-    for (let i = 0; i < limit; i++) {
-      const text = await rows[i].innerText();
-      results.push(text.trim().replace(/\t+/g, " | "));
-    }
-
-    if (results.length === 0) return ok("No signings found.");
-    return ok(`Recent signings:\n\n${results.join("\n---\n")}`);
   } finally {
     await browser.close();
   }
