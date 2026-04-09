@@ -24,6 +24,7 @@ import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspot
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
 import { notarygadgetCreateSigning, notarygadgetCompleteSigning, notarygadgetRecordPayment, notarygadgetGetSignings } from "./tools/notarygadget.js";
+import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense } from "./tools/filetrac.js";
 import { qbFindCustomer, qbCreateCustomer, qbUpdateCustomer, qbFindVendor, qbCreateVendor, qbFindInvoice, qbCreateInvoice, qbSendInvoice, qbVoidInvoice, qbUpdateInvoice, qbCreateExpense, qbFindExpenses, qbCreatePayment, qbFindPayments, qbProfitAndLoss, qbCashFlow, qbBalanceSheet } from "./tools/quickbooks.js";
 
 // ─── Tool Definitions ──────────────────────────────────────────────────────────
@@ -109,6 +110,14 @@ const TOOLS: Tool[] = [
   { name: "notary_mark_email_read", description: "Mark a notary email as read after processing", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "notary_check_availability", description: "Check calendar availability and calculate travel time for a signing request", inputSchema: { type: "object", properties: { requested_date: { type: "string", description: "YYYY-MM-DD" }, requested_time: { type: "string", description: "HH:MM AM/PM" }, signing_address: { type: "string" }, estimated_duration_minutes: { type: "number" } }, required: ["requested_date", "requested_time", "signing_address"] } },
   { name: "notary_get_travel_time", description: "Calculate driving time between two addresses", inputSchema: { type: "object", properties: { origin: { type: "string" }, destination: { type: "string" } }, required: ["origin", "destination"] } },
+
+  // FileTrac
+  { name: "filetrac_list_companies", description: "List all FileTrac linked companies and their job counts", inputSchema: { type: "object", properties: {}, required: [] } },
+  { name: "filetrac_list_claims", description: "List open claims from FileTrac for a company (company_index: 0=Accelerated, 1=Premier Claims, 2=Stewardship, 3=US Claim Solutions)", inputSchema: { type: "object", properties: { company_index: { type: "number", description: "0-based index of the company (default 1 = Premier Claims)" }, max_results: { type: "number" } }, required: [] } },
+  { name: "filetrac_get_claim", description: "Get full details for a specific FileTrac claim by claim ID", inputSchema: { type: "object", properties: { claim_id: { type: "string", description: "Claim ID from URL (claimID=XXXXX)" }, company_index: { type: "number" } }, required: ["claim_id"] } },
+  { name: "filetrac_update_claim_dates", description: "Update first contact date, inspection date, and/or claim complete date on a FileTrac claim", inputSchema: { type: "object", properties: { claim_id: { type: "string", description: "Claim ID from claimView URL" }, first_contact_date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, inspection_date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, completed_date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, company_index: { type: "number" } }, required: ["claim_id"] } },
+  { name: "filetrac_add_note", description: "Add a diary note to a FileTrac claim", inputSchema: { type: "object", properties: { file_number: { type: "string", description: "8-digit FileTrac file number (e.g. 81030471)" }, note: { type: "string" }, category: { type: "string", description: "Note category (e.g. 'Inspection Scheduled', 'Update Contact/Inspection')" }, visible_to_client: { type: "boolean" }, company_index: { type: "number" } }, required: ["file_number", "note"] } },
+  { name: "filetrac_submit_time_expense", description: "Submit time and/or expense entries to a FileTrac claim", inputSchema: { type: "object", properties: { file_number: { type: "string", description: "8-digit FileTrac file number" }, date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, hours: { type: "number" }, service_notes: { type: "string" }, expense_amount: { type: "number" }, expense_description: { type: "string" }, company_index: { type: "number" } }, required: ["file_number"] } },
 
   // NotaryGadget
   { name: "notarygadget_create_signing", description: "Create a new signing order in NotaryGadget", inputSchema: { type: "object", properties: { customer: { type: "string", description: "Company name (e.g. Pickford Escrow)" }, date: { type: "string", description: "YYYY-MM-DD" }, time: { type: "string", description: "HH:MM" }, fee: { type: "number", description: "Fee amount (e.g. 150, 250, 75)" }, location: { type: "string", description: "Full signing address" }, signer_names: { type: "array", items: { type: "string" } }, package_type: { type: "string", description: "e.g. Seller's package, Buyer's package, Single document" }, notes: { type: "string" } }, required: ["customer", "date", "time", "fee", "location", "signer_names"] } },
@@ -206,6 +215,12 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notary_mark_email_read": return notaryMarkEmailRead(args as any);
     case "notary_check_availability": return notaryCheckAvailability(args as any);
     case "notary_get_travel_time": return notaryGetTravelTime(args as any);
+    case "filetrac_list_companies": return filetracListCompanies(args as any);
+    case "filetrac_list_claims": return filetracListClaims(args as any);
+    case "filetrac_get_claim": return filetracGetClaim(args as any);
+    case "filetrac_update_claim_dates": return filetracUpdateClaimDates(args as any);
+    case "filetrac_add_note": return filetracAddNote(args as any);
+    case "filetrac_submit_time_expense": return filetracSubmitTimeExpense(args as any);
     case "notarygadget_create_signing": return notarygadgetCreateSigning(args as any);
     case "notarygadget_complete_signing": return notarygadgetCompleteSigning(args as any);
     case "notarygadget_record_payment": return notarygadgetRecordPayment(args as any);

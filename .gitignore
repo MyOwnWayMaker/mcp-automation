@@ -5,5 +5,7 @@ credentials.json
 token.json
 quickbooks_token.json
 token_notary.json
+filetrac_cookies.json
+xactanalysis_cookies.json
 .DS_Store
 gh
