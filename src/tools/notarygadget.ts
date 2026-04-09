@@ -42,12 +42,12 @@ async function getPage() {
   await page.waitForTimeout(8000);
   await page.waitForLoadState("domcontentloaded");
   const finalUrl = page.url();
-  if (!finalUrl.includes("MyBusiness") && !finalUrl.includes(".asp#")) {
+  if (!finalUrl.includes("MyBusiness")) {
     throw new Error(
       `NotaryGadget login failed.\n` +
       `Landed on: ${finalUrl}\n` +
       `OperationsLogin status: ${loginResponseStatus || "no response (IP may be blocked)"}\n` +
-      `Server response: ${loginResponseBody.substring(0, 200) || "none"}`
+      `Server response: ${loginResponseBody.substring(0, 300) || "none"}`
     );
   }
 
