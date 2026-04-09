@@ -28,13 +28,14 @@ async function getPage() {
   await page.fill('#txtPassword', password);
   // NotaryGadget uses a <div onclick="Login();"> not a real button — call it directly
   await page.evaluate(() => (window as any).Login());
-  // Wait up to 30s for redirect to the logged-in dashboard
-  await page.waitForURL(url => url.href.includes("MyBusiness") || url.href.includes(".asp#"), { timeout: 30000 });
+  // Wait for navigation — capture wherever we end up for diagnostics
+  await page.waitForTimeout(8000);
   await page.waitForLoadState("domcontentloaded");
-  // Confirm we're actually logged in
   const finalUrl = page.url();
-  if (finalUrl.includes("UserLogin") || finalUrl === `${NG_URL}/` || finalUrl === `${NG_URL}`) {
-    throw new Error(`NotaryGadget login failed — landed on: ${finalUrl}. Check credentials or IP block.`);
+  if (!finalUrl.includes("MyBusiness") && !finalUrl.includes(".asp#")) {
+    // Grab page text to help diagnose the failure
+    const bodySnippet = (await page.locator("body").innerText().catch(() => "")).substring(0, 300);
+    throw new Error(`NotaryGadget login failed. Landed on: ${finalUrl}\nPage: ${bodySnippet}`);
   }
 
   return { browser, page };
