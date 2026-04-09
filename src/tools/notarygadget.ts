@@ -20,6 +20,16 @@ async function getPage() {
   });
   const page = await context.newPage();
 
+  // Capture the OperationsLogin.asp response to diagnose failures
+  let loginResponseStatus = 0;
+  let loginResponseBody = "";
+  page.on("response", async (resp) => {
+    if (resp.url().includes("OperationsLogin")) {
+      loginResponseStatus = resp.status();
+      loginResponseBody = await resp.text().catch(() => "");
+    }
+  });
+
   // Login — NotaryGadget uses classic ASP with login at /UserLogin
   await page.goto(`${NG_URL}/UserLogin`);
   await page.waitForLoadState("domcontentloaded");
@@ -28,14 +38,17 @@ async function getPage() {
   await page.fill('#txtPassword', password);
   // NotaryGadget uses a <div onclick="Login();"> not a real button — call it directly
   await page.evaluate(() => (window as any).Login());
-  // Wait for navigation — capture wherever we end up for diagnostics
+  // Wait for navigation
   await page.waitForTimeout(8000);
   await page.waitForLoadState("domcontentloaded");
   const finalUrl = page.url();
   if (!finalUrl.includes("MyBusiness") && !finalUrl.includes(".asp#")) {
-    // Grab page text to help diagnose the failure
-    const bodySnippet = (await page.locator("body").innerText().catch(() => "")).substring(0, 300);
-    throw new Error(`NotaryGadget login failed. Landed on: ${finalUrl}\nPage: ${bodySnippet}`);
+    throw new Error(
+      `NotaryGadget login failed.\n` +
+      `Landed on: ${finalUrl}\n` +
+      `OperationsLogin status: ${loginResponseStatus || "no response (IP may be blocked)"}\n` +
+      `Server response: ${loginResponseBody.substring(0, 200) || "none"}`
+    );
   }
 
   return { browser, page };
