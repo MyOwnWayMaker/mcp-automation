@@ -285,6 +285,52 @@ if (PORT) {
 
   app.get("/health", (_req, res) => res.json({ status: "ok", tools: TOOLS.length }));
 
+  app.get("/diagnose", async (_req, res) => {
+    const results: Record<string, string> = {};
+
+    // Check which env vars are present
+    const vars = [
+      "GOOGLE_CREDENTIALS_JSON", "GOOGLE_TOKEN_JSON", "GOOGLE_NOTARY_TOKEN_JSON",
+      "QUICKBOOKS_TOKEN_JSON", "QUICKBOOKS_CLIENT_ID", "QUICKBOOKS_CLIENT_SECRET",
+      "NOTION_TOKEN", "HUBSPOT_TOKEN", "GOOGLE_AI_API_KEY",
+      "NOTARYGADGET_EMAIL", "NOTARYGADGET_PASSWORD",
+      "GOOGLE_MAPS_API_KEY", "NOTARY_HOME_ADDRESS",
+    ];
+    for (const v of vars) {
+      results[v] = process.env[v] ? "SET" : "MISSING";
+    }
+
+    // Try parsing JSON vars
+    for (const v of ["GOOGLE_CREDENTIALS_JSON", "GOOGLE_TOKEN_JSON", "GOOGLE_NOTARY_TOKEN_JSON", "QUICKBOOKS_TOKEN_JSON"]) {
+      if (process.env[v]) {
+        try { JSON.parse(process.env[v]!); results[v] = "SET (valid JSON)"; }
+        catch (e) { results[v] = `SET (INVALID JSON: ${(e as Error).message.substring(0, 60)})`; }
+      }
+    }
+
+    // Try Google auth
+    try {
+      const { getGoogleAuthClient } = await import("./auth/google.js");
+      const auth = await getGoogleAuthClient();
+      const { google } = await import("googleapis");
+      const gmail = google.gmail({ version: "v1", auth });
+      await gmail.users.getProfile({ userId: "me" });
+      results["GOOGLE_AUTH_TEST"] = "OK";
+    } catch (e) { results["GOOGLE_AUTH_TEST"] = `FAIL: ${(e as Error).message.substring(0, 100)}`; }
+
+    // Try Notary Gmail auth
+    try {
+      const { getNotaryGmailClient } = await import("./auth/google-notary.js");
+      const auth = await getNotaryGmailClient();
+      const { google } = await import("googleapis");
+      const gmail = google.gmail({ version: "v1", auth });
+      await gmail.users.getProfile({ userId: "me" });
+      results["NOTARY_GMAIL_TEST"] = "OK";
+    } catch (e) { results["NOTARY_GMAIL_TEST"] = `FAIL: ${(e as Error).message.substring(0, 100)}`; }
+
+    res.json(results);
+  });
+
   app.listen(Number(PORT), () => {
     console.log(`mcp-automation server running on port ${PORT} (HTTP/SSE mode)`);
   });
