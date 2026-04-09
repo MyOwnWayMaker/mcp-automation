@@ -2,7 +2,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import fs from "fs";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-const SESSION_PATH = "/Users/hakielmcqueen/mcp-automation/filetrac_session.json";
+const SESSION_PATH = process.env.FILETRAC_SESSION_PATH || "/Users/hakielmcqueen/mcp-automation/filetrac_session.json";
 
 function ok(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -27,13 +27,17 @@ async function getFiletracPage(companyIndex = 0): Promise<{
   page: Page;
   aspBase: string;
 }> {
-  if (!fs.existsSync(SESSION_PATH)) {
+  let session: { cookies: unknown[]; localStorage: Record<string, string>; sessionStorage?: Record<string, string> };
+  if (process.env.FILETRAC_SESSION_JSON) {
+    session = JSON.parse(process.env.FILETRAC_SESSION_JSON);
+  } else if (fs.existsSync(SESSION_PATH)) {
+    session = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
+  } else {
     throw new Error(
-      `FileTrac session file not found at ${SESSION_PATH}. ` +
-      `Run: node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs`
+      `FileTrac session not found. Set FILETRAC_SESSION_JSON env var or run: ` +
+      `node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs`
     );
   }
-  const session = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -366,7 +370,14 @@ export async function filetracSubmitTimeExpense(args: {
 }
 
 export async function filetracListCompanies(args: Record<string, never>): Promise<CallToolResult> {
-  const session = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
+  let session: { cookies: unknown[]; localStorage: Record<string, string> };
+  if (process.env.FILETRAC_SESSION_JSON) {
+    session = JSON.parse(process.env.FILETRAC_SESSION_JSON);
+  } else if (fs.existsSync(SESSION_PATH)) {
+    session = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
+  } else {
+    throw new Error("FileTrac session not found. Set FILETRAC_SESSION_JSON env var.");
+  }
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
