@@ -3,7 +3,11 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+// Suppress dotenvx's stdout output — it breaks MCP stdio JSON transport
+const _write = process.stdout.write.bind(process.stdout);
+process.stdout.write = () => true;
 dotenv.config({ path: resolve(__dirname, "../.env") });
+process.stdout.write = _write;
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
