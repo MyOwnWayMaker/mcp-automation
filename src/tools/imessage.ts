@@ -31,7 +31,7 @@ export async function imessageSend(args: {
   `.trim();
 
   try {
-    await execAsync(`osascript -e '${script}'`);
+    await execAsync(`/usr/bin/osascript -e '${script}'`);
     return ok(`iMessage sent to ${recipient}`);
   } catch (err) {
     // Fallback: try SMS service
@@ -41,7 +41,7 @@ export async function imessageSend(args: {
       end tell
     `.trim();
     try {
-      await execAsync(`osascript -e '${smsFallback}'`);
+      await execAsync(`/usr/bin/osascript -e '${smsFallback}'`);
       return ok(`SMS sent to ${recipient}`);
     } catch (smsErr) {
       throw new Error(
@@ -74,7 +74,7 @@ export async function imessageGetRecentChats(args: {
   `.trim();
 
   try {
-    const { stdout } = await execAsync(`osascript -e '${script}'`);
+    const { stdout } = await execAsync(`/usr/bin/osascript -e '${script}'`);
     return ok(`Recent chats:\n${stdout.trim().split(", ").map((c, i) => `${i + 1}. ${c}`).join("\n")}`);
   } catch (err) {
     throw new Error(`Failed to get chats: ${(err as Error).message}`);

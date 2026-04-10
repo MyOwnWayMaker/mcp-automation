@@ -156,9 +156,11 @@ const TOOLS: Tool[] = [
   { name: "qb_cash_flow", description: "Get QuickBooks Cash Flow report", inputSchema: { type: "object", properties: { start_date: { type: "string" }, end_date: { type: "string" } }, required: [] } },
   { name: "qb_balance_sheet", description: "Get QuickBooks Balance Sheet report", inputSchema: { type: "object", properties: { as_of_date: { type: "string", description: "YYYY-MM-DD" } }, required: [] } },
 
-  // iMessage
-  { name: "imessage_send", description: "Send an iMessage or SMS via macOS Messages app", inputSchema: { type: "object", properties: { recipient: { type: "string" }, message: { type: "string" } }, required: ["recipient", "message"] } },
-  { name: "imessage_get_recent_chats", description: "List recent chats from macOS Messages app", inputSchema: { type: "object", properties: { max_results: { type: "number" } }, required: [] } },
+  // iMessage (macOS local server only — not available on Railway/Linux)
+  ...(process.platform === "darwin" ? [
+    { name: "imessage_send", description: "Send an iMessage or SMS via macOS Messages app", inputSchema: { type: "object", properties: { recipient: { type: "string" }, message: { type: "string" } }, required: ["recipient", "message"] } },
+    { name: "imessage_get_recent_chats", description: "List recent chats from macOS Messages app", inputSchema: { type: "object", properties: { max_results: { type: "number" } }, required: [] } },
+  ] as Tool[] : []),
 
   // HTTP
   { name: "http_request", description: "Make an HTTP request to any URL", inputSchema: { type: "object", properties: { url: { type: "string" }, method: { type: "string" }, headers: { type: "object", additionalProperties: { type: "string" } }, body: { type: "string" }, timeout_ms: { type: "number" } }, required: ["url"] } },
