@@ -138,15 +138,21 @@ async function getFiletracPage(companyIndex = 0): Promise<{
 export async function filetracListClaims(args: {
   company_index?: number;
   max_results?: number;
+  include_closed?: boolean;
 }): Promise<CallToolResult> {
   const companyIdx = args.company_index ?? 1; // Default to Premier Claims (index 1) which has the most jobs
   const { browser, page, aspBase } = await getFiletracPage(companyIdx);
 
   try {
-    // We're already on claimList.asp after getFiletracPage
+    // claimList.asp = open/active claims; claimListAll.asp = all including closed
+    const listPage = args.include_closed ? "claimListAll.asp" : "claimList.asp";
     const claimUrl = page.url();
     if (!claimUrl.includes("claimList")) {
-      await page.goto(`${aspBase}/system/claimList.asp`);
+      await page.goto(`${aspBase}/system/${listPage}`);
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(3000);
+    } else if (args.include_closed && !claimUrl.includes("claimListAll")) {
+      await page.goto(`${aspBase}/system/claimListAll.asp`);
       await page.waitForLoadState("domcontentloaded");
       await page.waitForTimeout(3000);
     }

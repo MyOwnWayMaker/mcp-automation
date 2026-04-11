@@ -73,11 +73,12 @@ export async function xactListAssignments(args: {
   const { browser, page } = await getPage();
 
   try {
+    // Default to "all" — includes closed, returned, corrected assignments
     const statusType = args.status === "returned" ? "returned" :
-                       args.status === "all" ? "" : "in_progress";
+                       args.status === "in_progress" ? "in_progress" : "";
     const url = statusType
-      ? `${BASE}/xactanalysis/search.jsp?date_type=received&date_preset=365&xasp_status_type=${statusType}&columns=cache`
-      : `${BASE}/xactanalysis/search.jsp?date_type=received&date_preset=365&columns=cache`;
+      ? `${BASE}/xactanalysis/search.jsp?date_type=received&date_preset=730&xasp_status_type=${statusType}&columns=cache`
+      : `${BASE}/xactanalysis/search.jsp?date_type=received&date_preset=730&columns=cache`;
 
     await page.goto(url);
     await page.waitForLoadState("domcontentloaded");
