@@ -144,38 +144,50 @@ export async function filetracListClaims(args: {
   const { browser, page, aspBase } = await getFiletracPage(companyIdx);
 
   try {
-    // claimList.asp = open/active claims; claimListAll.asp = all including closed
-    const listPage = args.include_closed ? "claimListAll.asp" : "claimList.asp";
+    // Ensure we're on claimList.asp (getFiletracPage lands here after "See Jobs")
     const claimUrl = page.url();
     if (!claimUrl.includes("claimList")) {
-      await page.goto(`${aspBase}/system/${listPage}`);
-      await page.waitForLoadState("domcontentloaded");
-      await page.waitForTimeout(3000);
-    } else if (args.include_closed && !claimUrl.includes("claimListAll")) {
-      await page.goto(`${aspBase}/system/claimListAll.asp`);
+      await page.goto(`${aspBase}/system/claimList.asp`);
       await page.waitForLoadState("domcontentloaded");
       await page.waitForTimeout(3000);
     }
 
-    // Find all claim file number links (8-digit numbers)
+    // For closed claims: use the server-side searchType filter (claimListAll.asp returns 404)
+    if (args.include_closed) {
+      await page.selectOption('select[name="searchType"]', "closedClaims").catch(() => {});
+      await page.evaluate(() => {
+        const form = (document as any).claimListForm;
+        if (form) form.submit();
+      });
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(3000);
+    }
+
+    // Find claims by href pattern — works for all companies regardless of file # format:
+    // Premier Claims uses 8-digit numbers (81030485), Stewardship uses MBR-XXXXX,
+    // US Claim Solutions uses USXXXXXX. The claimView.asp?claimID= href is universal.
+    // First link per claimID = file number; subsequent = company claim #, skip those.
     const links = await page.locator("a").all();
     const claims: string[] = [];
     const limit = args.max_results ?? 20;
+    const seenClaimIds = new Set<string>();
 
     for (const link of links) {
       if (claims.length >= limit) break;
-      const text = (await link.innerText().catch(() => "")).trim();
-      const href = await link.getAttribute("href").catch(() => "");
-      if (/^\d{8}$/.test(text) && href) {
-        // Get the claim ID from href (claimView.asp?claimID=XXXXX)
-        const claimIdMatch = href.match(/claimID=(\d+)/);
-        const claimId = claimIdMatch ? claimIdMatch[1] : "";
+      const href = (await link.getAttribute("href").catch(() => "")) || "";
+      const claimIdMatch = href.match(/claimView\.asp\?claimID=(\d+)/i);
+      if (!claimIdMatch) continue;
+      const claimId = claimIdMatch[1];
+      if (seenClaimIds.has(claimId)) continue; // skip company claim# link (same claimID, second occurrence)
+      seenClaimIds.add(claimId);
 
-        // Get row text for context (the containing row)
-        const row = await link.locator("xpath=ancestor::tr[1]").first();
-        const rowText = (await row.innerText().catch(() => "")).trim().replace(/\t+/g, " | ").replace(/\n+/g, " ");
-        claims.push(`File #: ${text} | Claim ID: ${claimId} | ${rowText}`);
-      }
+      const text = (await link.innerText().catch(() => "")).trim();
+      if (!text) continue; // skip empty icon links
+
+      // Get row text for context
+      const row = await link.locator("xpath=ancestor::tr[1]").first();
+      const rowText = (await row.innerText().catch(() => "")).trim().replace(/\t+/g, " | ").replace(/\n+/g, " ");
+      claims.push(`File #: ${text} | Claim ID: ${claimId} | ${rowText}`);
     }
 
     if (claims.length === 0) return ok("No claims found.");
@@ -441,7 +453,7 @@ export async function filetracListCompanies(args: Record<string, never>): Promis
   const context = await browser.newContext({
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   });
-  const page = await browser.newPage();
+  const page = await context.newPage();
 
   try {
     await page.goto("https://ftevolve.com");
