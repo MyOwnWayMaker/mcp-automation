@@ -313,7 +313,20 @@ if (PORT) {
   const app = express();
   const transports = new Map<string, SSEServerTransport>();
 
+  // Raw SSE test endpoint — bypasses MCP SDK to test tunnel streaming
+  app.get("/sse-test", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("Connection", "keep-alive");
+    res.status(200);
+    res.write("event: ping\ndata: tunnel-working\n\n");
+    const interval = setInterval(() => res.write(": heartbeat\n\n"), 5000);
+    res.on("close", () => clearInterval(interval));
+  });
+
   app.get("/sse", async (req, res) => {
+    res.setHeader("X-Accel-Buffering", "no");
     const transport = new SSEServerTransport("/messages", res);
     transports.set(transport.sessionId, transport);
 
@@ -433,9 +446,11 @@ if (PORT) {
     res.json(results);
   });
 
-  app.listen(Number(PORT), () => {
+  const httpServer = app.listen(Number(PORT), () => {
     console.log(`mcp-automation server running on port ${PORT} (HTTP/SSE mode)`);
   });
+  // Disable Nagle's algorithm so small SSE packets aren't buffered on localhost
+  httpServer.on("connection", (socket) => socket.setNoDelay(true));
 } else {
   // Local mode: stdio
   const server = createServer();
