@@ -163,45 +163,39 @@ async function getFiletracPage(companyIndex = 0): Promise<{
   });
   const page = await context.newPage();
 
-  // Inject fresh Cognito tokens
-  await page.goto("https://ftevolve.com");
-  await page.waitForLoadState("domcontentloaded");
+  // Inject Cognito tokens then navigate directly to linked-companies
+  // (skips reload + networkidle on the homepage — saves 8-10 seconds)
+  await page.goto("https://ftevolve.com", { waitUntil: "domcontentloaded", timeout: 15000 });
   await page.evaluate((ls: Record<string, string>) => {
     for (const [k, v] of Object.entries(ls)) window.localStorage.setItem(k, v);
   }, localStorage);
-  await page.reload();
-  await page.waitForLoadState("networkidle");
-  await page.waitForTimeout(4000);
+  await page.goto("https://ftevolve.com/app/legacy/linked-companies", { waitUntil: "domcontentloaded", timeout: 15000 });
 
-  // Go to linked-companies
-  await page.goto("https://ftevolve.com/app/legacy/linked-companies");
-  await page.waitForLoadState("networkidle");
-  await page.waitForTimeout(5000);
-
-  // Verify we're logged in
-  const currentUrl = page.url();
-  if (currentUrl.includes("/auth/")) {
+  // Wait for React to render "See Jobs" buttons (replaces fixed networkidle + waitForTimeout)
+  try {
+    await page.waitForSelector('button:has-text("See Jobs")', { timeout: 22000 });
+  } catch {
+    if (page.url().includes("/auth/")) {
+      await browser.close();
+      throw new Error(
+        "FileTrac Cognito refresh token has expired (30-day limit). " +
+        "Re-run: node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs"
+      );
+    }
     await browser.close();
-    throw new Error(
-      "FileTrac Cognito refresh token has expired (30-day limit). " +
-      "Re-run: node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs"
-    );
+    throw new Error("FileTrac linked-companies page did not render — no 'See Jobs' buttons found.");
   }
 
   // Click "See Jobs" for the requested company
   const seeJobsBtns = await page.locator('button:has-text("See Jobs")').all();
-  if (seeJobsBtns.length === 0) {
-    await browser.close();
-    throw new Error("No companies found on FileTrac linked-companies page.");
-  }
   const idx = Math.min(companyIndex, seeJobsBtns.length - 1);
   await seeJobsBtns[idx].click();
-  await page.waitForLoadState("domcontentloaded");
-  await page.waitForTimeout(2000);
+  await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
+  await page.waitForTimeout(800);
 
   const aspBase = new URL(page.url()).origin;
 
-  // Save ASP session cookies for fast-path future requests
+  // Save ASP cookies for future fast-path requests
   const cookies = await page.context().cookies();
   const aspCookies = cookies
     .filter(c => c.domain.includes(new URL(aspBase).hostname))

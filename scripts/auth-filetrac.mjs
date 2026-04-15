@@ -43,7 +43,7 @@ try {
 
 await page.waitForTimeout(2000);
 
-// Capture session data
+// Capture Cognito session data
 const cookies = await context.cookies();
 const localStorageData = await page.evaluate(() => {
   const data = {};
@@ -64,11 +64,63 @@ const sessionStorageData = await page.evaluate(() => {
 
 console.log("Cookies:", cookies.length);
 console.log("localStorage keys:", Object.keys(localStorageData));
-console.log("sessionStorage keys:", Object.keys(sessionStorageData));
 
-fs.writeFileSync(SESSION_PATH, JSON.stringify({ cookies, localStorage: localStorageData, sessionStorage: sessionStorageData }, null, 2));
+// ── Capture ASP session cookie by clicking "See Jobs" ──────────────────────
+// This populates aspBase + aspCookies so the MCP fast path works immediately
+// without needing the full browser flow on every get_claim call.
+let aspBase = null;
+let aspCookies = null;
+
+console.log("\nNavigating to linked-companies to capture ASP session cookie...");
+try {
+  await page.goto("https://ftevolve.com/app/legacy/linked-companies", { waitUntil: "domcontentloaded", timeout: 20000 });
+  await page.waitForSelector('button:has-text("See Jobs")', { timeout: 20000 });
+
+  const seeJobsBtns = await page.locator('button:has-text("See Jobs")').all();
+  if (seeJobsBtns.length > 0) {
+    // Index 1 = Premier Claims (the main company)
+    const idx = Math.min(1, seeJobsBtns.length - 1);
+    console.log(`Clicking "See Jobs" (index ${idx})...`);
+    await seeJobsBtns[idx].click();
+    await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
+    await page.waitForTimeout(1500);
+
+    aspBase = new URL(page.url()).origin;
+    const allCookies = await context.cookies();
+    const aspDomain = new URL(aspBase).hostname;
+    const aspCookieList = allCookies
+      .filter(c => c.domain.includes(aspDomain))
+      .map(c => `${c.name}=${c.value}`)
+      .join("; ");
+
+    if (aspCookieList) {
+      aspCookies = aspCookieList;
+      console.log(`✅ ASP session captured: ${aspBase}`);
+      console.log(`   Cookies: ${aspCookieList.substring(0, 80)}...`);
+    } else {
+      console.log("⚠️  No ASP cookies found — fast path will not be available");
+    }
+  }
+} catch (e) {
+  console.log(`⚠️  Could not capture ASP session: ${e.message}`);
+  console.log("   The session will still work, but get_claim will use the slower browser path.");
+}
+
+const sessionData = {
+  cookies,
+  localStorage: localStorageData,
+  sessionStorage: sessionStorageData,
+  ...(aspBase ? { aspBase } : {}),
+  ...(aspCookies ? { aspCookies } : {}),
+  ...(aspBase ? { aspCookiesSavedAt: new Date().toISOString() } : {}),
+};
+
+fs.writeFileSync(SESSION_PATH, JSON.stringify(sessionData, null, 2));
 console.log(`\n✅ Session saved to ${SESSION_PATH}`);
+if (aspBase) {
+  console.log(`✅ ASP fast-path enabled — get_claim will now respond in ~1 second`);
+}
 
-await page.waitForTimeout(3000);
+await page.waitForTimeout(2000);
 await browser.close();
 console.log("Done!");
