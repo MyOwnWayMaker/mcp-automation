@@ -28,7 +28,7 @@ import { httpRequest } from "./tools/http.js";
 import { gdocsCreateDocument, gdocsGetDocument, gdocsFindDocument, gdocsAppendText, gdocsFindAndReplace } from "./tools/gdocs.js";
 import { tasksListTasklists, tasksListTasks, tasksCreateTask, tasksUpdateTask, tasksCompleteTask, tasksDeleteTask } from "./tools/tasks.js";
 import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/meet.js";
-import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem } from "./tools/notion.js";
+import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem, notionUpdateDatabaseItem, notionUpdateDatabaseSchema } from "./tools/notion.js";
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
@@ -98,6 +98,8 @@ const TOOLS: Tool[] = [
   { name: "notion_append_to_page", description: "Append content to a Notion page", inputSchema: { type: "object", properties: { page_id: { type: "string" }, content: { type: "string" } }, required: ["page_id", "content"] } },
   { name: "notion_query_database", description: "Query items in a Notion database", inputSchema: { type: "object", properties: { database_id: { type: "string" }, max_results: { type: "number" } }, required: ["database_id"] } },
   { name: "notion_create_database_item", description: "Create a new item in a Notion database", inputSchema: { type: "object", properties: { database_id: { type: "string" }, title: { type: "string" }, properties: { type: "object", additionalProperties: { type: "string" } } }, required: ["database_id", "title"] } },
+  { name: "notion_update_database_item", description: "Update properties on an existing Notion database item (page). Pass properties as a map of property name → {type, value}. Supported types: select, multi_select, title, rich_text, text, date, number, checkbox, url, email, phone_number, status.", inputSchema: { type: "object", properties: { page_id: { type: "string" }, properties: { type: "object", additionalProperties: { type: "object", properties: { type: { type: "string" }, value: { type: "string" } }, required: ["type"] } } }, required: ["page_id", "properties"] } },
+  { name: "notion_update_database_schema", description: "Update the select/multi_select options (names and colors) on a Notion database property. Valid colors: default, gray, brown, orange, yellow, green, blue, purple, pink, red.", inputSchema: { type: "object", properties: { database_id: { type: "string" }, property_name: { type: "string" }, select_options: { type: "array", items: { type: "object", properties: { name: { type: "string" }, color: { type: "string" } }, required: ["name"] } } }, required: ["database_id", "property_name", "select_options"] } },
 
   // HubSpot
   { name: "hubspot_find_contact", description: "Find a HubSpot contact by email", inputSchema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] } },
@@ -223,6 +225,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notion_append_to_page": return notionAppendToPage(args as any);
     case "notion_query_database": return notionQueryDatabase(args as any);
     case "notion_create_database_item": return notionCreateDatabaseItem(args as any);
+    case "notion_update_database_item": return notionUpdateDatabaseItem(args as any);
+    case "notion_update_database_schema": return notionUpdateDatabaseSchema(args as any);
     case "hubspot_find_contact": return hubspotFindContact(args as any);
     case "hubspot_create_contact": return hubspotCreateContact(args as any);
     case "hubspot_update_contact": return hubspotUpdateContact(args as any);

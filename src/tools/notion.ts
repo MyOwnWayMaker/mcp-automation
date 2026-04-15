@@ -20,7 +20,7 @@ function extractPlainText(richText: Array<{ plain_text?: string }>) {
 }
 
 // Direct REST API helper — SDK v5 removed databases.query and other endpoints
-async function notionFetch(path: string, method: "GET" | "POST" = "GET", body?: object): Promise<any> {
+async function notionFetch(path: string, method: "GET" | "POST" | "PATCH" = "GET", body?: object): Promise<any> {
   const token = getToken();
   const res = await fetch(`https://api.notion.com/v1${path}`, {
     method,
@@ -222,6 +222,82 @@ export async function notionQueryDatabase(args: {
   });
 
   return ok(`Total items: ${allResults.length}\n\n` + lines.join("\n\n---\n\n"));
+}
+
+export async function notionUpdateDatabaseItem(args: {
+  page_id: string;
+  properties: Record<string, { type: string; value: string | null }>;
+}): Promise<CallToolResult> {
+  // Build the Notion properties payload from typed key-value pairs
+  const formatted: any = {};
+
+  for (const [key, { type, value }] of Object.entries(args.properties)) {
+    switch (type) {
+      case "select":
+        formatted[key] = value ? { select: { name: value } } : { select: null };
+        break;
+      case "multi_select":
+        formatted[key] = { multi_select: value ? value.split(",").map((v) => ({ name: v.trim() })) : [] };
+        break;
+      case "title":
+        formatted[key] = { title: [{ type: "text", text: { content: value ?? "" } }] };
+        break;
+      case "rich_text":
+      case "text":
+        formatted[key] = { rich_text: [{ type: "text", text: { content: value ?? "" } }] };
+        break;
+      case "date":
+        formatted[key] = value ? { date: { start: value } } : { date: null };
+        break;
+      case "number":
+        formatted[key] = { number: value !== null ? Number(value) : null };
+        break;
+      case "checkbox":
+        formatted[key] = { checkbox: value === "true" };
+        break;
+      case "url":
+        formatted[key] = { url: value };
+        break;
+      case "email":
+        formatted[key] = { email: value };
+        break;
+      case "phone_number":
+        formatted[key] = { phone_number: value };
+        break;
+      case "status":
+        formatted[key] = { status: { name: value } };
+        break;
+      default:
+        throw new Error(`Unsupported property type: ${type}. Supported: select, multi_select, title, rich_text, text, date, number, checkbox, url, email, phone_number, status`);
+    }
+  }
+
+  const res = await notionFetch(`/pages/${args.page_id}`, "PATCH", { properties: formatted });
+  return ok(`Updated page ${args.page_id}\nURL: ${res.url}`);
+}
+
+export async function notionUpdateDatabaseSchema(args: {
+  database_id: string;
+  property_name: string;
+  select_options: Array<{ name: string; color?: string }>;
+}): Promise<CallToolResult> {
+  // Update a select/multi_select property's options on a database
+  // Valid Notion colors: default, gray, brown, orange, yellow, green, blue, purple, pink, red
+  const body = {
+    properties: {
+      [args.property_name]: {
+        select: {
+          options: args.select_options.map((opt) => ({
+            name: opt.name,
+            ...(opt.color ? { color: opt.color } : {}),
+          })),
+        },
+      },
+    },
+  };
+
+  await notionFetch(`/databases/${args.database_id}`, "PATCH", body);
+  return ok(`Updated database ${args.database_id}: property "${args.property_name}" now has ${args.select_options.length} options: ${args.select_options.map((o) => o.name).join(", ")}`);
 }
 
 export async function notionCreateDatabaseItem(args: {
