@@ -25,23 +25,18 @@ export async function notionFindPage(args: {
   const searchType = args.type ?? "all";
 
   // Search pages and/or databases
-  const searches: Promise<any>[] = [];
-  if (searchType === "page" || searchType === "all") {
-    searches.push(notion.search({
-      query: args.query,
-      page_size: Math.min(limit, 100),
-      filter: { property: "object", value: "page" },
-    }));
-  }
-  if (searchType === "database" || searchType === "all") {
-    searches.push((notion as any).search({
-      query: args.query,
-      page_size: Math.min(limit, 100),
-      filter: { property: "object", value: "database" },
-    }));
+  // Notion API filter values: "page" for pages, "database" for databases (no filter = both)
+  let res: any;
+  if (searchType === "all") {
+    // No filter returns both pages and databases
+    res = await (notion as any).search({ query: args.query, page_size: Math.min(limit, 100) });
+  } else if (searchType === "page") {
+    res = await (notion as any).search({ query: args.query, page_size: Math.min(limit, 100), filter: { property: "object", value: "page" } });
+  } else {
+    res = await (notion as any).search({ query: args.query, page_size: Math.min(limit, 100), filter: { property: "object", value: "database" } });
   }
 
-  const results = (await Promise.all(searches)).flatMap((r: any) => r.results);
+  const results = res.results;
   if (results.length === 0) return ok("No pages or databases found.");
 
   const lines = results.slice(0, limit).map((r: any) => {
