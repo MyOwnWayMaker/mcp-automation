@@ -354,6 +354,23 @@ function formatDuration(hours: number): string {
 }
 
 /**
+ * Initializes subtask statuses to "Not Started" on an existing claim item.
+ * Use this to retroactively activate subtask tracking on claims that were
+ * created before init_subtasks support, or on any item you want to designate as a claim.
+ */
+export async function notionInitializeItemSubtasks(args: {
+  page_id: string;
+}): Promise<CallToolResult> {
+  const properties: Record<string, any> = {};
+  for (const subtask of STANDARD_SUBTASKS) {
+    properties[`${subtask} Status`] = { select: { name: "Not Started" } };
+  }
+  const res = await notionFetch(`/pages/${args.page_id}`, "PATCH", { properties });
+  const title = res.properties?.Task?.title?.[0]?.plain_text ?? args.page_id;
+  return ok(`Subtasks initialized on "${title}":\nInspection, Photo Report, Sketch, Estimate, Narrative → Not Started`);
+}
+
+/**
  * Sets up the 5 standard subtask property groups on a claim database.
  * Each subtask gets: checkbox, Status (select), Start (text), Hours (number).
  * Run once per database — safe to re-run, existing properties are unchanged.
