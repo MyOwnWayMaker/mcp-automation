@@ -302,6 +302,7 @@ export async function notionCreateDatabaseItem(args: {
   title: string;
   title_property?: string;
   properties?: Record<string, string>;
+  init_subtasks?: boolean;
 }): Promise<CallToolResult> {
   // Look up the database to find the actual title property name
   let titlePropName = args.title_property ?? "title";
@@ -321,13 +322,23 @@ export async function notionCreateDatabaseItem(args: {
     }
   }
 
+  // Initialize subtask statuses inline if requested
+  if (args.init_subtasks) {
+    for (const subtask of ["Inspection", "Photo Report", "Sketch", "Estimate", "Narrative"]) {
+      properties[`${subtask} Status`] = { select: { name: "Not Started" } };
+    }
+  }
+
   const notion = getNotion();
   const res: any = await notion.pages.create({
     parent: { database_id: args.database_id },
     properties,
   });
 
-  return ok(`Database item created: ${args.title}\nID: ${res.id}\nURL: ${res.url}`);
+  return ok(
+    `Database item created: ${args.title}\nID: ${res.id}\nURL: ${res.url}` +
+    (args.init_subtasks ? "\nSubtasks initialized: Inspection, Photo Report, Sketch, Estimate, Narrative → Not Started" : "")
+  );
 }
 
 // ─── Subtask + Time Tracking ───────────────────────────────────────────────────
