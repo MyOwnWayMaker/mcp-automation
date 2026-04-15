@@ -183,19 +183,16 @@ export async function notionCreatePage(args: {
 export async function notionAppendToPage(args: {
   page_id: string;
   content: string;
+  block_type?: "paragraph" | "to_do" | "heading_1" | "heading_2" | "heading_3" | "bulleted_list_item" | "numbered_list_item";
 }): Promise<CallToolResult> {
   const notion = getNotion();
-  await notion.blocks.children.append({
-    block_id: args.page_id,
-    children: [{
-      object: "block",
-      type: "paragraph",
-      paragraph: {
-        rich_text: [{ type: "text", text: { content: args.content } }],
-      },
-    }],
-  });
-  return ok(`Content appended to page ${args.page_id}.`);
+  const type = args.block_type ?? "paragraph";
+  const richText = [{ type: "text", text: { content: args.content } }];
+  const block: any = { object: "block", type, [type]: { rich_text: richText } };
+  if (type === "to_do") block[type].checked = false;
+
+  await notion.blocks.children.append({ block_id: args.page_id, children: [block] });
+  return ok(`${type === "to_do" ? "To-do item" : "Content"} appended to page ${args.page_id}.`);
 }
 
 export async function notionQueryDatabase(args: {
@@ -331,4 +328,139 @@ export async function notionCreateDatabaseItem(args: {
   });
 
   return ok(`Database item created: ${args.title}\nID: ${res.id}\nURL: ${res.url}`);
+}
+
+// ─── Subtask + Time Tracking ───────────────────────────────────────────────────
+
+const STANDARD_SUBTASKS = ["Inspection", "Photo Report", "Sketch", "Estimate", "Narrative"] as const;
+
+function formatDuration(hours: number): string {
+  const h = Math.floor(hours);
+  const m = Math.round((hours - h) * 60);
+  if (h === 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+
+/**
+ * Sets up the 5 standard subtask property groups on a claim database.
+ * Each subtask gets: checkbox, Status (select), Start (text), Hours (number).
+ * Run once per database — safe to re-run, existing properties are unchanged.
+ */
+export async function notionSetupClaimsSubtasks(args: {
+  database_id: string;
+}): Promise<CallToolResult> {
+  const statusOptions = [
+    { name: "Not Started", color: "gray" },
+    { name: "In Progress", color: "blue" },
+    { name: "Paused", color: "yellow" },
+    { name: "Complete", color: "green" },
+  ];
+
+  const properties: Record<string, any> = {};
+  for (const subtask of STANDARD_SUBTASKS) {
+    properties[subtask] = { checkbox: {} };
+    properties[`${subtask} Status`] = { select: { options: statusOptions } };
+    properties[`${subtask} Start`] = { rich_text: {} };
+    properties[`${subtask} Hours`] = { number: { format: "number" } };
+  }
+
+  await notionFetch(`/databases/${args.database_id}`, "PATCH", { properties });
+  return ok(
+    `Set up subtask properties on database ${args.database_id}.\n` +
+    `Added for each of: ${STANDARD_SUBTASKS.join(", ")}\n` +
+    `Properties per subtask: checkbox, Status, Start, Hours`
+  );
+}
+
+/**
+ * Start, pause, or complete a subtask on a claim. Tracks time automatically.
+ * - start: records session start time, sets status In Progress
+ * - pause: computes elapsed, adds to Hours, clears start, sets Paused
+ * - complete: computes elapsed, adds to Hours, clears start, checks checkbox, sets Complete
+ */
+export async function notionUpdateSubtask(args: {
+  page_id: string;
+  subtask: string;
+  action: "start" | "pause" | "complete";
+}): Promise<CallToolResult> {
+  // Read current page state
+  const page = await notionFetch(`/pages/${args.page_id}`);
+  const props = page.properties ?? {};
+
+  const statusKey   = `${args.subtask} Status`;
+  const startKey    = `${args.subtask} Start`;
+  const hoursKey    = `${args.subtask} Hours`;
+  const checkboxKey = args.subtask;
+
+  const currentHours     = props[hoursKey]?.number ?? 0;
+  const currentStartText = props[startKey]?.rich_text?.[0]?.plain_text ?? "";
+
+  const updates: Record<string, any> = {};
+  const now = new Date();
+  let message = "";
+
+  if (args.action === "start") {
+    const alreadyRunning = currentStartText !== "";
+    updates[statusKey] = { select: { name: "In Progress" } };
+    if (!alreadyRunning) {
+      updates[startKey] = { rich_text: [{ type: "text", text: { content: now.toISOString() } }] };
+    }
+    const runningNote = alreadyRunning ? " (timer was already running — not reset)" : "";
+    message = `${args.subtask} → In Progress${runningNote}. Accumulated so far: ${formatDuration(currentHours)}`;
+
+  } else if (args.action === "pause" || args.action === "complete") {
+    let sessionHours = 0;
+    if (currentStartText) {
+      const startTime = new Date(currentStartText);
+      sessionHours = (now.getTime() - startTime.getTime()) / 3600000;
+    }
+    const totalHours = Math.round((currentHours + sessionHours) * 100) / 100;
+
+    updates[hoursKey] = { number: totalHours };
+    updates[startKey] = { rich_text: [] }; // clear session start
+
+    if (args.action === "pause") {
+      updates[statusKey] = { select: { name: "Paused" } };
+      message = `${args.subtask} → Paused.\nSession: ${formatDuration(sessionHours)} | Total: ${formatDuration(totalHours)}`;
+    } else {
+      updates[statusKey] = { select: { name: "Complete" } };
+      updates[checkboxKey] = { checkbox: true };
+      message = `${args.subtask} → Complete ✓\nFinal session: ${formatDuration(sessionHours)} | Total time: ${formatDuration(totalHours)}`;
+    }
+  } else {
+    throw new Error(`Unknown action "${args.action}". Use: start, pause, complete`);
+  }
+
+  await notionFetch(`/pages/${args.page_id}`, "PATCH", { properties: updates });
+  return ok(message);
+}
+
+/**
+ * Returns a summary of all subtask statuses and hours for a claim page.
+ */
+export async function notionGetSubtaskStatus(args: {
+  page_id: string;
+}): Promise<CallToolResult> {
+  const page = await notionFetch(`/pages/${args.page_id}`);
+  const props = page.properties ?? {};
+
+  // Detect subtasks: anything with a matching "{name} Status" property
+  const allSubtasks = STANDARD_SUBTASKS.filter(s => props[`${s} Status`]);
+
+  if (allSubtasks.length === 0) {
+    return ok("No subtask properties found on this page. Run notion_setup_claims_subtasks first.");
+  }
+
+  const lines = allSubtasks.map(subtask => {
+    const status = props[`${subtask} Status`]?.select?.name ?? "Not Started";
+    const hours  = props[`${subtask} Hours`]?.number ?? 0;
+    const start  = props[`${subtask} Start`]?.rich_text?.[0]?.plain_text ?? "";
+    const done   = props[subtask]?.checkbox ? "✓" : "○";
+    const timer  = start ? " ⏱ running" : "";
+    return `${done} ${subtask}: ${status} — ${formatDuration(hours)}${timer}`;
+  });
+
+  const totalHours = allSubtasks.reduce((sum, s) => sum + (props[`${s} Hours`]?.number ?? 0), 0);
+  return ok(`Subtask Status:\n${lines.join("\n")}\n\nTotal time tracked: ${formatDuration(totalHours)}`);
 }

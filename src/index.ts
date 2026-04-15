@@ -28,7 +28,7 @@ import { httpRequest } from "./tools/http.js";
 import { gdocsCreateDocument, gdocsGetDocument, gdocsFindDocument, gdocsAppendText, gdocsFindAndReplace } from "./tools/gdocs.js";
 import { tasksListTasklists, tasksListTasks, tasksCreateTask, tasksUpdateTask, tasksCompleteTask, tasksDeleteTask } from "./tools/tasks.js";
 import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/meet.js";
-import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem, notionUpdateDatabaseItem, notionUpdateDatabaseSchema } from "./tools/notion.js";
+import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem, notionUpdateDatabaseItem, notionUpdateDatabaseSchema, notionSetupClaimsSubtasks, notionUpdateSubtask, notionGetSubtaskStatus } from "./tools/notion.js";
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
@@ -95,11 +95,14 @@ const TOOLS: Tool[] = [
   { name: "notion_find_page", description: "Search for pages and databases in Notion by keyword. Returns both pages and databases by default.", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" }, type: { type: "string", enum: ["page", "database", "all"] } }, required: ["query"] } },
   { name: "notion_get_page", description: "Get the content of a Notion page by ID", inputSchema: { type: "object", properties: { page_id: { type: "string" } }, required: ["page_id"] } },
   { name: "notion_create_page", description: "Create a new Notion page", inputSchema: { type: "object", properties: { title: { type: "string" }, parent_page_id: { type: "string" }, parent_database_id: { type: "string" }, content: { type: "string" } }, required: ["title"] } },
-  { name: "notion_append_to_page", description: "Append content to a Notion page", inputSchema: { type: "object", properties: { page_id: { type: "string" }, content: { type: "string" } }, required: ["page_id", "content"] } },
+  { name: "notion_append_to_page", description: "Append content to a Notion page. Use block_type='to_do' to add a checkable subtask item (for custom/ad-hoc subtasks on a specific claim).", inputSchema: { type: "object", properties: { page_id: { type: "string" }, content: { type: "string" }, block_type: { type: "string", enum: ["paragraph", "to_do", "heading_1", "heading_2", "heading_3", "bulleted_list_item", "numbered_list_item"] } }, required: ["page_id", "content"] } },
   { name: "notion_query_database", description: "Query items in a Notion database", inputSchema: { type: "object", properties: { database_id: { type: "string" }, max_results: { type: "number" } }, required: ["database_id"] } },
   { name: "notion_create_database_item", description: "Create a new item in a Notion database", inputSchema: { type: "object", properties: { database_id: { type: "string" }, title: { type: "string" }, properties: { type: "object", additionalProperties: { type: "string" } } }, required: ["database_id", "title"] } },
   { name: "notion_update_database_item", description: "Update properties on an existing Notion database item (page). Pass properties as a map of property name → {type, value}. Supported types: select, multi_select, title, rich_text, text, date, number, checkbox, url, email, phone_number, status.", inputSchema: { type: "object", properties: { page_id: { type: "string" }, properties: { type: "object", additionalProperties: { type: "object", properties: { type: { type: "string" }, value: { type: "string" } }, required: ["type"] } } }, required: ["page_id", "properties"] } },
   { name: "notion_update_database_schema", description: "Update the select/multi_select options (names and colors) on a Notion database property. Valid colors: default, gray, brown, orange, yellow, green, blue, purple, pink, red.", inputSchema: { type: "object", properties: { database_id: { type: "string" }, property_name: { type: "string" }, select_options: { type: "array", items: { type: "object", properties: { name: { type: "string" }, color: { type: "string" } }, required: ["name"] } } }, required: ["database_id", "property_name", "select_options"] } },
+  { name: "notion_setup_claims_subtasks", description: "One-time setup: adds Inspection, Photo Report, Sketch, Estimate, Narrative subtask property groups to a claim database. Each gets checkbox + Status + Start + Hours. Safe to re-run.", inputSchema: { type: "object", properties: { database_id: { type: "string" } }, required: ["database_id"] } },
+  { name: "notion_update_subtask", description: "Start, pause, or complete a subtask on a claim item. Automatically tracks time — pause accumulates elapsed hours, resume starts a new session. action: start | pause | complete. subtask: Inspection | Photo Report | Sketch | Estimate | Narrative", inputSchema: { type: "object", properties: { page_id: { type: "string" }, subtask: { type: "string" }, action: { type: "string", enum: ["start", "pause", "complete"] } }, required: ["page_id", "subtask", "action"] } },
+  { name: "notion_get_subtask_status", description: "Get all subtask statuses and accumulated hours for a claim item.", inputSchema: { type: "object", properties: { page_id: { type: "string" } }, required: ["page_id"] } },
 
   // HubSpot
   { name: "hubspot_find_contact", description: "Find a HubSpot contact by email", inputSchema: { type: "object", properties: { email: { type: "string" } }, required: ["email"] } },
@@ -227,6 +230,9 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notion_create_database_item": return notionCreateDatabaseItem(args as any);
     case "notion_update_database_item": return notionUpdateDatabaseItem(args as any);
     case "notion_update_database_schema": return notionUpdateDatabaseSchema(args as any);
+    case "notion_setup_claims_subtasks": return notionSetupClaimsSubtasks(args as any);
+    case "notion_update_subtask": return notionUpdateSubtask(args as any);
+    case "notion_get_subtask_status": return notionGetSubtaskStatus(args as any);
     case "hubspot_find_contact": return hubspotFindContact(args as any);
     case "hubspot_create_contact": return hubspotCreateContact(args as any);
     case "hubspot_update_contact": return hubspotUpdateContact(args as any);
