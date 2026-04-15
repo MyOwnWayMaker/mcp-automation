@@ -3,6 +3,83 @@ import fs from "fs";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const SESSION_PATH = process.env.FILETRAC_SESSION_PATH || "/Users/hakielmcqueen/mcp-automation/filetrac_session.json";
+
+// ─── ASP Cookie Cache ──────────────────────────────────────────────────────────
+// After the first browser flow, we save the ASP session cookie so subsequent
+// calls can skip the browser entirely and use a direct HTTP fetch (~1s vs 30s).
+
+interface FiletracSession {
+  cookies: unknown[];
+  localStorage: Record<string, string>;
+  sessionStorage?: Record<string, string>;
+  aspBase?: string;
+  aspCookies?: string;  // raw Cookie header string (e.g. "ASPSESSIONIDXXXX=YYYY")
+  aspCookiesSavedAt?: string;
+}
+
+function loadSession(): FiletracSession {
+  if (process.env.FILETRAC_SESSION_JSON) {
+    return JSON.parse(process.env.FILETRAC_SESSION_JSON);
+  } else if (fs.existsSync(SESSION_PATH)) {
+    return JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
+  }
+  throw new Error(
+    "FileTrac session not found. Set FILETRAC_SESSION_JSON env var or run: " +
+    "node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs"
+  );
+}
+
+function saveAspToSession(aspBase: string, aspCookies: string): void {
+  // Only save to local file — Railway env var is updated separately
+  if (!fs.existsSync(SESSION_PATH)) return;
+  try {
+    const session = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
+    session.aspBase = aspBase;
+    session.aspCookies = aspCookies;
+    session.aspCookiesSavedAt = new Date().toISOString();
+    fs.writeFileSync(SESSION_PATH, JSON.stringify(session, null, 2));
+  } catch { /* non-fatal */ }
+}
+
+async function fetchAspPage(aspBase: string, aspCookies: string, path: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${aspBase}${path}`, {
+      headers: {
+        "Cookie": aspCookies,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+      },
+      redirect: "follow",
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    // If redirected to login, cookie is expired
+    if (html.includes("Login") && html.includes("password") && html.length < 5000) return null;
+    if (html.includes("Session has expired") || html.includes("Please log in")) return null;
+    return html;
+  } catch {
+    return null;
+  }
+}
+
+function extractInputValue(html: string, id: string): string {
+  const m = html.match(new RegExp(`id=["']?${id}["']?[^>]*value=["']([^"']*)["']`, "i")) ||
+            html.match(new RegExp(`name=["']?${id}["']?[^>]*value=["']([^"']*)["']`, "i"));
+  return m?.[1] ?? "";
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s{3,}/g, "\n\n")
+    .trim();
+}
 const COGNITO_CLIENT_ID = "1frtspmi2af7o8hqtfsfebrc6";
 const COGNITO_REGION = "us-east-1";
 
@@ -61,23 +138,14 @@ function fmt(date: string): string {
  * Restore Cognito localStorage session, navigate to linked-companies,
  * click "See Jobs" for the requested company (0-based index), and
  * return the browser + page on the ASP claims system.
+ * After navigating, saves ASP session cookies for future fast-path requests.
  */
 async function getFiletracPage(companyIndex = 0): Promise<{
   browser: Browser;
   page: Page;
   aspBase: string;
 }> {
-  let session: { cookies: unknown[]; localStorage: Record<string, string>; sessionStorage?: Record<string, string> };
-  if (process.env.FILETRAC_SESSION_JSON) {
-    session = JSON.parse(process.env.FILETRAC_SESSION_JSON);
-  } else if (fs.existsSync(SESSION_PATH)) {
-    session = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
-  } else {
-    throw new Error(
-      `FileTrac session not found. Set FILETRAC_SESSION_JSON env var or run: ` +
-      `node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs`
-    );
-  }
+  let session = loadSession();
 
   // Proactively refresh Cognito tokens — access/id tokens expire every hour
   // but refresh tokens last 30 days, so this is silent and automatic.
@@ -128,10 +196,19 @@ async function getFiletracPage(companyIndex = 0): Promise<{
   }
   const idx = Math.min(companyIndex, seeJobsBtns.length - 1);
   await seeJobsBtns[idx].click();
-  await page.waitForLoadState("networkidle");
-  await page.waitForTimeout(3000);
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForTimeout(2000);
 
   const aspBase = new URL(page.url()).origin;
+
+  // Save ASP session cookies for fast-path future requests
+  const cookies = await page.context().cookies();
+  const aspCookies = cookies
+    .filter(c => c.domain.includes(new URL(aspBase).hostname))
+    .map(c => `${c.name}=${c.value}`)
+    .join("; ");
+  if (aspCookies) saveAspToSession(aspBase, aspCookies);
+
   return { browser, page, aspBase };
 }
 
@@ -201,23 +278,48 @@ export async function filetracGetClaim(args: {
   claim_id: string;
   company_index?: number;
 }): Promise<CallToolResult> {
+  const claimPath = `/system/claimView.asp?claimID=${args.claim_id}`;
+
+  // ── Fast path: use cached ASP session cookie (skips 30s browser flow) ──
+  const session = loadSession();
+  if (session.aspBase && session.aspCookies) {
+    const html = await fetchAspPage(session.aspBase, session.aspCookies, claimPath);
+    if (html) {
+      const dateContact    = extractInputValue(html, "claimDateContact");
+      const dateInspection = extractInputValue(html, "claimDateInspection");
+      const dateComplete   = extractInputValue(html, "claimDateComplete");
+      const fileNum        = extractInputValue(html, "claimFileID");
+      const bodyText       = htmlToText(html).substring(0, 4000);
+
+      return ok(
+        `Claim Detail (ID: ${args.claim_id}):\n\n` +
+        (fileNum ? `File #: ${fileNum}\n` : "") +
+        `Date of First Contact: ${dateContact || "(not set)"}\n` +
+        `Date of Inspection: ${dateInspection || "(not set)"}\n` +
+        `Date of Claim Complete: ${dateComplete || "(not set)"}\n\n` +
+        `--- Full Details ---\n${bodyText}`
+      );
+    }
+    // Cookie expired — fall through to browser flow which will refresh it
+  }
+
+  // ── Slow path: full browser flow (also refreshes cached ASP cookie) ──
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
 
   try {
-    await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
+    await page.goto(`${aspBase}${claimPath}`);
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(2000);
 
     const bodyText = (await page.locator("body").innerText().catch(() => ""))
       .replace(/\t+/g, " ")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
 
-    // Also grab key field values
-    const dateContact = await page.inputValue("#claimDateContact").catch(() => "");
+    const dateContact    = await page.inputValue("#claimDateContact").catch(() => "");
     const dateInspection = await page.inputValue("#claimDateInspection").catch(() => "");
-    const dateComplete = await page.inputValue("#claimDateComplete").catch(() => "");
-    const fileNum = await page.inputValue("#claimFileID").catch(async () =>
+    const dateComplete   = await page.inputValue("#claimDateComplete").catch(() => "");
+    const fileNum        = await page.inputValue("#claimFileID").catch(async () =>
       (await page.locator("#claimFileID").innerText().catch(() => ""))
     );
 
@@ -227,7 +329,7 @@ export async function filetracGetClaim(args: {
       `Date of First Contact: ${dateContact || "(not set)"}\n` +
       `Date of Inspection: ${dateInspection || "(not set)"}\n` +
       `Date of Claim Complete: ${dateComplete || "(not set)"}\n\n` +
-      `--- Full Details ---\n${bodyText.substring(0, 3000)}`
+      `--- Full Details ---\n${bodyText.substring(0, 4000)}`
     );
   } finally {
     await browser.close();

@@ -49,6 +49,7 @@ export async function calendarCreateEvent(args: {
   location?: string;
   attendees?: string[];
   calendar_id?: string;
+  color_id?: number;
 }): Promise<CallToolResult> {
   const cal = await getCalendar();
   const res = await cal.events.insert({
@@ -60,6 +61,7 @@ export async function calendarCreateEvent(args: {
       start: { dateTime: args.start },
       end: { dateTime: args.end },
       attendees: args.attendees?.map((email) => ({ email })),
+      ...(args.color_id !== undefined && { colorId: String(args.color_id) }),
     },
   });
 
@@ -74,6 +76,7 @@ export async function calendarUpdateEvent(args: {
   description?: string;
   location?: string;
   calendar_id?: string;
+  color_id?: number;
 }): Promise<CallToolResult> {
   const cal = await getCalendar();
   const { event_id, calendar_id, title, start, end, description, location } = args;
@@ -90,6 +93,7 @@ export async function calendarUpdateEvent(args: {
     ...(location !== undefined && { location }),
     ...(start && { start: { dateTime: start } }),
     ...(end && { end: { dateTime: end } }),
+    ...(args.color_id !== undefined && { colorId: String(args.color_id) }),
   };
 
   const res = await cal.events.update({
