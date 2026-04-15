@@ -15,6 +15,31 @@ function extractPlainText(richText: Array<{ plain_text?: string }>) {
   return richText.map((t) => t.plain_text ?? "").join("");
 }
 
+export async function notionListDatabases(): Promise<CallToolResult> {
+  const notion = getNotion();
+  const allDbs: any[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const res: any = await (notion as any).search({
+      filter: { property: "object", value: "database" },
+      page_size: 100,
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    allDbs.push(...res.results);
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+
+  if (allDbs.length === 0) return ok("No databases found in workspace.");
+
+  const lines = allDbs.map((db: any) => {
+    const title = db.title?.[0]?.plain_text ?? "(untitled)";
+    return `ID: ${db.id}\nTitle: ${title}\nURL: ${db.url}`;
+  });
+
+  return ok(`Found ${allDbs.length} database(s):\n\n` + lines.join("\n\n---\n\n"));
+}
+
 export async function notionFindPage(args: {
   query: string;
   max_results?: number;

@@ -28,7 +28,7 @@ import { httpRequest } from "./tools/http.js";
 import { gdocsCreateDocument, gdocsGetDocument, gdocsFindDocument, gdocsAppendText, gdocsFindAndReplace } from "./tools/gdocs.js";
 import { tasksListTasklists, tasksListTasks, tasksCreateTask, tasksUpdateTask, tasksCompleteTask, tasksDeleteTask } from "./tools/tasks.js";
 import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/meet.js";
-import { notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem } from "./tools/notion.js";
+import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem } from "./tools/notion.js";
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
@@ -91,7 +91,8 @@ const TOOLS: Tool[] = [
   { name: "meet_cancel_meeting", description: "Cancel a Google Meet meeting", inputSchema: { type: "object", properties: { event_id: { type: "string" }, calendar_id: { type: "string" } }, required: ["event_id"] } },
 
   // Notion
-  { name: "notion_find_page", description: "Search for pages in Notion", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
+  { name: "notion_list_databases", description: "List ALL databases (grids/tables) in the Notion workspace with their IDs and titles. Use this first to discover database IDs before querying them.", inputSchema: { type: "object", properties: {} } },
+  { name: "notion_find_page", description: "Search for pages and databases in Notion by keyword. Returns both pages and databases by default.", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" }, type: { type: "string", enum: ["page", "database", "all"] } }, required: ["query"] } },
   { name: "notion_get_page", description: "Get the content of a Notion page by ID", inputSchema: { type: "object", properties: { page_id: { type: "string" } }, required: ["page_id"] } },
   { name: "notion_create_page", description: "Create a new Notion page", inputSchema: { type: "object", properties: { title: { type: "string" }, parent_page_id: { type: "string" }, parent_database_id: { type: "string" }, content: { type: "string" } }, required: ["title"] } },
   { name: "notion_append_to_page", description: "Append content to a Notion page", inputSchema: { type: "object", properties: { page_id: { type: "string" }, content: { type: "string" } }, required: ["page_id", "content"] } },
@@ -215,6 +216,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "meet_schedule_meeting": return meetScheduleMeeting(args as any);
     case "meet_get_meeting": return meetGetMeeting(args as any);
     case "meet_cancel_meeting": return meetCancelMeeting(args as any);
+    case "notion_list_databases": return notionListDatabases();
     case "notion_find_page": return notionFindPage(args as any);
     case "notion_get_page": return notionGetPage(args as any);
     case "notion_create_page": return notionCreatePage(args as any);
