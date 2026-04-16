@@ -536,6 +536,82 @@ export async function filetracSubmitTimeExpense(args: {
   }
 }
 
+function parseNotes(html: string, claimId: string): string {
+  const clean = html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "");
+
+  const rows: string[] = [];
+  const trMatches = clean.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
+
+  for (const tr of trMatches) {
+    const cells = (tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [])
+      .map(td => td.replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim())
+      .filter(cell => cell.length > 0);
+
+    if (cells.length >= 3) {
+      rows.push(cells.join(" | "));
+    }
+  }
+
+  if (rows.length === 0) {
+    const text = htmlToText(html);
+    return `Claim ${claimId} — Notes/Diary:\n\n(Raw text — table parse failed)\n${text.substring(0, 5000)}`;
+  }
+
+  return `Claim ${claimId} — Notes/Diary (${rows.length} entries):\n\n${rows.join("\n---\n")}`;
+}
+
+export async function filetracGetNotes(args: {
+  claim_id: string;
+  company_index?: number;
+}): Promise<CallToolResult> {
+  const session = loadSession();
+
+  if (session.aspBase && session.aspCookies) {
+    const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
+      `/system/claimView.asp?claimID=${args.claim_id}`);
+
+    if (claimHtml) {
+      const diaryMatch = claimHtml.match(/href=["']([^"']*[Dd]iary[^"']*)["']/i) ||
+                         claimHtml.match(/href=["']([^"']*[Nn]otes[^"']*claimID[^"']*)["']/i);
+
+      const diaryPath = diaryMatch
+        ? (diaryMatch[1].startsWith("/") ? diaryMatch[1] : `/system/${diaryMatch[1]}`)
+        : `/system/claimDiary.asp?claimID=${args.claim_id}`;
+
+      const diaryHtml = await fetchAspPage(session.aspBase, session.aspCookies, diaryPath);
+      if (diaryHtml) {
+        return ok(parseNotes(diaryHtml, args.claim_id));
+      }
+    }
+    // Cookie expired — fall through to browser
+  }
+
+  // Browser fallback
+  const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
+  try {
+    await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
+    await page.waitForLoadState("domcontentloaded");
+
+    const diaryLink = page.locator('a:has-text("Diary"), a:has-text("Notes"), a[href*="Diary"], a[href*="diary"]').first();
+    const diaryHref = await diaryLink.getAttribute("href").catch(() => null);
+
+    if (diaryHref) {
+      const fullUrl = diaryHref.startsWith("http")
+        ? diaryHref
+        : `${aspBase}/system/${diaryHref.replace(/^\/system\//, "")}`;
+      await page.goto(fullUrl);
+      await page.waitForLoadState("domcontentloaded");
+    }
+
+    const html = await page.content();
+    return ok(parseNotes(html, args.claim_id));
+  } finally {
+    await browser.close();
+  }
+}
+
 export async function filetracListCompanies(args: Record<string, never>): Promise<CallToolResult> {
   let session: { cookies: unknown[]; localStorage: Record<string, string> };
   if (process.env.FILETRAC_SESSION_JSON) {
