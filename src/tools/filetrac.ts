@@ -562,6 +562,15 @@ function parseNotes(html: string, claimId: string): string {
   return `Claim ${claimId} — Notes/Diary (${rows.length} entries):\n\n${rows.join("\n---\n")}`;
 }
 
+// Known FileTrac diary URL patterns to try in order
+const DIARY_PATH_PATTERNS = (claimId: string) => [
+  `/system/claimDiary.asp?claimID=${claimId}`,
+  `/system/msgView.asp?claimID=${claimId}`,
+  `/system/claimNotes.asp?claimID=${claimId}`,
+  `/system/diary.asp?claimID=${claimId}`,
+  `/system/claimMsg.asp?claimID=${claimId}`,
+];
+
 export async function filetracGetNotes(args: {
   claim_id: string;
   company_index?: number;
@@ -569,21 +578,41 @@ export async function filetracGetNotes(args: {
   const session = loadSession();
 
   if (session.aspBase && session.aspCookies) {
+    // First: try to discover the diary link from the claimView page
     const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
       `/system/claimView.asp?claimID=${args.claim_id}`);
 
     if (claimHtml) {
-      const diaryMatch = claimHtml.match(/href=["']([^"']*[Dd]iary[^"']*)["']/i) ||
-                         claimHtml.match(/href=["']([^"']*[Nn]otes[^"']*claimID[^"']*)["']/i);
+      // Extract all hrefs from the page to find the diary link
+      const allHrefs = [...claimHtml.matchAll(/href=["']([^"'#][^"']*)["']/gi)]
+        .map(m => m[1]);
 
-      const diaryPath = diaryMatch
-        ? (diaryMatch[1].startsWith("/") ? diaryMatch[1] : `/system/${diaryMatch[1]}`)
-        : `/system/claimDiary.asp?claimID=${args.claim_id}`;
+      // Look for any link mentioning diary/notes/msg
+      const diaryHref = allHrefs.find(h =>
+        /diary|notes|msg/i.test(h) && !/logout|mailto/i.test(h)
+      );
 
-      const diaryHtml = await fetchAspPage(session.aspBase, session.aspCookies, diaryPath);
-      if (diaryHtml) {
-        return ok(parseNotes(diaryHtml, args.claim_id));
+      if (diaryHref) {
+        const diaryPath = diaryHref.startsWith("/") ? diaryHref : `/system/${diaryHref}`;
+        const diaryHtml = await fetchAspPage(session.aspBase, session.aspCookies, diaryPath);
+        if (diaryHtml) return ok(parseNotes(diaryHtml, args.claim_id));
       }
+
+      // No link found — try known URL patterns one by one
+      for (const path of DIARY_PATH_PATTERNS(args.claim_id)) {
+        const html = await fetchAspPage(session.aspBase, session.aspCookies, path);
+        if (html) return ok(parseNotes(html, args.claim_id));
+      }
+
+      // Still nothing — return claimView links as debug so we can identify the right URL
+      const linkList = allHrefs
+        .filter(h => h.includes(".asp"))
+        .slice(0, 30)
+        .join("\n");
+      return ok(
+        `Could not locate diary page for claim ${args.claim_id}.\n\n` +
+        `ASP links found on claimView (use these to identify the notes URL):\n${linkList}`
+      );
     }
     // Cookie expired — fall through to browser
   }
@@ -593,16 +622,48 @@ export async function filetracGetNotes(args: {
   try {
     await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
     await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(1500);
 
-    const diaryLink = page.locator('a:has-text("Diary"), a:has-text("Notes"), a[href*="Diary"], a[href*="diary"]').first();
-    const diaryHref = await diaryLink.getAttribute("href").catch(() => null);
+    // Collect all links on the page for debugging
+    const allLinks = await page.locator("a[href]").all();
+    const linkMap: string[] = [];
+    for (const link of allLinks) {
+      const href = await link.getAttribute("href").catch(() => "");
+      const text = (await link.innerText().catch(() => "")).trim();
+      if (href && /\.asp/i.test(href)) linkMap.push(`${text || "(no text)"} → ${href}`);
+    }
 
-    if (diaryHref) {
-      const fullUrl = diaryHref.startsWith("http")
-        ? diaryHref
-        : `${aspBase}/system/${diaryHref.replace(/^\/system\//, "")}`;
-      await page.goto(fullUrl);
-      await page.waitForLoadState("domcontentloaded");
+    // Try to click a diary/notes/messages tab
+    const tabCandidates = [
+      'a:has-text("Diary")',
+      'a:has-text("Notes")',
+      'a:has-text("Messages")',
+      'a:has-text("Claim Notes")',
+      'a[href*="diary" i]',
+      'a[href*="notes" i]',
+      'a[href*="msg" i]',
+    ];
+
+    let navigated = false;
+    for (const selector of tabCandidates) {
+      const el = page.locator(selector).first();
+      const href = await el.getAttribute("href").catch(() => null);
+      if (href) {
+        const fullUrl = href.startsWith("http") ? href : `${aspBase}/system/${href.replace(/^.*\/system\//, "")}`;
+        await page.goto(fullUrl);
+        await page.waitForLoadState("domcontentloaded");
+        navigated = true;
+        break;
+      }
+    }
+
+    if (!navigated) {
+      // Return the link map so we can identify the right URL next time
+      return ok(
+        `Could not find diary tab on claimView for claim ${args.claim_id}.\n\n` +
+        `All ASP links found on page (use these to identify the notes URL):\n` +
+        linkMap.join("\n")
+      );
     }
 
     const html = await page.content();
