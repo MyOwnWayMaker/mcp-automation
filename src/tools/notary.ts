@@ -108,6 +108,127 @@ export async function notaryMarkEmailRead(args: {
   return ok(`Email ${args.message_id} marked as read.`);
 }
 
+export async function gmailNotaryFindEmail(args: {
+  query: string;
+  max_results?: number;
+}): Promise<CallToolResult> {
+  const auth = await getNotaryGmailClient();
+  const gmail = google.gmail({ version: "v1", auth });
+  const res = await gmail.users.messages.list({
+    userId: "me",
+    q: args.query,
+    maxResults: args.max_results ?? 10,
+  });
+
+  const messages = res.data.messages ?? [];
+  if (messages.length === 0) return ok("No emails found matching that query.");
+
+  const details = await Promise.all(
+    messages.map((m) =>
+      gmail.users.messages.get({
+        userId: "me",
+        id: m.id!,
+        format: "metadata",
+        metadataHeaders: ["Subject", "From", "Date"],
+      })
+    )
+  );
+
+  const summaries = details.map((d) => {
+    const headers = d.data.payload?.headers ?? [];
+    const get = (name: string) => headers.find((h) => h.name === name)?.value ?? "";
+    return `ID: ${d.data.id}\nFrom: ${get("From")}\nDate: ${get("Date")}\nSubject: ${get("Subject")}`;
+  });
+
+  return ok(summaries.join("\n\n---\n\n"));
+}
+
+export async function gmailNotaryGetEmail(args: {
+  message_id: string;
+}): Promise<CallToolResult> {
+  const auth = await getNotaryGmailClient();
+  const gmail = google.gmail({ version: "v1", auth });
+  const res = await gmail.users.messages.get({
+    userId: "me",
+    id: args.message_id,
+    format: "full",
+  });
+
+  const headers = res.data.payload?.headers ?? [];
+  const get = (name: string) => headers.find((h) => h.name === name)?.value ?? "";
+
+  let body = "";
+  const parts = res.data.payload?.parts ?? [];
+  const textPart = parts.find((p) => p.mimeType === "text/plain");
+  if (textPart?.body?.data) {
+    body = Buffer.from(textPart.body.data, "base64").toString("utf-8");
+  } else if (res.data.payload?.body?.data) {
+    body = Buffer.from(res.data.payload.body.data, "base64").toString("utf-8");
+  }
+
+  return ok([
+    `From: ${get("From")}`,
+    `To: ${get("To")}`,
+    `Date: ${get("Date")}`,
+    `Subject: ${get("Subject")}`,
+    `Thread ID: ${res.data.threadId}`,
+    `Message ID: ${res.data.id}`,
+    "",
+    body || "(no plain-text body)",
+  ].join("\n"));
+}
+
+export async function gmailNotaryReplyToEmail(args: {
+  message_id: string;
+  body: string;
+}): Promise<CallToolResult> {
+  const auth = await getNotaryGmailClient();
+  const gmail = google.gmail({ version: "v1", auth });
+
+  const original = await gmail.users.messages.get({
+    userId: "me",
+    id: args.message_id,
+    format: "metadata",
+    metadataHeaders: ["Subject", "From", "Message-ID"],
+  });
+
+  const headers = original.data.payload?.headers ?? [];
+  const get = (name: string) => headers.find((h) => h.name === name)?.value ?? "";
+  const subject = get("Subject").startsWith("Re:") ? get("Subject") : `Re: ${get("Subject")}`;
+
+  const lines = [
+    `To: ${get("From")}`,
+    `From: drupenterprise1@gmail.com`,
+    `Subject: ${subject}`,
+    "Content-Type: text/plain; charset=utf-8",
+    `In-Reply-To: ${get("Message-ID")}`,
+    `References: ${get("Message-ID")}`,
+    "",
+    args.body,
+  ].join("\r\n");
+
+  const raw = Buffer.from(lines).toString("base64url");
+  const res = await gmail.users.messages.send({
+    userId: "me",
+    requestBody: { raw, threadId: original.data.threadId! },
+  });
+
+  return ok(`Reply sent from drupenterprise1@gmail.com. Message ID: ${res.data.id}`);
+}
+
+export async function gmailNotaryArchiveEmail(args: {
+  message_id: string;
+}): Promise<CallToolResult> {
+  const auth = await getNotaryGmailClient();
+  const gmail = google.gmail({ version: "v1", auth });
+  await gmail.users.messages.modify({
+    userId: "me",
+    id: args.message_id,
+    requestBody: { removeLabelIds: ["INBOX"] },
+  });
+  return ok(`Email ${args.message_id} archived from drupenterprise1@gmail.com.`);
+}
+
 // ─── Availability Checker ─────────────────────────────────────────────────────
 
 export async function notaryCheckAvailability(args: {

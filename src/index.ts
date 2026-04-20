@@ -31,7 +31,7 @@ import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/
 import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, notionAppendToPage, notionQueryDatabase, notionCreateDatabaseItem, notionUpdateDatabaseItem, notionUpdateDatabaseSchema, notionInitializeItemSubtasks, notionSetupClaimsSubtasks, notionUpdateSubtask, notionGetSubtaskStatus } from "./tools/notion.js";
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
-import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime } from "./tools/notary.js";
+import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime, gmailNotaryFindEmail, gmailNotaryGetEmail, gmailNotaryReplyToEmail, gmailNotaryArchiveEmail } from "./tools/notary.js";
 import { notarygadgetCreateSigning, notarygadgetCompleteSigning, notarygadgetEnterMileage, notarygadgetRecordPayment, notarygadgetGetSignings, notarygadgetSendInvoice, notarygadgetDeleteSigning } from "./tools/notarygadget.js";
 import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense, filetracGetNotes } from "./tools/filetrac.js";
 import { xactListAssignments, xactGetAssignment, xactUpdateDates, xactUpdateWorkflowStatus, xactAddNote, xactGetNotes } from "./tools/xactanalysis.js";
@@ -125,6 +125,10 @@ const TOOLS: Tool[] = [
   { name: "notary_get_new_emails", description: "Check drupenterprise1@gmail.com for new notary assignment emails", inputSchema: { type: "object", properties: { max_results: { type: "number" }, include_read: { type: "boolean" } }, required: [] } },
   { name: "notary_send_email", description: "Send an email from drupenterprise1@gmail.com", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, reply_to_message_id: { type: "string" }, thread_id: { type: "string" } }, required: ["to", "subject", "body"] } },
   { name: "notary_mark_email_read", description: "Mark a notary email as read after processing", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
+  { name: "gmail_notary_find_email", description: "Search drupenterprise1@gmail.com using Gmail search syntax", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
+  { name: "gmail_notary_get_email", description: "Get full content of an email from drupenterprise1@gmail.com by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
+  { name: "gmail_notary_reply_to_email", description: "Reply to an email thread from drupenterprise1@gmail.com", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
+  { name: "gmail_notary_archive_email", description: "Archive an email from drupenterprise1@gmail.com inbox", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "notary_check_availability", description: "Check calendar availability and calculate travel time for a signing request", inputSchema: { type: "object", properties: { requested_date: { type: "string", description: "YYYY-MM-DD" }, requested_time: { type: "string", description: "HH:MM AM/PM" }, signing_address: { type: "string" }, estimated_duration_minutes: { type: "number" } }, required: ["requested_date", "requested_time", "signing_address"] } },
   { name: "notary_get_travel_time", description: "Calculate driving time between two addresses", inputSchema: { type: "object", properties: { origin: { type: "string" }, destination: { type: "string" } }, required: ["origin", "destination"] } },
 
@@ -251,6 +255,10 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notary_get_new_emails": return notaryGetNewEmails(args as any);
     case "notary_send_email": return notarySendEmail(args as any);
     case "notary_mark_email_read": return notaryMarkEmailRead(args as any);
+    case "gmail_notary_find_email": return gmailNotaryFindEmail(args as any);
+    case "gmail_notary_get_email": return gmailNotaryGetEmail(args as any);
+    case "gmail_notary_reply_to_email": return gmailNotaryReplyToEmail(args as any);
+    case "gmail_notary_archive_email": return gmailNotaryArchiveEmail(args as any);
     case "notary_check_availability": return notaryCheckAvailability(args as any);
     case "notary_get_travel_time": return notaryGetTravelTime(args as any);
     case "xact_list_assignments": return xactListAssignments(args as any);
