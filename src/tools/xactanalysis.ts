@@ -261,93 +261,103 @@ export async function xactAddNote(args: {
     await page.waitForLoadState("domcontentloaded");
     await page.waitForTimeout(4000);
 
-    // Switch to notes tab
+    // Switch to notes tab and wait for content to load
     await page.evaluate((mfn: string) => (window as any).gotoDetailTab("d_notes", mfn, "ip", false, 0), args.mfn);
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(5000);
 
-    // Click "Add a Note" — try multiple text variants
-    const addBtn = page.locator([
-      'a:has-text("Add a Note")',
-      'button:has-text("Add a Note")',
-      'a:has-text("Add Note")',
-      'button:has-text("Add Note")',
-      'input[value="Add a Note"]',
-      'input[value="Add Note"]',
-    ].join(", "));
+    // ── Step 1: Capture notes tab structure for debugging ──────────────────────
+    // Dump the #d_notes div HTML and all window note-related functions.
+    // This runs on every call so we can see exactly what the UI looks like.
+    const [notesHtml, noteFns, clickableInNotes] = await Promise.all([
+      page.evaluate(() => {
+        const el = document.getElementById("d_notes") || document.querySelector("[id*='notes']");
+        return el ? el.innerHTML.substring(0, 3000) : "(#d_notes not found)";
+      }).catch(() => "(eval failed)"),
+      page.evaluate(() =>
+        Object.keys(window as any)
+          .filter(k => /note|Note/i.test(k) && typeof (window as any)[k] === "function")
+          .join(", ")
+      ).catch(() => ""),
+      page.evaluate(() => {
+        const el = document.getElementById("d_notes");
+        if (!el) return "(no #d_notes)";
+        return Array.from(el.querySelectorAll("a, button, input[type='button'], input[type='submit'], [onclick]"))
+          .map(e => `${e.tagName} | text="${(e as HTMLElement).innerText?.substring(0,40)}" | onclick="${e.getAttribute('onclick') || ''}"`)
+          .join("\n");
+      }).catch(() => ""),
+    ]);
 
-    if (await addBtn.count() === 0) {
-      const pageText = (await page.locator("body").innerText().catch(() => "")).substring(0, 800);
-      return ok(`Could not find 'Add a Note' button on Notes tab.\nPage text:\n${pageText}`);
+    // ── Step 2: Try calling window note functions directly ─────────────────────
+    // XA exposes updateStatus() for status changes — notes likely have a similar API.
+    const directCallResult = await page.evaluate((noteText: string) => {
+      const w = window as any;
+      // Try common XA note-adding JS function names
+      if (typeof w.addNote === "function") { w.addNote(noteText); return "called addNote()"; }
+      if (typeof w.AddNote === "function") { w.AddNote(noteText); return "called AddNote()"; }
+      if (typeof w.saveNote === "function") { w.saveNote(noteText); return "called saveNote()"; }
+      if (typeof w.SaveNote === "function") { w.SaveNote(noteText); return "called SaveNote()"; }
+      if (typeof w.addActionNote === "function") { w.addActionNote(noteText); return "called addActionNote()"; }
+      return null;
+    }, args.note).catch(() => null);
+
+    if (directCallResult) {
+      await page.waitForTimeout(3000);
+      return ok(`✅ Note added to XactAnalysis assignment ${args.mfn} via ${directCallResult}:\n"${args.note.substring(0, 100)}"`);
     }
-    await addBtn.first().click();
 
-    // Poll up to 8 seconds for a textarea to appear — handles both:
-    //   (a) in-page overlay/div that JS shows after click
-    //   (b) iframe dialog that loads asynchronously
-    // Use Promise.race with a timeout on each check to avoid hanging.
-    type TextareaSource = { type: "page" | "frame"; frame?: typeof page; textarea: ReturnType<typeof page.locator> };
-    let source: TextareaSource | null = null;
+    // ── Step 3: Look for note input in the notes tab (textarea or contenteditable) ──
+    await page.waitForTimeout(1000);
+    const noteInputSel = [
+      "#d_notes textarea",
+      "#d_notes [contenteditable='true']",
+      "#d_notes input[type='text']",
+      "textarea",
+      "[contenteditable='true']",
+    ].join(", ");
 
-    for (let i = 0; i < 8 && !source; i++) {
-      await page.waitForTimeout(1000);
+    let noteInput = page.locator(noteInputSel).first();
+    if (await noteInput.count() === 0) {
+      // Click any button in #d_notes that might reveal the input
+      const addBtnInNotes = page.locator(
+        "#d_notes a, #d_notes button, #d_notes input[type='button'], " +
+        'a:has-text("Add a Note"), a:has-text("Add Note"), button:has-text("Add")'
+      ).first();
+      if (await addBtnInNotes.count() > 0) {
+        await addBtnInNotes.click();
+        await page.waitForTimeout(3000);
+        noteInput = page.locator(noteInputSel).first();
+      }
+    }
 
-      // Check main page first (overlay/div scenario)
-      const mainCount = await page.locator("textarea").count().catch(() => 0);
-      if (mainCount > 0) {
-        source = { type: "page", textarea: page.locator("textarea").first() };
-        break;
+    if (await noteInput.count() > 0) {
+      const tagName = await noteInput.evaluate(el => el.tagName.toLowerCase()).catch(() => "unknown");
+      if (tagName === "div" || tagName === "span") {
+        // contenteditable — use type() instead of fill()
+        await noteInput.click();
+        await noteInput.evaluate((el, text) => { (el as HTMLElement).innerText = text; }, args.note);
+      } else {
+        await noteInput.fill(args.note);
       }
 
-      // Check each non-main frame with a hard 1.5s timeout per frame
-      for (const frame of page.frames().slice(1)) {
-        const count = await Promise.race([
-          frame.locator("textarea").count().catch(() => 0),
-          new Promise<number>(r => setTimeout(() => r(0), 1500)),
-        ]);
-        if (count > 0) {
-          source = { type: "frame", frame: frame as any, textarea: frame.locator("textarea").first() };
-          break;
-        }
-      }
-    }
-
-    if (!source) {
-      // Return a debug snapshot so we can see what's on the page
-      const bodySnap = (await page.locator("body").innerText().catch(() => "")).substring(0, 600);
-      const frameUrls = page.frames().map(f => f.url()).join("\n");
-      const inputCount = await page.locator("input, select").count().catch(() => 0);
-      return ok(
-        `Note form not found after 8s polling.\n` +
-        `Frames:\n${frameUrls}\n` +
-        `Main frame: 0 textareas, ${inputCount} other inputs\n` +
-        `Page text:\n${bodySnap}`
-      );
-    }
-
-    const frameOrPage: typeof page = (source.type === "frame" ? source.frame : page) as any;
-
-    // #actionBox is a <select> for note type — select 'General' or first option
-    const actionBox = frameOrPage.locator("#actionBox");
-    if (await actionBox.count() > 0) {
-      await actionBox.selectOption({ label: "General" }).catch(async () => {
-        const firstOpt = await actionBox.locator("option").first().getAttribute("value").catch(() => null);
-        if (firstOpt) await actionBox.selectOption(firstOpt).catch(() => {});
+      // Submit
+      await page.locator(
+        "#d_notes input[type='submit'], #d_notes button[type='submit'], " +
+        "#d_notes input[value*='Save'], #d_notes input[value*='Add'], " +
+        "input[type='submit'], button[type='submit']"
+      ).first().click().catch(async () => {
+        await page.keyboard.press("Enter").catch(() => {});
       });
+      await page.waitForTimeout(3000);
+      return ok(`✅ Note added to XactAnalysis assignment ${args.mfn}:\n"${args.note.substring(0, 100)}"`);
     }
 
-    await source.textarea.fill(args.note);
-
-    // Submit
-    await frameOrPage.locator(
-      'input[type="submit"], button[type="submit"], ' +
-      'button:has-text("Save"), button:has-text("Add"), ' +
-      'input[value*="Save"], input[value*="Add"]'
-    ).first().click().catch(async () => {
-      await page.keyboard.press("Enter").catch(() => {});
-    });
-    await page.waitForTimeout(3000);
-
-    return ok(`✅ Note added to XactAnalysis assignment ${args.mfn}:\n"${args.note.substring(0, 100)}"`);
+    // ── Step 4: Return full debug so we can see what mechanism XA actually uses ──
+    return ok(
+      `Could not add note to ${args.mfn}. Debug snapshot:\n\n` +
+      `=== #d_notes HTML (first 3000 chars) ===\n${notesHtml}\n\n` +
+      `=== Note-related window functions ===\n${noteFns || "(none found)"}\n\n` +
+      `=== Clickable elements in #d_notes ===\n${clickableInNotes}`
+    );
   } finally {
     await browser.close();
   }
