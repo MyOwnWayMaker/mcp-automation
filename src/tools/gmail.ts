@@ -1,4 +1,6 @@
 import { google } from "googleapis";
+import fs from "fs";
+import path from "path";
 import { getGoogleAuthClient } from "../auth/google.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
@@ -200,6 +202,30 @@ export async function gmailReplyToEmail(args: {
   });
 
   return makeTextContent(`Reply sent. Message ID: ${res.data.id}`);
+}
+
+export async function gmailDownloadAttachment(args: {
+  message_id: string;
+  attachment_id: string;
+  dest_path: string;
+}): Promise<CallToolResult> {
+  const gmail = await getGmail();
+  const att = await gmail.users.messages.attachments.get({
+    userId: "me",
+    messageId: args.message_id,
+    id: args.attachment_id,
+  });
+
+  const data = att.data.data;
+  if (!data) return makeTextContent("Attachment has no data.");
+
+  const buf = Buffer.from(data, "base64url");
+  fs.mkdirSync(path.dirname(path.resolve(args.dest_path)), { recursive: true });
+  fs.writeFileSync(args.dest_path, buf);
+
+  return makeTextContent(
+    `Attachment saved: ${args.dest_path}\nSize: ${(buf.length / 1024).toFixed(1)} KB`
+  );
 }
 
 export async function gmailArchiveEmail(args: {

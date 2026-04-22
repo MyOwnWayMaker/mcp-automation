@@ -19,7 +19,7 @@ import {
 import express from "express";
 
 // Tool implementations
-import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail } from "./tools/gmail.js";
+import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -33,7 +33,8 @@ import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspot
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime, gmailNotaryFindEmail, gmailNotaryGetEmail, gmailNotaryReplyToEmail, gmailNotaryArchiveEmail } from "./tools/notary.js";
 import { notarygadgetCreateSigning, notarygadgetUpdateSigning, notarygadgetCompleteSigning, notarygadgetEnterMileage, notarygadgetRecordPayment, notarygadgetGetSignings, notarygadgetSendInvoice, notarygadgetDeleteSigning } from "./tools/notarygadget.js";
-import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense, filetracGetNotes } from "./tools/filetrac.js";
+import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense, filetracGetNotes, filetracBulkGetClaims, filetracBulkAddNote } from "./tools/filetrac.js";
+import { agentRollUpLogs } from "./tools/local.js";
 import { xactListAssignments, xactGetAssignment, xactUpdateDates, xactUpdateWorkflowStatus, xactAddNote, xactGetNotes } from "./tools/xactanalysis.js";
 import { qbFindCustomer, qbCreateCustomer, qbUpdateCustomer, qbFindVendor, qbCreateVendor, qbFindInvoice, qbCreateInvoice, qbSendInvoice, qbVoidInvoice, qbUpdateInvoice, qbCreateExpense, qbFindExpenses, qbCreatePayment, qbFindPayments, qbProfitAndLoss, qbCashFlow, qbBalanceSheet } from "./tools/quickbooks.js";
 
@@ -46,6 +47,7 @@ const TOOLS: Tool[] = [
   { name: "gmail_get_email", description: "Get full content of an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "gmail_reply_to_email", description: "Reply to an existing email thread", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
   { name: "gmail_archive_email", description: "Archive an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
+  { name: "gmail_download_attachment", description: "Download a Gmail attachment to a local file path. Use gmail_get_email first to find attachment IDs (they appear in part.body.attachmentId). Combine with drive_upload_file to push to Drive.", inputSchema: { type: "object", properties: { message_id: { type: "string" }, attachment_id: { type: "string" }, dest_path: { type: "string", description: "Absolute local path to save the file (e.g. /tmp/invoice.pdf)" } }, required: ["message_id", "attachment_id", "dest_path"] } },
 
   // Calendar
   { name: "calendar_list_events", description: "List calendar events within a time range", inputSchema: { type: "object", properties: { calendar_id: { type: "string" }, time_min: { type: "string" }, time_max: { type: "string" }, query: { type: "string" }, max_results: { type: "number" } }, required: [] } },
@@ -151,6 +153,9 @@ const TOOLS: Tool[] = [
   { name: "filetrac_add_note", description: "Add a diary note to a FileTrac claim. Provide either file_number (8-digit) or claim_id — the file number will be looked up automatically if only claim_id is given.", inputSchema: { type: "object", properties: { file_number: { type: "string", description: "8-digit FileTrac file number (e.g. 81030471) — preferred" }, claim_id: { type: "string", description: "Numeric claim ID (alternative to file_number — file number will be looked up automatically)" }, note: { type: "string" }, category: { type: "string", description: "Note category (e.g. 'Inspection Scheduled', 'Update Contact/Inspection')" }, visible_to_client: { type: "boolean" }, company_index: { type: "number" } }, required: ["note"] } },
   { name: "filetrac_submit_time_expense", description: "Submit time and/or expense entries to a FileTrac claim", inputSchema: { type: "object", properties: { file_number: { type: "string", description: "8-digit FileTrac file number" }, date: { type: "string", description: "YYYY-MM-DD or M/D/YYYY" }, hours: { type: "number" }, service_notes: { type: "string" }, expense_amount: { type: "number" }, expense_description: { type: "string" }, company_index: { type: "number" } }, required: ["file_number"] } },
   { name: "filetrac_get_notes", description: "Read all diary/notes entries for a FileTrac claim. Returns all notes with date, author, category, and text.", inputSchema: { type: "object", properties: { claim_id: { type: "string", description: "Numeric FileTrac claim ID (same as used in filetrac_get_claim)" }, company_index: { type: "number", description: "0=Accelerated, 1=Premier Claims (default), 2=Stewardship, 3=US Claim Solutions" } }, required: ["claim_id"] } },
+  { name: "filetrac_bulk_get_claims", description: "Get claim details for multiple FileTrac claims in one call (max 20). Uses fast-path ASP session — no browser needed per claim. Returns contact/inspection dates + full detail for each.", inputSchema: { type: "object", properties: { claim_ids: { type: "array", items: { type: "string" }, description: "Array of numeric claim IDs (up to 20)" }, company_index: { type: "number" } }, required: ["claim_ids"] } },
+  { name: "filetrac_bulk_add_note", description: "Add notes to multiple FileTrac claims in one call (max 10). Takes an array of {claim_id, note} pairs. Uses a single browser session for efficiency.", inputSchema: { type: "object", properties: { notes: { type: "array", items: { type: "object", properties: { claim_id: { type: "string" }, note: { type: "string" } }, required: ["claim_id", "note"] }, description: "Array of claim_id + note pairs (up to 10)" }, category: { type: "string", description: "Note category to apply to all notes (optional)" }, company_index: { type: "number" } }, required: ["notes"] } },
+  { name: "agent_roll_up_logs", description: "Scan ~/Desktop/dispatch_subagents/*/log.md and append a consolidated summary block to dispatch_master_context.md. Designed for Nina's nightly run.", inputSchema: { type: "object", properties: { max_lines_per_agent: { type: "number", description: "How many tail lines to include per agent log (default 60)" } }, required: [] } },
 
   // NotaryGadget
   { name: "notarygadget_create_signing", description: "Create a new signing order in NotaryGadget. Supports up to 4 signers. ZIP code is required — include it in location (e.g. '4328 Ben Ave, Studio City, CA 91604') or pass it as the 'zip' parameter.", inputSchema: { type: "object", properties: { customer: { type: "string", description: "Company name (e.g. Pickford Escrow)" }, date: { type: "string", description: "YYYY-MM-DD" }, time: { type: "string", description: "HH:MM (24h or 12h)" }, fee: { type: "number", description: "Fee amount (e.g. 150, 250, 75)" }, location: { type: "string", description: "Full address including ZIP (e.g. '4328 Ben Ave, Studio City, CA 91604')" }, city: { type: "string", description: "City (optional if included in location)" }, state: { type: "string", description: "2-letter state code, default CA" }, zip: { type: "string", description: "5-digit ZIP code — REQUIRED if not included in location string" }, signer_names: { type: "array", items: { type: "string" }, description: "All signer names — supports up to 4 (e.g. ['James Maxwell', 'Kevin Herglotz'])" }, package_type: { type: "string", description: "e.g. Seller's package, Buyer's package, Single document" }, notes: { type: "string" } }, required: ["customer", "date", "time", "fee", "location", "signer_names"] } },
@@ -200,6 +205,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "gmail_get_email": return gmailGetEmail(args as any);
     case "gmail_reply_to_email": return gmailReplyToEmail(args as any);
     case "gmail_archive_email": return gmailArchiveEmail(args as any);
+    case "gmail_download_attachment": return gmailDownloadAttachment(args as any);
     case "calendar_list_events": return calendarListEvents(args as any);
     case "calendar_create_event": return calendarCreateEvent(args as any);
     case "calendar_update_event": return calendarUpdateEvent(args as any);
@@ -281,6 +287,9 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "filetrac_add_note": return filetracAddNote(args as any);
     case "filetrac_submit_time_expense": return filetracSubmitTimeExpense(args as any);
     case "filetrac_get_notes": return filetracGetNotes(args as any);
+    case "filetrac_bulk_get_claims": return filetracBulkGetClaims(args as any);
+    case "filetrac_bulk_add_note": return filetracBulkAddNote(args as any);
+    case "agent_roll_up_logs": return agentRollUpLogs(args as any);
     case "notarygadget_create_signing": return notarygadgetCreateSigning(args as any);
     case "notarygadget_update_signing": return notarygadgetUpdateSigning(args as any);
     case "notarygadget_complete_signing": return notarygadgetCompleteSigning(args as any);

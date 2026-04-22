@@ -259,6 +259,26 @@ export async function notarygadgetCreateSigning(args: {
       } catch { return "1 hour after signing"; }
     })();
 
+    // Post-save verification: navigate back to signings list and confirm the row exists
+    if (saved) {
+      await page.evaluate(() => (window as any).SelectPage('Signings'));
+      await page.waitForTimeout(3000);
+
+      const verifyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
+      const signerLast = (args.signer_names[0]?.split(" ").pop() ?? "").toLowerCase();
+      const customerFirst = args.customer.split(" ")[0].toLowerCase();
+      const verified = (signerLast && verifyText.includes(signerLast)) ||
+                       (customerFirst && verifyText.includes(customerFirst));
+
+      if (!verified) {
+        return ok(
+          `⚠️ Signing saved but post-save verification mismatch — signing may not have persisted.\n` +
+          `Customer: ${args.customer} | Signer: ${args.signer_names.join(", ")} | Date: ${formattedDate} @ ${args.time}\n` +
+          `Check NotaryGadget manually to confirm.`
+        );
+      }
+    }
+
     if (!saved) {
       return ok(
         `⚠️ Signing may not have saved — could not confirm in NotaryGadget.\n` +
@@ -267,7 +287,7 @@ export async function notarygadgetCreateSigning(args: {
     }
 
     return ok(
-      `✅ Signing created in NotaryGadget!\n` +
+      `✅ Signing created and verified in NotaryGadget!\n` +
       `Customer: ${args.customer}\n` +
       `Date: ${formattedDate} at ${args.time}\n` +
       `Location: ${street}${city ? `, ${city}` : ""}${state ? `, ${state}` : ""}${zip ? ` ${zip}` : ""}\n` +
@@ -294,26 +314,47 @@ export async function notarygadgetUpdateSigning(args: {
   package_type?: string;
 }): Promise<CallToolResult> {
   const { browser, page } = await getPage();
+  const log: string[] = [];  // step-by-step log returned in result for debugging
 
   try {
+    log.push("goToSignings");
     await goToSignings(page);
 
     // Select the target signing row
+    log.push(`locating #trSigning${args.signing_id}`);
     const row = page.locator(`#trSigning${args.signing_id}`);
-    if (await row.count() === 0) {
-      return ok(`Signing ID ${args.signing_id} not found in NotaryGadget.`);
+    const rowCount = await row.count();
+    log.push(`row count=${rowCount}`);
+    if (rowCount === 0) {
+      return ok(`Signing ID ${args.signing_id} not found in NotaryGadget.\nLog: ${log.join(" → ")}`);
     }
     await row.click();
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1500);
+    log.push("row clicked");
 
-    // Open the edit form — EditSigning loads existing data from server, needs up to 6s
+    // Open the edit form — EditSigning fetches existing data async from server
+    log.push("calling EditSigning");
     await page.evaluate((id: string) => (window as any).EditSigning(id), args.signing_id);
 
-    // Wait for the fee field to be populated (confirms form is ready with existing data)
-    await page.waitForFunction(() => {
+    // Wait for the fee field to have a non-empty value — proves form data has loaded
+    // Bug fix: previous condition (el?.value !== undefined) was always true immediately
+    const formReady = await page.waitForFunction(() => {
       const el = document.getElementById("txtSigningFee") as HTMLInputElement | null;
-      return el?.value !== undefined;  // field exists (even if empty)
-    }, { timeout: 8000 }).catch(() => {});  // continue even if timeout — do our best
+      return !!(el && el.value && el.value.trim().length > 0);
+    }, { timeout: 12000 }).then(() => true).catch(() => false);
+
+    const feeValue = await page.inputValue("#txtSigningFee").catch(() => "(not found)");
+    log.push(`form ready=${formReady}, fee="${feeValue}"`);
+
+    if (!formReady) {
+      // Form didn't load — dump page state and bail
+      const bodySnap = (await page.locator("body").innerText().catch(() => "")).substring(0, 500);
+      return ok(
+        `⏱ Signing ${args.signing_id}: form did not load within 12s.\n` +
+        `Log: ${log.join(" → ")}\n` +
+        `Page snapshot: ${bodySnap}`
+      );
+    }
 
     const updated: string[] = [];
 
@@ -339,7 +380,12 @@ export async function notarygadgetUpdateSigning(args: {
 
     // Signers — replaces all signers when provided
     if (args.signer_names && args.signer_names.length > 0) {
+      log.push(`fillSigners(${args.signer_names.join(", ")})`);
       await fillSigners(page, args.signer_names);
+      // Verify first signer filled correctly
+      const s1first = await page.inputValue("#txtSigner1First").catch(() => "?");
+      const s1last  = await page.inputValue("#txtSigner1Last").catch(() => "?");
+      log.push(`signer1="${s1first} ${s1last}"`);
       updated.push(`Signers: ${args.signer_names.join(", ")}`);
     }
 
@@ -409,12 +455,31 @@ export async function notarygadgetUpdateSigning(args: {
     }
 
     // Save the updated signing
+    log.push("calling SaveSigning");
     await page.evaluate(() => (window as any).SaveSigning());
     await page.waitForTimeout(5000);
+    log.push("SaveSigning complete");
+
+    // Post-save verification: check the signing row still shows correct signer
+    if (args.signer_names?.length) {
+      const bodyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
+      const signerLast = (args.signer_names[0].split(" ").pop() ?? "").toLowerCase();
+      const verified = signerLast && bodyText.includes(signerLast);
+      log.push(`post-save verify="${signerLast}" found=${verified}`);
+      if (!verified) {
+        return ok(
+          `⚠️ Signing ${args.signing_id}: save completed but post-save verification mismatch.\n` +
+          `Expected to see signer "${args.signer_names[0]}" in page after save.\n` +
+          `Log: ${log.join(" → ")}\n` +
+          `Fields attempted:\n` + updated.map(u => `  • ${u}`).join("\n")
+        );
+      }
+    }
 
     return ok(
-      `✅ Signing ${args.signing_id} updated (invoice number preserved):\n` +
-      updated.map(u => `  • ${u}`).join("\n")
+      `✅ Signing ${args.signing_id} updated and verified:\n` +
+      updated.map(u => `  • ${u}`).join("\n") +
+      `\nLog: ${log.join(" → ")}`
     );
   } finally {
     await browser.close();

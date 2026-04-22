@@ -645,14 +645,18 @@ function parseNotes(html: string, claimId: string): string {
       .map(td => td.replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim())
       .filter(cell => cell.length > 0);
 
-    if (cells.length >= 3) {
-      rows.push(cells.join(" | "));
+    // Accept rows with 2+ cells (date + text is enough)
+    if (cells.length >= 2) {
+      // Skip rows that look like form scaffolding (all short labels)
+      const hasSubstance = cells.some(c => c.length > 10);
+      if (hasSubstance) rows.push(cells.join(" | "));
     }
   }
 
   if (rows.length === 0) {
-    const text = htmlToText(html);
-    return `Claim ${claimId} — Notes/Diary:\n\n(Raw text — table parse failed)\n${text.substring(0, 5000)}`;
+    // Return raw body text so the caller can see what's actually on the page
+    const bodyText = htmlToText(html);
+    return `(table-parse-failed)\n${bodyText.substring(0, 6000)}`;
   }
 
   return `Claim ${claimId} — Notes/Diary (${rows.length} entries):\n\n${rows.join("\n---\n")}`;
@@ -682,12 +686,20 @@ const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
   return patterns;
 };
 
-/** Returns true if the HTML page looks like it actually contains notes content (not scaffolding). */
+/**
+ * Returns true if the HTML is a notes-related page (either creation form OR list).
+ * Used to reject completely wrong pages (login, 404, etc).
+ */
 function looksLikeNotesPage(html: string): boolean {
-  // FileTrac notes pages reference these field IDs or structural markers
   return html.includes("msgDate") || html.includes("msgText") || html.includes("msgCatID") ||
-         html.includes("msgNoteID") || html.includes("Diary") || html.includes("diary") ||
+         html.includes("msgNoteID") || html.includes("quickNotes") ||
+         html.includes("Diary") || html.includes("diary") ||
          (html.includes("Note") && /<td/i.test(html));
+}
+
+/** Returns true if the parsed result actually contains note rows (not just form scaffolding). */
+function hasNoteContent(parsed: string): boolean {
+  return !parsed.startsWith("(table-parse-failed)");
 }
 
 export async function filetracGetNotes(args: {
@@ -697,83 +709,240 @@ export async function filetracGetNotes(args: {
   const session = loadSession();
   const diag: string[] = [`[filetracGetNotes] claim_id=${args.claim_id}`];
 
-  // ── Fast path: if we have cached ASP cookies, try to get the file number from claimView HTML ──
+  // ── Step 1: Get file number via fast-path ASP fetch ──────────────────────────
+  let fileNum = "";
   if (session.aspBase && session.aspCookies) {
     const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
       `/system/claimView.asp?claimID=${args.claim_id}`);
-
     if (claimHtml) {
-      const fileNum = extractFileNumber(claimHtml);
-      diag.push(`Fast-path claimView fetched (${claimHtml.length} chars). extractFileNumber → "${fileNum}"`);
-
-      if (fileNum) {
-        // We have the file number — navigate directly to quickNotes with it
-        const notesUrl = `/system/quickNotes.asp?claimFID=${fileNum}`;
-        diag.push(`Navigating to: ${notesUrl}`);
-        const notesHtml = await fetchAspPage(session.aspBase, session.aspCookies, notesUrl);
-
-        if (notesHtml && looksLikeNotesPage(notesHtml)) {
-          const result = parseNotes(notesHtml, args.claim_id);
-          if (!result.includes("table parse failed")) return ok(result);
-          diag.push("parseNotes found no rows — table parse failed on quickNotes page");
-          return ok(result + `\n\nDiag: ${diag.join(" | ")}`);
-        }
-        diag.push(`quickNotes fetch returned ${notesHtml ? `${notesHtml.length} chars (not a notes page)` : "null"}`);
-      } else {
-        diag.push("extractFileNumber returned empty — claimFID not found in static HTML, going to browser");
-      }
+      fileNum = extractFileNumber(claimHtml);
+      diag.push(`Fast-path claimView ${claimHtml.length}chars → fileNum="${fileNum}"`);
     } else {
-      diag.push("Fast-path claimView returned null — cookie expired, going to browser");
+      diag.push("Fast-path claimView returned null — cookie expired");
     }
   }
 
-  // ── Browser path — JS executes, so #claimFileID is populated, and page links are real ──
+  // ── Step 2: Try all known notes URL patterns via fast-path ────────────────────
+  if (fileNum && session.aspBase && session.aspCookies) {
+    const urlsToTry = [
+      `/system/quickNotesList.asp?claimFID=${fileNum}`,
+      `/system/quickNotes.asp?claimFID=${fileNum}`,
+      `/system/claimDiary.asp?claimFID=${fileNum}`,
+      `/system/msgView.asp?claimFID=${fileNum}`,
+      `/system/claimNotes.asp?claimFID=${fileNum}`,
+      `/system/claimMsg.asp?claimFID=${fileNum}`,
+    ];
+
+    for (const url of urlsToTry) {
+      const html = await fetchAspPage(session.aspBase, session.aspCookies, url);
+      diag.push(`${url} → ${html ? `${html.length}chars` : "null/rejected"}`);
+
+      if (html && looksLikeNotesPage(html)) {
+        const result = parseNotes(html, args.claim_id);
+        if (hasNoteContent(result)) {
+          return ok(result);
+        }
+        // Parse returned body text fallback — keep going to try next URL
+        diag.push(`parseNotes found no rows at ${url} — trying next pattern`);
+        // If this is quickNotes.asp (most likely real page), return body text with debug
+        if (url.includes("quickNotes.asp")) {
+          return ok(
+            `Notes page reached (${url}) but table parser found no rows.\n` +
+            `Diag: ${diag.join(" | ")}\n\n` +
+            `=== Raw page body (first 5000 chars) ===\n` +
+            result  // already contains body text from parseNotes fallback
+          );
+        }
+      }
+    }
+    diag.push("All fast-path URL patterns exhausted");
+  }
+
+  // ── Step 3: Browser path — also try claimID-based URLs ───────────────────────
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
   try {
     await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
     await page.waitForLoadState("domcontentloaded");
 
-    // Wait up to 8s for #claimFileID to contain a value (JS-rendered)
-    const fileNum = await page.waitForFunction(() => {
+    // Wait up to 8s for #claimFileID to be JS-populated
+    const browserFileNum = await page.waitForFunction(() => {
       const el = document.getElementById("claimFileID") as HTMLInputElement | null;
       return el?.value && el.value.trim().length > 0 ? el.value.trim() : null;
     }, { timeout: 8000 }).then(h => h.jsonValue()).catch(async () => {
-      // Fallback: check page HTML for claimFID= in links
       const html = await page.content();
       return extractFileNumber(html) || null;
     });
 
-    diag.push(`Browser claimView #claimFileID → "${fileNum}"`);
+    diag.push(`Browser claimView #claimFileID → "${browserFileNum}"`);
+    const fn = (browserFileNum as string | null) || fileNum;
 
-    if (fileNum) {
-      const notesUrl = `${aspBase}/system/quickNotes.asp?claimFID=${fileNum}`;
-      diag.push(`Navigating to: ${notesUrl}`);
-      await page.goto(notesUrl);
+    // Try URL patterns in browser (handles JS-gated pages)
+    const browserUrls = fn
+      ? [
+          `${aspBase}/system/quickNotesList.asp?claimFID=${fn}`,
+          `${aspBase}/system/quickNotes.asp?claimFID=${fn}`,
+          `${aspBase}/system/msgView.asp?claimFID=${fn}`,
+          `${aspBase}/system/claimDiary.asp?claimID=${args.claim_id}`,
+          `${aspBase}/system/msgView.asp?claimID=${args.claim_id}`,
+        ]
+      : [
+          `${aspBase}/system/claimDiary.asp?claimID=${args.claim_id}`,
+          `${aspBase}/system/msgView.asp?claimID=${args.claim_id}`,
+        ];
+
+    for (const url of browserUrls) {
+      await page.goto(url);
       await page.waitForLoadState("domcontentloaded");
       await page.waitForTimeout(2000);
 
       const html = await page.content();
-      const result = parseNotes(html, args.claim_id);
-      if (!result.includes("table parse failed")) return ok(result);
-      return ok(result + `\n\nDiag: ${diag.join(" | ")}`);
+      diag.push(`Browser ${url} → ${html.length}chars`);
+
+      if (looksLikeNotesPage(html)) {
+        const result = parseNotes(html, args.claim_id);
+        if (hasNoteContent(result)) return ok(result);
+
+        // Return with raw body + full debug so we can see exact HTML structure
+        const bodyText = await page.locator("body").innerText().catch(() => "");
+        return ok(
+          `Notes page reached but no parseable rows found.\n` +
+          `URL: ${url}\nDiag: ${diag.join(" | ")}\n\n` +
+          `=== Body text (first 4000 chars) ===\n` +
+          bodyText.replace(/\s{3,}/g, "\n").trim().substring(0, 4000)
+        );
+      }
     }
 
-    // Still empty — return all links so we can see the right URL
-    const allLinks = await page.locator("a[href]").all();
-    const linkMap: string[] = [];
-    for (const link of allLinks) {
-      const href = await link.getAttribute("href").catch(() => "");
-      const text = (await link.innerText().catch(() => "")).trim();
-      if (href && /\.asp/i.test(href)) linkMap.push(`${text || "(no text)"} → ${href}`);
-    }
     return ok(
-      `Could not get file number for claim ${args.claim_id} even after browser render.\n` +
-      `Diag: ${diag.join(" | ")}\n\n` +
-      `All ASP links on claimView:\n${linkMap.join("\n")}`
+      `Could not locate notes for claim ${args.claim_id} (file #${fn || "unknown"}).\n` +
+      `Diag: ${diag.join(" | ")}`
     );
   } finally {
     await browser.close();
   }
+}
+
+export async function filetracBulkGetClaims(args: {
+  claim_ids: string[];
+  company_index?: number;
+}): Promise<CallToolResult> {
+  const ids = args.claim_ids.slice(0, 20); // safety cap at 20
+  const session = loadSession();
+  const results: string[] = [];
+  const failed: string[] = [];
+
+  for (const claimId of ids) {
+    const claimPath = `/system/claimView.asp?claimID=${claimId}`;
+
+    if (session.aspBase && session.aspCookies) {
+      const html = await fetchAspPage(session.aspBase, session.aspCookies, claimPath);
+      const markers = [
+        html?.includes("claimFileID"),
+        html?.includes("claimDateContact"),
+        html?.includes("claimDateInspection") || html?.includes("claimDateLoss"),
+        html?.includes(`claimID=${claimId}`),
+      ].filter(Boolean).length;
+
+      if (html && markers >= 2) {
+        const fileNum        = extractFileNumber(html);
+        const dateContact    = extractInputValue(html, "claimDateContact");
+        const dateInspection = extractInputValue(html, "claimDateInspection");
+        const dateComplete   = extractInputValue(html, "claimDateComplete");
+        const afterScripts   = html
+          .replace(/<script[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[\s\S]*?<\/style>/gi, "");
+        const bodyText = afterScripts
+          .replace(/<[^>]+>/g, " ")
+          .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
+          .split("\n").map((l: string) => l.trim()).filter((l: string) => l.length > 2)
+          .join("\n").replace(/\n{3,}/g, "\n\n")
+          .substring(0, 1500);
+
+        results.push(
+          `=== Claim ${claimId}${fileNum ? ` (File #${fileNum})` : ""} ===\n` +
+          `Contact: ${dateContact || "(not set)"} | Inspection: ${dateInspection || "(not set)"} | Complete: ${dateComplete || "(not set)"}\n` +
+          bodyText
+        );
+        continue;
+      }
+    }
+
+    failed.push(claimId);
+    results.push(`=== Claim ${claimId} === FAILED — session expired or claim not found`);
+  }
+
+  const header = `Bulk claim details (${results.length - failed.length} ok, ${failed.length} failed) — ${ids.length} requested:\n\n`;
+  return ok(header + results.join("\n\n"));
+}
+
+export async function filetracBulkAddNote(args: {
+  notes: Array<{ claim_id: string; note: string }>;
+  category?: string;
+  company_index?: number;
+}): Promise<CallToolResult> {
+  const items = args.notes.slice(0, 10); // safety cap
+  const session = loadSession();
+  const results: string[] = [];
+
+  // Fast-path: resolve file numbers for all claim IDs before launching browser
+  const fileNumbers: Record<string, string> = {};
+  if (session.aspBase && session.aspCookies) {
+    for (const { claim_id } of items) {
+      const html = await fetchAspPage(session.aspBase, session.aspCookies,
+        `/system/claimView.asp?claimID=${claim_id}`);
+      if (html) {
+        const fn = extractFileNumber(html);
+        if (fn) fileNumbers[claim_id] = fn;
+      }
+    }
+  }
+
+  // Single browser session for all note submissions
+  const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
+  try {
+    for (const { claim_id, note } of items) {
+      const fileNumber = fileNumbers[claim_id];
+      if (!fileNumber) {
+        results.push(`❌ Claim ${claim_id}: could not determine file number — skipped`);
+        continue;
+      }
+
+      await page.goto(`${aspBase}/system/quickNotes.asp?claimFID=${fileNumber}`);
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(2000);
+
+      await page.fill("#msgText", note);
+
+      if (args.category) {
+        await page.selectOption("#msgCatID", { label: args.category }).catch(async () => {
+          const options = await page.locator("#msgCatID option").all();
+          for (const opt of options) {
+            const text = await opt.innerText();
+            if (text.toLowerCase().includes(args.category!.toLowerCase())) {
+              const val = await opt.getAttribute("value");
+              if (val) await page.selectOption("#msgCatID", val);
+              break;
+            }
+          }
+        });
+      }
+
+      await page.click('input[type="button"][value*="Save"], input[type="submit"], button[type="submit"]').catch(async () => {
+        await page.evaluate(() => {
+          const form = document.getElementById("frmNotes") as HTMLFormElement;
+          if (form) form.submit();
+        });
+      });
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(2000);
+
+      results.push(`✅ Claim ${claim_id} (File #${fileNumber}): note added`);
+    }
+  } finally {
+    await browser.close();
+  }
+
+  return ok(`Bulk note results (${items.length} claims):\n${results.join("\n")}`);
 }
 
 export async function filetracListCompanies(args: Record<string, never>): Promise<CallToolResult> {
