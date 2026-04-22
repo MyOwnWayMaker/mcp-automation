@@ -64,6 +64,31 @@ async function fetchAspPage(aspBase: string, aspCookies: string, path: string): 
   }
 }
 
+/**
+ * Extract the 7-9 digit FileTrac file number from claimView HTML.
+ * Tries multiple strategies because claimFileID value="" is JS-rendered (empty in static HTML),
+ * but the file number DOES appear in navigation links as claimFID=XXXXXXXX.
+ */
+function extractFileNumber(html: string): string {
+  // 1. claimFID= in any href/onclick/script on the page — most reliable for static HTML
+  const mLink = html.match(/claimFID=(\d{7,9})/i);
+  if (mLink) return mLink[1];
+
+  // 2. Input value (works when JS has already rendered, i.e. in browser-fetched HTML)
+  const mInput = extractInputValue(html, "claimFileID");
+  if (mInput) return mInput;
+
+  // 3. JavaScript variable assignment
+  const mJS = html.match(/(?:claimFileID|claimFID)\s*[=:]\s*['"](\d{7,9})['"]?/i);
+  if (mJS) return mJS[1];
+
+  // 4. "File #" label in page text
+  const mText = html.match(/File\s*#[:\s]*(\d{7,9})/i);
+  if (mText) return mText[1];
+
+  return "";
+}
+
 function extractInputValue(html: string, id: string): string {
   // Pattern A: id/name BEFORE value — only return if value is non-empty
   const mA = html.match(new RegExp(`(?:id|name)=["']?${id}["']?[^>]*value=["']([^"']+)["']`, "i"));
@@ -291,8 +316,14 @@ export async function filetracGetClaim(args: {
   const session = loadSession();
   if (session.aspBase && session.aspCookies) {
     const html = await fetchAspPage(session.aspBase, session.aspCookies, claimPath);
-    // Validate this is actually a claim page (not a stale-session error page)
-    if (html && (html.includes("claimFileID") || html.includes("claimDateContact") || html.includes(`claimID=${args.claim_id}`))) {
+    // Require at least 2 of 4 claim-specific markers — single marker can appear on nav/error pages
+    const claimMarkers = [
+      html?.includes("claimFileID"),
+      html?.includes("claimDateContact"),
+      html?.includes("claimDateInspection") || html?.includes("claimDateLoss"),
+      html?.includes(`claimID=${args.claim_id}`),
+    ].filter(Boolean).length;
+    if (html && claimMarkers >= 2) {
       const dateContact    = extractInputValue(html, "claimDateContact");
       const dateInspection = extractInputValue(html, "claimDateInspection");
       const dateComplete   = extractInputValue(html, "claimDateComplete");
@@ -429,20 +460,38 @@ export async function filetracAddNote(args: {
     return ok("filetrac_add_note requires either file_number or claim_id.");
   }
 
-  // If only claim_id provided, look up the file number from claimView
+  // If only claim_id provided, look up the file number
   let fileNumber = args.file_number ?? "";
   if (!fileNumber && args.claim_id) {
+    // Fast path: fetch static HTML and search for claimFID= in navigation links
     const session = loadSession();
     if (session.aspBase && session.aspCookies) {
       const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
         `/system/claimView.asp?claimID=${args.claim_id}`);
-      if (claimHtml) {
-        fileNumber = extractInputValue(claimHtml, "claimFileID");
+      if (claimHtml) fileNumber = extractFileNumber(claimHtml);
+    }
+
+    // Browser path: JS-rendered #claimFileID value is always correct
+    if (!fileNumber) {
+      const { browser: lookupBrowser, page: lookupPage, aspBase: lookupBase } = await getFiletracPage(args.company_index ?? 1);
+      try {
+        await lookupPage.goto(`${lookupBase}/system/claimView.asp?claimID=${args.claim_id}`);
+        await lookupPage.waitForLoadState("domcontentloaded");
+        fileNumber = await lookupPage.waitForFunction(() => {
+          const el = document.getElementById("claimFileID") as HTMLInputElement | null;
+          return el?.value?.trim() || null;
+        }, { timeout: 8000 }).then(h => h.jsonValue()).catch(async () => {
+          const html = await lookupPage.content();
+          return extractFileNumber(html) || "";
+        }) as string;
+      } finally {
+        await lookupBrowser.close();
       }
     }
+
     if (!fileNumber) {
       return ok(`Could not determine file number for claim ID ${args.claim_id}. ` +
-        `Please provide file_number directly (8-digit number from FileTrac).`);
+        `Please provide file_number directly (8-digit number shown in FileTrac).`);
     }
   }
 
@@ -646,102 +695,70 @@ export async function filetracGetNotes(args: {
   company_index?: number;
 }): Promise<CallToolResult> {
   const session = loadSession();
+  const diag: string[] = [`[filetracGetNotes] claim_id=${args.claim_id}`];
 
+  // ── Fast path: if we have cached ASP cookies, try to get the file number from claimView HTML ──
   if (session.aspBase && session.aspCookies) {
-    // First: fetch claimView to extract file number and discover diary links
     const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
       `/system/claimView.asp?claimID=${args.claim_id}`);
 
     if (claimHtml) {
-      // Extract file number — diary URLs use claimFID (file number), not claimID
-      let fileNum = extractInputValue(claimHtml, "claimFileID");
+      const fileNum = extractFileNumber(claimHtml);
+      diag.push(`Fast-path claimView fetched (${claimHtml.length} chars). extractFileNumber → "${fileNum}"`);
 
-      // Fallback: search for 8-digit number near "claimFileID" text anywhere in the HTML
-      // (handles cases where the field is rendered as text, not an <input>)
-      if (!fileNum) {
-        const mFallback = claimHtml.match(/claimFileID[^>]{0,200}?(\d{8})/i) ||
-                          claimHtml.match(/File\s*#[:\s]*(\d{8})/i) ||
-                          claimHtml.match(/(\d{8})/);  // last resort: first 8-digit number on page
-        if (mFallback) fileNum = mFallback[1];
-      }
+      if (fileNum) {
+        // We have the file number — navigate directly to quickNotes with it
+        const notesUrl = `/system/quickNotes.asp?claimFID=${fileNum}`;
+        diag.push(`Navigating to: ${notesUrl}`);
+        const notesHtml = await fetchAspPage(session.aspBase, session.aspCookies, notesUrl);
 
-      // Extract all hrefs from the page to find the diary link
-      const allHrefs = [...claimHtml.matchAll(/href=["']([^"'#][^"']*)["']/gi)]
-        .map(m => m[1]);
-
-      // Look for any link mentioning diary/notes/msg — but NOT a parameterless quickNotes.asp
-      // (that's the blank add-note form; we need quickNotes.asp?claimFID=XXXX with a file number)
-      const diaryHref = allHrefs.find(h => {
-        if (!/diary|notes|msg/i.test(h)) return false;
-        if (/logout|mailto|quickClaim|quickTime/i.test(h)) return false;
-        if (/quickNotes\.asp(?!\?claimFID=)/i.test(h)) return false; // blank form — useless
-        return true;
-      });
-
-      if (diaryHref) {
-        const diaryPath = diaryHref.startsWith("/") ? diaryHref : `/system/${diaryHref}`;
-        const diaryHtml = await fetchAspPage(session.aspBase, session.aspCookies, diaryPath);
-        if (diaryHtml && looksLikeNotesPage(diaryHtml)) {
-          const result = parseNotes(diaryHtml, args.claim_id);
+        if (notesHtml && looksLikeNotesPage(notesHtml)) {
+          const result = parseNotes(notesHtml, args.claim_id);
           if (!result.includes("table parse failed")) return ok(result);
+          diag.push("parseNotes found no rows — table parse failed on quickNotes page");
+          return ok(result + `\n\nDiag: ${diag.join(" | ")}`);
         }
+        diag.push(`quickNotes fetch returned ${notesHtml ? `${notesHtml.length} chars (not a notes page)` : "null"}`);
+      } else {
+        diag.push("extractFileNumber returned empty — claimFID not found in static HTML, going to browser");
       }
-
-      // No link found — try known URL patterns (file-number-based first)
-      // Skip any page that doesn't look like a notes page, keep trying if table parse fails
-      let lastParseAttempt = "";
-      for (const path of DIARY_PATH_PATTERNS(args.claim_id, fileNum || undefined)) {
-        const html = await fetchAspPage(session.aspBase, session.aspCookies, path);
-        if (!html) continue;
-        if (!looksLikeNotesPage(html)) continue;  // skip scaffolding/nav pages
-        const result = parseNotes(html, args.claim_id);
-        if (!result.includes("table parse failed")) return ok(result);
-        // Parsed a notes page but table was empty — save for last resort
-        lastParseAttempt = result;
-      }
-
-      // Return best attempt (empty notes page) or debug link list
-      if (lastParseAttempt) return ok(lastParseAttempt);
-
-      const linkList = allHrefs
-        .filter(h => h.includes(".asp"))
-        .slice(0, 30)
-        .join("\n");
-      return ok(
-        `Could not locate notes page for claim ${args.claim_id} (file #${fileNum || "unknown"}).\n\n` +
-        `ASP links on claimView (to help identify the notes URL):\n${linkList}`
-      );
+    } else {
+      diag.push("Fast-path claimView returned null — cookie expired, going to browser");
     }
-    // Cookie expired — fall through to browser
   }
 
-  // Browser path — always used when fast-path fails.
-  // IMPORTANT: claimView JS populates #claimFileID after load, so we MUST use
-  // the browser (not static HTML fetch) to get a reliable file number.
+  // ── Browser path — JS executes, so #claimFileID is populated, and page links are real ──
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
   try {
     await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(3000); // Wait for JS to populate fields
 
-    // Get file number from JS-rendered field (the fast-path HTML may have value="" until JS runs)
-    const fileNum = await page.inputValue("#claimFileID").catch(() => "");
+    // Wait up to 8s for #claimFileID to contain a value (JS-rendered)
+    const fileNum = await page.waitForFunction(() => {
+      const el = document.getElementById("claimFileID") as HTMLInputElement | null;
+      return el?.value && el.value.trim().length > 0 ? el.value.trim() : null;
+    }, { timeout: 8000 }).then(h => h.jsonValue()).catch(async () => {
+      // Fallback: check page HTML for claimFID= in links
+      const html = await page.content();
+      return extractFileNumber(html) || null;
+    });
+
+    diag.push(`Browser claimView #claimFileID → "${fileNum}"`);
 
     if (fileNum) {
-      // Navigate directly to quickNotes with the file number — this is the definitive notes URL
-      await page.goto(`${aspBase}/system/quickNotes.asp?claimFID=${fileNum}`);
+      const notesUrl = `${aspBase}/system/quickNotes.asp?claimFID=${fileNum}`;
+      diag.push(`Navigating to: ${notesUrl}`);
+      await page.goto(notesUrl);
       await page.waitForLoadState("domcontentloaded");
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(2000);
 
       const html = await page.content();
       const result = parseNotes(html, args.claim_id);
       if (!result.includes("table parse failed")) return ok(result);
-
-      // quickNotes has no note rows yet (empty) — return the parse anyway plus context
-      return ok(result + `\n\n(URL used: ${aspBase}/system/quickNotes.asp?claimFID=${fileNum})`);
+      return ok(result + `\n\nDiag: ${diag.join(" | ")}`);
     }
 
-    // fileNum still empty — collect all ASP links as debug so we can identify the right URL
+    // Still empty — return all links so we can see the right URL
     const allLinks = await page.locator("a[href]").all();
     const linkMap: string[] = [];
     for (const link of allLinks) {
@@ -750,9 +767,9 @@ export async function filetracGetNotes(args: {
       if (href && /\.asp/i.test(href)) linkMap.push(`${text || "(no text)"} → ${href}`);
     }
     return ok(
-      `Could not get file number for claim ${args.claim_id} — #claimFileID was empty after 3s wait.\n\n` +
-      `ASP links on claimView (identify the notes URL from these):\n` +
-      linkMap.join("\n")
+      `Could not get file number for claim ${args.claim_id} even after browser render.\n` +
+      `Diag: ${diag.join(" | ")}\n\n` +
+      `All ASP links on claimView:\n${linkMap.join("\n")}`
     );
   } finally {
     await browser.close();

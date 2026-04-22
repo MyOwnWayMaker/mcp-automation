@@ -41,6 +41,19 @@ export async function calendarListEvents(args: {
   return ok(lines.join("\n\n---\n\n"));
 }
 
+type ReminderOverride = { method: "popup" | "email" | "sms"; minutes?: number; hours?: number };
+
+function buildReminders(reminders?: ReminderOverride[]) {
+  if (!reminders || reminders.length === 0) return undefined;
+  return {
+    useDefault: false,
+    overrides: reminders.map((r) => ({
+      method: r.method,
+      minutes: r.hours !== undefined ? r.hours * 60 : (r.minutes ?? 30),
+    })),
+  };
+}
+
 export async function calendarCreateEvent(args: {
   title: string;
   start: string;
@@ -50,8 +63,10 @@ export async function calendarCreateEvent(args: {
   attendees?: string[];
   calendar_id?: string;
   color_id?: number;
+  reminders?: ReminderOverride[];
 }): Promise<CallToolResult> {
   const cal = await getCalendar();
+  const reminders = buildReminders(args.reminders);
   const res = await cal.events.insert({
     calendarId: args.calendar_id ?? "primary",
     requestBody: {
@@ -62,10 +77,12 @@ export async function calendarCreateEvent(args: {
       end: { dateTime: args.end },
       attendees: args.attendees?.map((email) => ({ email })),
       ...(args.color_id !== undefined && { colorId: String(args.color_id) }),
+      ...(reminders && { reminders }),
     },
   });
 
-  return ok(`Event created: ${res.data.summary}\nID: ${res.data.id}\nLink: ${res.data.htmlLink}`);
+  const reminderStr = args.reminders?.map(r => `${r.hours ? r.hours * 60 : r.minutes}min ${r.method}`).join(", ") ?? "default";
+  return ok(`Event created: ${res.data.summary}\nID: ${res.data.id}\nLink: ${res.data.htmlLink}\nReminders: ${reminderStr}`);
 }
 
 export async function calendarUpdateEvent(args: {
@@ -77,6 +94,7 @@ export async function calendarUpdateEvent(args: {
   location?: string;
   calendar_id?: string;
   color_id?: number;
+  reminders?: ReminderOverride[];
 }): Promise<CallToolResult> {
   const cal = await getCalendar();
   const { event_id, calendar_id, title, start, end, description, location } = args;
@@ -86,6 +104,7 @@ export async function calendarUpdateEvent(args: {
     eventId: event_id,
   });
 
+  const reminders = buildReminders(args.reminders);
   const updated = {
     ...existing.data,
     ...(title && { summary: title }),
@@ -94,6 +113,7 @@ export async function calendarUpdateEvent(args: {
     ...(start && { start: { dateTime: start } }),
     ...(end && { end: { dateTime: end } }),
     ...(args.color_id !== undefined && { colorId: String(args.color_id) }),
+    ...(reminders && { reminders }),
   };
 
   const res = await cal.events.update({

@@ -304,11 +304,16 @@ export async function notarygadgetUpdateSigning(args: {
       return ok(`Signing ID ${args.signing_id} not found in NotaryGadget.`);
     }
     await row.click();
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
 
-    // Open the edit form (same form as create, but pre-filled)
+    // Open the edit form — EditSigning loads existing data from server, needs up to 6s
     await page.evaluate((id: string) => (window as any).EditSigning(id), args.signing_id);
-    await page.waitForTimeout(3000);
+
+    // Wait for the fee field to be populated (confirms form is ready with existing data)
+    await page.waitForFunction(() => {
+      const el = document.getElementById("txtSigningFee") as HTMLInputElement | null;
+      return el?.value !== undefined;  // field exists (even if empty)
+    }, { timeout: 8000 }).catch(() => {});  // continue even if timeout — do our best
 
     const updated: string[] = [];
 

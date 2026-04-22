@@ -89,6 +89,53 @@ export async function gmailFindEmail(args: {
   return makeTextContent(summaries.join("\n\n---\n\n"));
 }
 
+// Recursively walk MIME parts to find the best readable body
+function extractBody(payload: any): string {
+  // Direct body on this node
+  if (payload?.body?.data) {
+    return Buffer.from(payload.body.data, "base64").toString("utf-8");
+  }
+
+  const parts: any[] = payload?.parts ?? [];
+
+  // Prefer text/plain anywhere in the tree
+  for (const part of parts) {
+    if (part.mimeType === "text/plain" && part.body?.data) {
+      return Buffer.from(part.body.data, "base64").toString("utf-8");
+    }
+  }
+
+  // Recurse into multipart/* containers (alternative, mixed, related, etc.)
+  for (const part of parts) {
+    if (part.mimeType?.startsWith("multipart/")) {
+      const found = extractBody(part);
+      if (found) return found;
+    }
+  }
+
+  // Fall back to text/html — strip tags for readability
+  for (const part of parts) {
+    if (part.mimeType === "text/html" && part.body?.data) {
+      const html = Buffer.from(part.body.data, "base64").toString("utf-8");
+      return html
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }
+  }
+
+  return "";
+}
+
 export async function gmailGetEmail(args: {
   message_id: string;
 }): Promise<CallToolResult> {
@@ -103,14 +150,7 @@ export async function gmailGetEmail(args: {
   const get = (name: string) =>
     headers.find((h) => h.name === name)?.value ?? "";
 
-  let body = "";
-  const parts = res.data.payload?.parts ?? [];
-  const textPart = parts.find((p) => p.mimeType === "text/plain");
-  if (textPart?.body?.data) {
-    body = Buffer.from(textPart.body.data, "base64").toString("utf-8");
-  } else if (res.data.payload?.body?.data) {
-    body = Buffer.from(res.data.payload.body.data, "base64").toString("utf-8");
-  }
+  const body = extractBody(res.data.payload);
 
   const text = [
     `From: ${get("From")}`,
@@ -120,7 +160,7 @@ export async function gmailGetEmail(args: {
     `Thread ID: ${res.data.threadId}`,
     `Message ID: ${res.data.id}`,
     "",
-    body || "(no plain-text body)",
+    body || "(no readable body found)",
   ].join("\n");
 
   return makeTextContent(text);

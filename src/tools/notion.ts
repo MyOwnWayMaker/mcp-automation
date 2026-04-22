@@ -297,6 +297,65 @@ export async function notionUpdateDatabaseSchema(args: {
   return ok(`Updated database ${args.database_id}: property "${args.property_name}" now has ${args.select_options.length} options: ${args.select_options.map((o) => o.name).join(", ")}`);
 }
 
+export async function notionAddDatabaseProperty(args: {
+  database_id: string;
+  property_name: string;
+  property_type: "number" | "text" | "checkbox" | "date" | "url" | "email" | "phone_number" | "select" | "multi_select";
+  number_format?: "number" | "number_with_commas" | "percent" | "dollar" | "canadian_dollar" | "euro" | "pound" | "yen" | "ruble" | "rupee" | "won" | "yuan" | "real" | "lira" | "rupiah" | "franc" | "hong_kong_dollar" | "new_zealand_dollar" | "krona" | "norwegian_krone" | "mexican_peso" | "rand" | "new_taiwan_dollar" | "danish_krone" | "zloty" | "baht" | "forint" | "koruna" | "shekel" | "chilean_peso" | "philippine_peso" | "dirham" | "colombian_peso" | "riyal" | "ringgit" | "leu" | "argentine_peso" | "uruguayan_peso" | "singapore_dollar";
+}): Promise<CallToolResult> {
+  let propertyDef: any;
+  switch (args.property_type) {
+    case "number":
+      propertyDef = { number: { format: args.number_format ?? "number" } };
+      break;
+    case "text":
+      propertyDef = { rich_text: {} };
+      break;
+    case "checkbox":
+      propertyDef = { checkbox: {} };
+      break;
+    case "date":
+      propertyDef = { date: {} };
+      break;
+    case "url":
+      propertyDef = { url: {} };
+      break;
+    case "email":
+      propertyDef = { email: {} };
+      break;
+    case "phone_number":
+      propertyDef = { phone_number: {} };
+      break;
+    case "select":
+      propertyDef = { select: { options: [] } };
+      break;
+    case "multi_select":
+      propertyDef = { multi_select: { options: [] } };
+      break;
+    default:
+      throw new Error(`Unsupported property type: ${args.property_type}`);
+  }
+
+  await notionFetch(`/databases/${args.database_id}`, "PATCH", {
+    properties: { [args.property_name]: propertyDef },
+  });
+  return ok(`Added "${args.property_name}" (${args.property_type}) to database ${args.database_id}.`);
+}
+
+export async function notionUpdateBlock(args: {
+  block_id: string;
+  content: string;
+  block_type?: "paragraph" | "heading_1" | "heading_2" | "heading_3" | "bulleted_list_item" | "numbered_list_item" | "to_do" | "quote" | "callout";
+}): Promise<CallToolResult> {
+  const type = args.block_type ?? "paragraph";
+  const richText = [{ type: "text", text: { content: args.content } }];
+  const body: any = { [type]: { rich_text: richText } };
+  if (type === "to_do") body[type].checked = false;
+
+  await notionFetch(`/blocks/${args.block_id}`, "PATCH", body);
+  return ok(`Block ${args.block_id} updated (${type}).`);
+}
+
 export async function notionCreateDatabaseItem(args: {
   database_id: string;
   title: string;

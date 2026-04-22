@@ -1,5 +1,7 @@
 import { google } from "googleapis";
 import { Readable } from "stream";
+import fs from "fs";
+import path from "path";
 import { getGoogleAuthClient } from "../auth/google.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
@@ -119,6 +121,57 @@ export async function driveMoveFile(args: {
   });
 
   return ok(`File ${res.data.name} moved to folder ${args.new_folder_id}.`);
+}
+
+export async function driveUploadFile(args: {
+  local_path: string;
+  folder_id?: string;
+  name?: string;
+  mime_type?: string;
+}): Promise<CallToolResult> {
+  const drive = await getDrive();
+
+  if (!fs.existsSync(args.local_path)) {
+    return ok(`File not found at path: ${args.local_path}`);
+  }
+
+  const fileName = args.name ?? path.basename(args.local_path);
+  const ext = path.extname(args.local_path).toLowerCase();
+
+  // Infer MIME type from extension if not provided
+  const mimeMap: Record<string, string> = {
+    ".pdf": "application/pdf",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".zip": "application/zip",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".json": "application/json",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  };
+  const mimeType = args.mime_type ?? mimeMap[ext] ?? "application/octet-stream";
+
+  const res = await drive.files.create({
+    requestBody: {
+      name: fileName,
+      mimeType,
+      parents: args.folder_id ? [args.folder_id] : undefined,
+    },
+    media: {
+      mimeType,
+      body: fs.createReadStream(args.local_path),
+    },
+    fields: "id, name, webViewLink, size",
+  });
+
+  const sizeKb = res.data.size ? `${(Number(res.data.size) / 1024).toFixed(1)} KB` : "unknown size";
+  return ok(`File uploaded: ${res.data.name}\nID: ${res.data.id}\nSize: ${sizeKb}\nLink: ${res.data.webViewLink}`);
 }
 
 export async function driveCreateFolder(args: {
