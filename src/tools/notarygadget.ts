@@ -1,4 +1,4 @@
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const NG_URL = "https://www.notarygadget.com";
@@ -56,9 +56,43 @@ async function getPage() {
 }
 
 // NotaryGadget is a SPA — all navigation uses SelectPage() JS calls
-async function goToSignings(page: Awaited<ReturnType<typeof getPage>>["page"]) {
+async function goToSignings(page: Page) {
   await page.evaluate(() => (window as any).SelectPage('Signings'));
   await page.waitForTimeout(3000);
+}
+
+/**
+ * Fill all signer name fields in the signing form.
+ * Signer 1 fields are always visible; signers 2-4 require clicking
+ * "Add 2nd/3rd/4th Signer" links to reveal their hidden fields first.
+ */
+async function fillSigners(page: Page, signerNames: string[]) {
+  const ordinal = ["1st", "2nd", "3rd", "4th"];
+  for (let i = 0; i < Math.min(signerNames.length, 4); i++) {
+    const parts = signerNames[i].trim().split(/\s+/);
+    const first = parts[0] ?? "";
+    const last = parts.slice(1).join(" ") ?? "";
+
+    if (i > 0) {
+      // Reveal the hidden signer row by clicking the "Add Nth Signer" link
+      const addLink = page.locator([
+        `a:has-text("Add ${ordinal[i]} Signer")`,
+        `a:has-text("${ordinal[i]} Signer")`,
+        `a[onclick*="AddSigner(${i + 1})"]`,
+        `a[id*="lnkAddSigner${i + 1}"]`,
+        `span[onclick*="AddSigner(${i + 1})"]`,
+      ].join(", ")).first();
+
+      const isVisible = await addLink.isVisible({ timeout: 2000 }).catch(() => false);
+      if (isVisible) {
+        await addLink.click();
+        await page.waitForTimeout(800);
+      }
+    }
+
+    await page.fill(`#txtSigner${i + 1}First`, first).catch(() => {});
+    await page.fill(`#txtSigner${i + 1}Last`, last).catch(() => {});
+  }
 }
 
 export async function notarygadgetGetSignings(args: {
@@ -132,11 +166,9 @@ export async function notarygadgetCreateSigning(args: {
     }
     await page.waitForTimeout(1000);
 
-    // Signer names
+    // Signer names — supports up to 4 signers via Add 2nd/3rd/4th Signer links
     if (args.signer_names.length > 0) {
-      const parts = args.signer_names[0].split(" ");
-      await page.fill('#txtSigner1First', parts[0] ?? "");
-      await page.fill('#txtSigner1Last', parts.slice(1).join(" ") ?? "");
+      await fillSigners(page, args.signer_names);
     }
 
     // Parse location into street / city / state / zip if not provided separately
@@ -242,6 +274,142 @@ export async function notarygadgetCreateSigning(args: {
       `Signers: ${args.signer_names.join(", ")}\n` +
       `Fee: $${args.fee}\n\n` +
       `📋 Follow-up at ${followUpTime}: Ask how many notarial acts were performed, then record them and send the invoice.`
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+export async function notarygadgetUpdateSigning(args: {
+  signing_id: string;           // required — numeric NotaryGadget signing ID
+  customer?: string;            // change the escrow/title company
+  date?: string;                // YYYY-MM-DD or MM/DD/YYYY
+  time?: string;                // HH:MM (24h or 12h)
+  fee?: number;
+  location?: string;            // street address or full address with city/state/zip
+  city?: string;
+  state?: string;
+  zip?: string;
+  signer_names?: string[];      // replaces ALL signers when provided
+  package_type?: string;
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+
+  try {
+    await goToSignings(page);
+
+    // Select the target signing row
+    const row = page.locator(`#trSigning${args.signing_id}`);
+    if (await row.count() === 0) {
+      return ok(`Signing ID ${args.signing_id} not found in NotaryGadget.`);
+    }
+    await row.click();
+    await page.waitForTimeout(1500);
+
+    // Open the edit form (same form as create, but pre-filled)
+    await page.evaluate((id: string) => (window as any).EditSigning(id), args.signing_id);
+    await page.waitForTimeout(3000);
+
+    const updated: string[] = [];
+
+    // Customer — re-trigger the customer selector popup
+    if (args.customer) {
+      await page.evaluate(() => (window as any).ShowCustomerSelector());
+      await page.waitForTimeout(2000);
+      const searchInput = page.locator('#txtCustomerSelectorSearch, input[id*="CustomerSelector"]').first();
+      if (await searchInput.isVisible().catch(() => false)) {
+        await searchInput.fill(args.customer);
+        await page.waitForTimeout(1500);
+      }
+      const customerOption = page.locator('div[onclick*="SelectCustomer"], td[onclick*="SelectCustomer"]')
+        .filter({ hasText: new RegExp(args.customer.split(" ")[0], "i") }).first();
+      if (await customerOption.isVisible().catch(() => false)) {
+        await customerOption.click();
+      } else {
+        await page.locator(`text=${args.customer.split(" ")[0]}`).first().click().catch(() => {});
+      }
+      await page.waitForTimeout(1000);
+      updated.push(`Customer: ${args.customer}`);
+    }
+
+    // Signers — replaces all signers when provided
+    if (args.signer_names && args.signer_names.length > 0) {
+      await fillSigners(page, args.signer_names);
+      updated.push(`Signers: ${args.signer_names.join(", ")}`);
+    }
+
+    // Address fields — parse location string if individual fields not given
+    const hasAddressChange = args.location || args.city || args.state || args.zip;
+    if (hasAddressChange) {
+      let street = args.location ?? "";
+      let city = args.city ?? "";
+      let state = args.state ?? "";
+      let zip = args.zip ?? "";
+
+      if (args.location && !city) {
+        const parts = args.location.split(",").map(s => s.trim());
+        if (parts.length >= 2) {
+          street = parts[0];
+          const cityStateZip = parts.slice(1).join(", ");
+          const m = cityStateZip.match(/^(.+?)[,\s]+([A-Z]{2})[,\s]*(\d{5})?/);
+          if (m) { city = m[1].trim(); state = m[2]; zip = m[3] ?? ""; }
+          else { city = cityStateZip.split(",")[0]?.trim() ?? cityStateZip; }
+        }
+      }
+
+      if (street) { await page.fill('#txtSigningAdd1', street).catch(() => {}); updated.push(`Street: ${street}`); }
+      if (city) { await page.fill('#txtSigningCty', city).catch(() => {}); updated.push(`City: ${city}`); }
+      if (state) { await page.selectOption('#txtSigningSt', state).catch(() => {}); updated.push(`State: ${state}`); }
+      if (zip) { await page.fill('#txtSigningZp', zip).catch(() => {}); updated.push(`ZIP: ${zip}`); }
+    }
+
+    // Date
+    if (args.date) {
+      const parts = args.date.split("-");
+      const formatted = parts.length === 3 ? `${parts[1]}/${parts[2]}/${parts[0]}` : args.date;
+      await page.fill('#txtSigningDate', formatted).catch(() => {});
+      updated.push(`Date: ${formatted}`);
+    }
+
+    // Time
+    if (args.time) {
+      const timeParts = args.time.split(":");
+      if (timeParts.length >= 2) {
+        let hour = parseInt(timeParts[0]);
+        const minutes = timeParts[1].substring(0, 2);
+        const ampm = hour >= 12 ? "PM" : "AM";
+        if (hour > 12) hour -= 12;
+        if (hour === 0) hour = 12;
+        await page.fill('#txtSigningHour', String(hour)).catch(() => {});
+        await page.fill('#txtSigningMinutes', minutes).catch(() => {});
+        await page.fill('#txtSigningAMPM', ampm).catch(() => {});
+        updated.push(`Time: ${args.time}`);
+      }
+    }
+
+    // Fee
+    if (args.fee !== undefined) {
+      await page.fill('#txtSigningFee', String(args.fee)).catch(() => {});
+      updated.push(`Fee: $${args.fee}`);
+    }
+
+    // Package type
+    if (args.package_type) {
+      await page.fill('#txtLoanType', args.package_type).catch(() => {});
+      updated.push(`Package: ${args.package_type}`);
+    }
+
+    if (updated.length === 0) {
+      return ok("No fields provided to update — signing unchanged.");
+    }
+
+    // Save the updated signing
+    await page.evaluate(() => (window as any).SaveSigning());
+    await page.waitForTimeout(5000);
+
+    return ok(
+      `✅ Signing ${args.signing_id} updated (invoice number preserved):\n` +
+      updated.map(u => `  • ${u}`).join("\n")
     );
   } finally {
     await browser.close();
