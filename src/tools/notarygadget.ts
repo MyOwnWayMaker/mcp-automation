@@ -164,11 +164,22 @@ export async function notarygadgetCreateSigning(args: {
       }
     }
 
+    // ZIP is required by NotaryGadget — fail early if missing
+    if (!zip) {
+      await browser.close();
+      return ok(
+        `❌ Cannot create signing — ZIP code is required but could not be determined from the address.\n` +
+        `Address provided: "${args.location}"\n` +
+        `Please include the ZIP code in the location string (e.g. "123 Main St, Los Angeles, CA 90001") ` +
+        `or pass it explicitly as the 'zip' parameter.`
+      );
+    }
+
     await page.fill('#txtSigningAdd1', street);
     await page.fill('#txtSigningCty', city).catch(() => {});
     // State is a <select>
     await page.selectOption('#txtSigningSt', state).catch(() => {});
-    if (zip) await page.fill('#txtSigningZp', zip).catch(() => {});
+    await page.fill('#txtSigningZp', zip).catch(() => {});
 
     // Date (accepts MM/DD/YYYY; also handle YYYY-MM-DD input)
     const dateParts = args.date.split("-");

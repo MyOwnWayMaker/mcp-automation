@@ -69,16 +69,28 @@ async function getPage(): Promise<{ browser: Browser; context: BrowserContext; p
 export async function xactListAssignments(args: {
   status?: "in_progress" | "returned" | "all";
   max_results?: number;
+  since_date?: string;   // YYYY-MM-DD — show assignments received on/after this date
+  include_all?: boolean; // remove date window entirely (shows all time)
 }): Promise<CallToolResult> {
   const { browser, page } = await getPage();
 
   try {
-    // Default to "all" — includes closed, returned, corrected assignments
     const statusType = args.status === "returned" ? "returned" :
                        args.status === "in_progress" ? "in_progress" : "";
-    const url = statusType
-      ? `${BASE}/xactanalysis/search.jsp?date_type=received&date_preset=730&xasp_status_type=${statusType}&columns=cache`
-      : `${BASE}/xactanalysis/search.jsp?date_type=received&date_preset=730&columns=cache`;
+    const statusParam = statusType ? `&xasp_status_type=${statusType}` : "";
+
+    let url: string;
+    if (args.include_all) {
+      // No date restriction — returns everything in XactAnalysis
+      url = `${BASE}/xactanalysis/search.jsp?date_type=received${statusParam}&columns=cache`;
+    } else if (args.since_date) {
+      // Explicit date range: from since_date to today
+      const today = new Date().toISOString().split("T")[0];
+      url = `${BASE}/xactanalysis/search.jsp?date_type=received&start_date=${args.since_date}&end_date=${today}${statusParam}&columns=cache`;
+    } else {
+      // Default: 2-year (730-day) sliding window
+      url = `${BASE}/xactanalysis/search.jsp?date_type=received&date_preset=730${statusParam}&columns=cache`;
+    }
 
     await page.goto(url);
     await page.waitForLoadState("domcontentloaded");
@@ -261,16 +273,25 @@ export async function xactAddNote(args: {
     await addBtn.first().click();
     await page.waitForTimeout(2000);
 
-    // Fill the note in #actionBox
-    const noteBox = page.locator("#actionBox");
-    if (await noteBox.count() === 0) {
-      return ok("Note input box (#actionBox) not found.");
+    // #actionBox is a <select> for note type — select 'General' or first available option
+    const actionBox = page.locator("#actionBox");
+    if (await actionBox.count() > 0) {
+      await actionBox.selectOption({ label: "General" }).catch(async () => {
+        // Fall back to first option if 'General' doesn't exist
+        const firstOpt = await actionBox.locator("option").first().getAttribute("value").catch(() => null);
+        if (firstOpt) await actionBox.selectOption(firstOpt).catch(() => {});
+      });
     }
-    await noteBox.fill(args.note);
+
+    // Find the actual note textarea (not the type select)
+    const noteText = page.locator("#noteText, #notesText, #txtNote, #actionText, textarea[name='note'], textarea[name='notes'], textarea").first();
+    if (await noteText.count() === 0) {
+      return ok("Note textarea not found after clicking 'Add a Note'. The XactAnalysis UI may have changed.");
+    }
+    await noteText.fill(args.note);
 
     // Submit — look for Save or Add button
     await page.click('button:has-text("Save"), button:has-text("Add"), input[value="Save"], input[value="Add"]').catch(async () => {
-      // Try pressing Enter or finding submit
       await page.keyboard.press("Control+Enter").catch(() => {});
     });
     await page.waitForTimeout(3000);

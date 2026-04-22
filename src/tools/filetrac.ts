@@ -52,9 +52,12 @@ async function fetchAspPage(aspBase: string, aspCookies: string, path: string): 
     });
     if (!res.ok) return null;
     const html = await res.text();
-    // If redirected to login, cookie is expired
-    if (html.includes("Login") && html.includes("password") && html.length < 5000) return null;
+    // Reject login / session-expired pages
     if (html.includes("Session has expired") || html.includes("Please log in")) return null;
+    if (html.includes("ftevolve.com/auth") || html.includes("/sign-in") || html.includes("Forgot password")) return null;
+    if ((html.includes("Login") || html.includes("Sign in")) && html.includes("password") && html.length < 8000) return null;
+    // Reject pages that are clearly too short to be real content
+    if (html.length < 500) return null;
     return html;
   } catch {
     return null;
@@ -278,12 +281,24 @@ export async function filetracGetClaim(args: {
   const session = loadSession();
   if (session.aspBase && session.aspCookies) {
     const html = await fetchAspPage(session.aspBase, session.aspCookies, claimPath);
-    if (html) {
+    // Validate this is actually a claim page (not a stale-session error page)
+    if (html && (html.includes("claimFileID") || html.includes("claimDateContact") || html.includes(`claimID=${args.claim_id}`))) {
       const dateContact    = extractInputValue(html, "claimDateContact");
       const dateInspection = extractInputValue(html, "claimDateInspection");
       const dateComplete   = extractInputValue(html, "claimDateComplete");
       const fileNum        = extractInputValue(html, "claimFileID");
-      const bodyText       = htmlToText(html).substring(0, 4000);
+
+      // Extract body text — skip navigation by finding content after the last </script> tag
+      const afterScripts = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");
+      const bodyText = afterScripts
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"')
+        .split("\n")
+        .map(l => l.trim())
+        .filter(l => l.length > 2)
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .substring(0, 4000);
 
       return ok(
         `Claim Detail (ID: ${args.claim_id}):\n\n` +
@@ -294,7 +309,7 @@ export async function filetracGetClaim(args: {
         `--- Full Details ---\n${bodyText}`
       );
     }
-    // Cookie expired — fall through to browser flow which will refresh it
+    // Cookie expired or invalid page — fall through to browser flow which will refresh it
   }
 
   // ── Slow path: full browser flow (also refreshes cached ASP cookie) ──
@@ -393,24 +408,46 @@ export async function filetracUpdateClaimDates(args: {
 }
 
 export async function filetracAddNote(args: {
-  file_number: string;
+  file_number?: string;
+  claim_id?: string;
   note: string;
   category?: string;
   visible_to_client?: boolean;
   company_index?: number;
 }): Promise<CallToolResult> {
+  if (!args.file_number && !args.claim_id) {
+    return ok("filetrac_add_note requires either file_number or claim_id.");
+  }
+
+  // If only claim_id provided, look up the file number from claimView
+  let fileNumber = args.file_number ?? "";
+  if (!fileNumber && args.claim_id) {
+    const session = loadSession();
+    if (session.aspBase && session.aspCookies) {
+      const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
+        `/system/claimView.asp?claimID=${args.claim_id}`);
+      if (claimHtml) {
+        fileNumber = extractInputValue(claimHtml, "claimFileID");
+      }
+    }
+    if (!fileNumber) {
+      return ok(`Could not determine file number for claim ID ${args.claim_id}. ` +
+        `Please provide file_number directly (8-digit number from FileTrac).`);
+    }
+  }
+
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
 
   try {
-    await page.goto(`${aspBase}/system/quickNotes.asp?claimFID=${args.file_number}`);
+    await page.goto(`${aspBase}/system/quickNotes.asp?claimFID=${fileNumber}`);
     await page.waitForLoadState("domcontentloaded");
     await page.waitForTimeout(3000);
 
     // Verify file # loaded correctly
     const fileId = await page.inputValue("#claimFileID").catch(() => "");
-    if (!fileId || fileId !== args.file_number) {
+    if (!fileId || fileId !== fileNumber) {
       // Try to set it if not pre-filled
-      await page.fill("#claimFileID", args.file_number).catch(() => {});
+      await page.fill("#claimFileID", fileNumber).catch(() => {});
       await page.waitForTimeout(2000);
     }
 
@@ -452,7 +489,7 @@ export async function filetracAddNote(args: {
     await page.waitForLoadState("domcontentloaded");
     await page.waitForTimeout(3000);
 
-    return ok(`✅ Note added to FileTrac claim (File #${args.file_number}):\n"${args.note.substring(0, 100)}..."`);
+    return ok(`✅ Note added to FileTrac claim (File #${fileNumber}):\n"${args.note.substring(0, 100)}..."`);
   } finally {
     await browser.close();
   }
@@ -563,13 +600,29 @@ function parseNotes(html: string, claimId: string): string {
 }
 
 // Known FileTrac diary URL patterns to try in order
-const DIARY_PATH_PATTERNS = (claimId: string) => [
-  `/system/claimDiary.asp?claimID=${claimId}`,
-  `/system/msgView.asp?claimID=${claimId}`,
-  `/system/claimNotes.asp?claimID=${claimId}`,
-  `/system/diary.asp?claimID=${claimId}`,
-  `/system/claimMsg.asp?claimID=${claimId}`,
-];
+// fileNum = the 8-digit file number (claimFileID) — quickNotes uses claimFID (file number), not claimID
+const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
+  const patterns: string[] = [];
+  // File-number-based patterns first (more likely to work)
+  if (fileNum) {
+    patterns.push(
+      `/system/quickNotesList.asp?claimFID=${fileNum}`,
+      `/system/claimDiary.asp?claimFID=${fileNum}`,
+      `/system/msgView.asp?claimFID=${fileNum}`,
+      `/system/claimNotes.asp?claimFID=${fileNum}`,
+      `/system/claimMsg.asp?claimFID=${fileNum}`,
+    );
+  }
+  // Claim-ID-based fallbacks
+  patterns.push(
+    `/system/claimDiary.asp?claimID=${claimId}`,
+    `/system/msgView.asp?claimID=${claimId}`,
+    `/system/claimNotes.asp?claimID=${claimId}`,
+    `/system/diary.asp?claimID=${claimId}`,
+    `/system/claimMsg.asp?claimID=${claimId}`,
+  );
+  return patterns;
+};
 
 export async function filetracGetNotes(args: {
   claim_id: string;
@@ -578,18 +631,21 @@ export async function filetracGetNotes(args: {
   const session = loadSession();
 
   if (session.aspBase && session.aspCookies) {
-    // First: try to discover the diary link from the claimView page
+    // First: fetch claimView to extract file number and discover diary links
     const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
       `/system/claimView.asp?claimID=${args.claim_id}`);
 
     if (claimHtml) {
+      // Extract file number — diary URLs use claimFID (file number), not claimID
+      const fileNum = extractInputValue(claimHtml, "claimFileID");
+
       // Extract all hrefs from the page to find the diary link
       const allHrefs = [...claimHtml.matchAll(/href=["']([^"'#][^"']*)["']/gi)]
         .map(m => m[1]);
 
-      // Look for any link mentioning diary/notes/msg
+      // Look for any link mentioning diary/notes/msg/quick
       const diaryHref = allHrefs.find(h =>
-        /diary|notes|msg/i.test(h) && !/logout|mailto/i.test(h)
+        /diary|notes|msg|quick/i.test(h) && !/logout|mailto|quickClaim|quickTime/i.test(h)
       );
 
       if (diaryHref) {
@@ -598,8 +654,8 @@ export async function filetracGetNotes(args: {
         if (diaryHtml) return ok(parseNotes(diaryHtml, args.claim_id));
       }
 
-      // No link found — try known URL patterns one by one
-      for (const path of DIARY_PATH_PATTERNS(args.claim_id)) {
+      // No link found — try known URL patterns (file-number-based first)
+      for (const path of DIARY_PATH_PATTERNS(args.claim_id, fileNum || undefined)) {
         const html = await fetchAspPage(session.aspBase, session.aspCookies, path);
         if (html) return ok(parseNotes(html, args.claim_id));
       }
@@ -610,7 +666,7 @@ export async function filetracGetNotes(args: {
         .slice(0, 30)
         .join("\n");
       return ok(
-        `Could not locate diary page for claim ${args.claim_id}.\n\n` +
+        `Could not locate diary page for claim ${args.claim_id} (file #${fileNum || "unknown"}).\n\n` +
         `ASP links found on claimView (use these to identify the notes URL):\n${linkList}`
       );
     }
