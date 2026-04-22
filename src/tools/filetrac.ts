@@ -603,9 +603,9 @@ function parseNotes(html: string, claimId: string): string {
 // fileNum = the 8-digit file number (claimFileID) — quickNotes uses claimFID (file number), not claimID
 const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
   const patterns: string[] = [];
-  // File-number-based patterns first (more likely to work)
   if (fileNum) {
     patterns.push(
+      `/system/quickNotes.asp?claimFID=${fileNum}`,      // add-note form also shows existing notes
       `/system/quickNotesList.asp?claimFID=${fileNum}`,
       `/system/claimDiary.asp?claimFID=${fileNum}`,
       `/system/msgView.asp?claimFID=${fileNum}`,
@@ -613,7 +613,6 @@ const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
       `/system/claimMsg.asp?claimFID=${fileNum}`,
     );
   }
-  // Claim-ID-based fallbacks
   patterns.push(
     `/system/claimDiary.asp?claimID=${claimId}`,
     `/system/msgView.asp?claimID=${claimId}`,
@@ -623,6 +622,14 @@ const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
   );
   return patterns;
 };
+
+/** Returns true if the HTML page looks like it actually contains notes content (not scaffolding). */
+function looksLikeNotesPage(html: string): boolean {
+  // FileTrac notes pages reference these field IDs or structural markers
+  return html.includes("msgDate") || html.includes("msgText") || html.includes("msgCatID") ||
+         html.includes("msgNoteID") || html.includes("Diary") || html.includes("diary") ||
+         (html.includes("Note") && /<td/i.test(html));
+}
 
 export async function filetracGetNotes(args: {
   claim_id: string;
@@ -651,23 +658,35 @@ export async function filetracGetNotes(args: {
       if (diaryHref) {
         const diaryPath = diaryHref.startsWith("/") ? diaryHref : `/system/${diaryHref}`;
         const diaryHtml = await fetchAspPage(session.aspBase, session.aspCookies, diaryPath);
-        if (diaryHtml) return ok(parseNotes(diaryHtml, args.claim_id));
+        if (diaryHtml && looksLikeNotesPage(diaryHtml)) {
+          const result = parseNotes(diaryHtml, args.claim_id);
+          if (!result.includes("table parse failed")) return ok(result);
+        }
       }
 
       // No link found — try known URL patterns (file-number-based first)
+      // Skip any page that doesn't look like a notes page, keep trying if table parse fails
+      let lastParseAttempt = "";
       for (const path of DIARY_PATH_PATTERNS(args.claim_id, fileNum || undefined)) {
         const html = await fetchAspPage(session.aspBase, session.aspCookies, path);
-        if (html) return ok(parseNotes(html, args.claim_id));
+        if (!html) continue;
+        if (!looksLikeNotesPage(html)) continue;  // skip scaffolding/nav pages
+        const result = parseNotes(html, args.claim_id);
+        if (!result.includes("table parse failed")) return ok(result);
+        // Parsed a notes page but table was empty — save for last resort
+        lastParseAttempt = result;
       }
 
-      // Still nothing — return claimView links as debug so we can identify the right URL
+      // Return best attempt (empty notes page) or debug link list
+      if (lastParseAttempt) return ok(lastParseAttempt);
+
       const linkList = allHrefs
         .filter(h => h.includes(".asp"))
         .slice(0, 30)
         .join("\n");
       return ok(
-        `Could not locate diary page for claim ${args.claim_id} (file #${fileNum || "unknown"}).\n\n` +
-        `ASP links found on claimView (use these to identify the notes URL):\n${linkList}`
+        `Could not locate notes page for claim ${args.claim_id} (file #${fileNum || "unknown"}).\n\n` +
+        `ASP links on claimView (to help identify the notes URL):\n${linkList}`
       );
     }
     // Cookie expired — fall through to browser
@@ -695,26 +714,42 @@ export async function filetracGetNotes(args: {
       'a:has-text("Notes")',
       'a:has-text("Messages")',
       'a:has-text("Claim Notes")',
+      'a:has-text("Quick Notes")',
+      'a:has-text("Activity")',
+      'a:has-text("Correspondence")',
       'a[href*="diary" i]',
       'a[href*="notes" i]',
       'a[href*="msg" i]',
+      'a[href*="quick" i]',
     ];
 
     let navigated = false;
     for (const selector of tabCandidates) {
       const el = page.locator(selector).first();
       const href = await el.getAttribute("href").catch(() => null);
-      if (href) {
+      if (href && !/logout|mailto|claimAdd|SessionBridge/i.test(href)) {
         const fullUrl = href.startsWith("http") ? href : `${aspBase}/system/${href.replace(/^.*\/system\//, "")}`;
         await page.goto(fullUrl);
         await page.waitForLoadState("domcontentloaded");
+        // Wait for AJAX-loaded note rows (up to 5s)
+        await page.waitForTimeout(3000);
         navigated = true;
         break;
       }
     }
 
     if (!navigated) {
-      // Return the link map so we can identify the right URL next time
+      // Last resort: try known quickNotes URL directly with file number from claimView
+      const fileNumInput = await page.inputValue("#claimFileID").catch(() => "");
+      if (fileNumInput) {
+        await page.goto(`${aspBase}/system/quickNotes.asp?claimFID=${fileNumInput}`);
+        await page.waitForLoadState("domcontentloaded");
+        await page.waitForTimeout(3000);
+        navigated = true;
+      }
+    }
+
+    if (!navigated) {
       return ok(
         `Could not find diary tab on claimView for claim ${args.claim_id}.\n\n` +
         `All ASP links found on page (use these to identify the notes URL):\n` +
@@ -723,7 +758,9 @@ export async function filetracGetNotes(args: {
     }
 
     const html = await page.content();
-    return ok(parseNotes(html, args.claim_id));
+    const result = parseNotes(html, args.claim_id);
+    // If table parse failed, return raw text anyway so caller can see the page
+    return ok(result);
   } finally {
     await browser.close();
   }

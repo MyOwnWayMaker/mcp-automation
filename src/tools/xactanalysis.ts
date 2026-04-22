@@ -265,38 +265,79 @@ export async function xactAddNote(args: {
     await page.evaluate((mfn: string) => (window as any).gotoDetailTab("d_notes", mfn, "ip", false, 0), args.mfn);
     await page.waitForTimeout(4000);
 
-    // Click "Add a Note"
-    const addBtn = page.locator('a:has-text("Add a Note"), button:has-text("Add a Note")');
-    if (await addBtn.count() === 0) {
-      return ok("Could not find 'Add a Note' button on Notes tab.");
+    // Click "Add a Note" — try multiple text variants
+    const addBtn = page.locator([
+      'a:has-text("Add a Note")',
+      'button:has-text("Add a Note")',
+      'a:has-text("Add Note")',
+      'button:has-text("Add Note")',
+      'input[value="Add a Note"]',
+      'input[value="Add Note"]',
+    ].join(", "));
+
+    const addBtnCount = await addBtn.count();
+    if (addBtnCount === 0) {
+      const pageText = (await page.locator("body").innerText().catch(() => "")).substring(0, 800);
+      return ok(`Could not find 'Add a Note' button on Notes tab.\nPage text:\n${pageText}`);
     }
     await addBtn.first().click();
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(5000);  // XA dialogs open in iframes — wait for load
 
-    // #actionBox is a <select> for note type — select 'General' or first available option
-    const actionBox = page.locator("#actionBox");
-    if (await actionBox.count() > 0) {
-      await actionBox.selectOption({ label: "General" }).catch(async () => {
-        // Fall back to first option if 'General' doesn't exist
-        const firstOpt = await actionBox.locator("option").first().getAttribute("value").catch(() => null);
-        if (firstOpt) await actionBox.selectOption(firstOpt).catch(() => {});
+    // XactAnalysis opens dialogs in iframes (same pattern as updateStatus dialog).
+    // Search all frames for a textarea to find the note entry form.
+    const frames = page.frames();
+    let noteFrame = frames.find(f => /note|action|dlg/i.test(f.url())) ?? null;
+
+    if (!noteFrame) {
+      for (const frame of frames) {
+        const count = await frame.locator("textarea").count().catch(() => 0);
+        if (count > 0) { noteFrame = frame; break; }
+      }
+    }
+
+    if (noteFrame) {
+      // #actionBox is a <select> for note type
+      const actionBox = noteFrame.locator("#actionBox");
+      if (await actionBox.count() > 0) {
+        await actionBox.selectOption({ label: "General" }).catch(async () => {
+          const firstOpt = await actionBox.locator("option").first().getAttribute("value").catch(() => null);
+          if (firstOpt) await actionBox.selectOption(firstOpt).catch(() => {});
+        });
+      }
+
+      const textarea = noteFrame.locator("textarea").first();
+      await textarea.fill(args.note);
+
+      // Submit in the frame
+      await noteFrame.click(
+        'input[type="submit"], button[type="submit"], ' +
+        'button:has-text("Save"), button:has-text("Add"), ' +
+        'input[value*="Save"], input[value*="Add"]'
+      ).catch(async () => {
+        await page.keyboard.press("Enter").catch(() => {});
       });
+      await page.waitForTimeout(3000);
+
+      return ok(`✅ Note added to XactAnalysis assignment ${args.mfn}:\n"${args.note.substring(0, 100)}"`);
     }
 
-    // Find the actual note textarea (not the type select)
-    const noteText = page.locator("#noteText, #notesText, #txtNote, #actionText, textarea[name='note'], textarea[name='notes'], textarea").first();
-    if (await noteText.count() === 0) {
-      return ok("Note textarea not found after clicking 'Add a Note'. The XactAnalysis UI may have changed.");
+    // No iframe found — try main frame textarea as last resort
+    const mainTextarea = page.locator("textarea").first();
+    if (await mainTextarea.count() > 0) {
+      await mainTextarea.fill(args.note);
+      await page.click('button:has-text("Save"), input[value*="Save"]').catch(() => {});
+      await page.waitForTimeout(3000);
+      return ok(`✅ Note added to XactAnalysis assignment ${args.mfn}:\n"${args.note.substring(0, 100)}"`);
     }
-    await noteText.fill(args.note);
 
-    // Submit — look for Save or Add button
-    await page.click('button:has-text("Save"), button:has-text("Add"), input[value="Save"], input[value="Add"]').catch(async () => {
-      await page.keyboard.press("Control+Enter").catch(() => {});
-    });
-    await page.waitForTimeout(3000);
-
-    return ok(`✅ Note added to XactAnalysis assignment ${args.mfn}:\n"${args.note.substring(0, 100)}"`);
+    // Debug: report frame URLs and element counts
+    const frameInfo = frames.map(f => `  ${f.url()}`).join("\n");
+    const mainInputs = await page.locator("input, textarea, select").count();
+    return ok(
+      `Note form not found after clicking 'Add a Note'.\n` +
+      `Frames (${frames.length}):\n${frameInfo}\n` +
+      `Main frame interactive elements: ${mainInputs}`
+    );
   } finally {
     await browser.close();
   }
