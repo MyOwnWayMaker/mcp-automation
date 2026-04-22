@@ -65,9 +65,19 @@ async function fetchAspPage(aspBase: string, aspCookies: string, path: string): 
 }
 
 function extractInputValue(html: string, id: string): string {
-  const m = html.match(new RegExp(`id=["']?${id}["']?[^>]*value=["']([^"']*)["']`, "i")) ||
-            html.match(new RegExp(`name=["']?${id}["']?[^>]*value=["']([^"']*)["']`, "i"));
-  return m?.[1] ?? "";
+  // Pattern A: id/name comes BEFORE value  (<input id="X" ... value="Y">)
+  const mA = html.match(new RegExp(`(?:id|name)=["']?${id}["']?[^>]*value=["']([^"']*)["']`, "i"));
+  if (mA?.[1] !== undefined) return mA[1];
+
+  // Pattern B: value comes BEFORE id/name  (<input value="Y" ... id="X">) — common in ASP
+  const mB = html.match(new RegExp(`<[a-z]+[^>]+value=["']([^"']+)["'][^>]*(?:id|name)=["']?${id}["']`, "i"));
+  if (mB?.[1]) return mB[1];
+
+  // Pattern C: element innerText  (<span id="X">Y</span> or <td id="X">Y</td>)
+  const mC = html.match(new RegExp(`(?:id|name)=["']?${id}["']?[^>]*>([^<]{1,40})<`, "i"));
+  if (mC?.[1]?.trim()) return mC[1].trim();
+
+  return "";
 }
 
 function htmlToText(html: string): string {
@@ -644,7 +654,16 @@ export async function filetracGetNotes(args: {
 
     if (claimHtml) {
       // Extract file number — diary URLs use claimFID (file number), not claimID
-      const fileNum = extractInputValue(claimHtml, "claimFileID");
+      let fileNum = extractInputValue(claimHtml, "claimFileID");
+
+      // Fallback: search for 8-digit number near "claimFileID" text anywhere in the HTML
+      // (handles cases where the field is rendered as text, not an <input>)
+      if (!fileNum) {
+        const mFallback = claimHtml.match(/claimFileID[^>]{0,200}?(\d{8})/i) ||
+                          claimHtml.match(/File\s*#[:\s]*(\d{8})/i) ||
+                          claimHtml.match(/(\d{8})/);  // last resort: first 8-digit number on page
+        if (mFallback) fileNum = mFallback[1];
+      }
 
       // Extract all hrefs from the page to find the diary link
       const allHrefs = [...claimHtml.matchAll(/href=["']([^"'#][^"']*)["']/gi)]
