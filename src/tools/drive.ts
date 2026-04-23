@@ -109,27 +109,38 @@ export async function driveMoveFile(args: {
   const file = await drive.files.get({
     fileId: args.file_id,
     fields: "id, name, parents",
+    supportsAllDrives: true,
   });
 
   const parents = file.data.parents ?? [];
+  const parentsDiag = `parents=${JSON.stringify(parents)}`;
 
   if (parents.includes(args.new_folder_id)) {
-    return ok(`File "${file.data.name}" is already in folder ${args.new_folder_id} — no move needed.`);
+    return ok(`File "${file.data.name}" is already in folder ${args.new_folder_id} — no move needed.\n[diag: ${parentsDiag}]`);
   }
 
-  // When removeParents is empty the Drive API ignores it and rejects the addParents call
-  // with "Increasing the number of parents is not allowed." Fall back to "root" so files
-  // sitting at My Drive root can still be moved.
   const removeParents = parents.length > 0 ? parents.join(",") : "root";
 
-  const res = await drive.files.update({
-    fileId: args.file_id,
-    addParents: args.new_folder_id,
-    removeParents,
-    fields: "id, name, parents",
-  });
+  try {
+    const res = await drive.files.update({
+      fileId: args.file_id,
+      addParents: args.new_folder_id,
+      removeParents,
+      fields: "id, name, parents",
+      supportsAllDrives: true,
+    });
 
-  return ok(`File "${res.data.name}" moved to folder ${args.new_folder_id}.`);
+    return ok(
+      `File "${res.data.name}" moved to folder ${args.new_folder_id}.\n` +
+      `[diag: ${parentsDiag} → new parents=${JSON.stringify(res.data.parents)}]`
+    );
+  } catch (err: unknown) {
+    const msg = (err as Error)?.message ?? String(err);
+    return ok(
+      `❌ Drive move failed: ${msg}\n` +
+      `[diag: file="${file.data.name}" | ${parentsDiag} | removeParents="${removeParents}" | addParents="${args.new_folder_id}"]`
+    );
+  }
 }
 
 // Extension → MIME type map shared by both upload paths

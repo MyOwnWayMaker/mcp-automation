@@ -769,8 +769,9 @@ const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
  * because those strings also appear on the claims list / claim overview pages.
  */
 function looksLikeNotesPage(html: string): boolean {
+  // Only match field names that are unique to the notes form/table, not nav links or claims list.
   return html.includes("msgDate") || html.includes("msgText") || html.includes("msgCatID") ||
-         html.includes("msgNoteID") || html.includes("quickNotes");
+         html.includes("msgNoteID");
 }
 
 /** Returns true if the parsed result actually contains note rows (not just form scaffolding). */
@@ -798,9 +799,38 @@ export async function filetracGetNotes(args: {
       }
     });
 
-    await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
-    await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(3000);  // let React/JS render all tabs
+    // getFiletracPage lands on claimList.asp. Navigate to the specific claim by
+    // clicking its link — avoids the redirect that happens when using direct page.goto
+    // with a file number instead of an internal claim ID.
+    // Try href match (internal claim ID) first, then text match (file number display).
+    const claimLink = page.locator(
+      `a[href*="claimID=${args.claim_id}"], a:text-is("${args.claim_id}")`
+    ).first();
+
+    if (await claimLink.isVisible({ timeout: 3000 }).catch(() => false)) {
+      const href = (await claimLink.getAttribute("href").catch(() => "")) ?? "";
+      diag.push(`Found claim link on list: href="${href}"`);
+      await claimLink.click();
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(2000);
+    } else {
+      // Not on current list page — fall back to direct navigation
+      diag.push(`Claim link not found on list, trying direct goto`);
+      await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(3000);
+    }
+
+    // Guard: if we ended up back on claimList, navigation failed
+    const postNavUrl = page.url();
+    diag.push(`After claim nav: ${postNavUrl}`);
+    if (postNavUrl.includes("claimList")) {
+      return ok(
+        `Could not navigate to claim "${args.claim_id}" — redirected to claims list.\n` +
+        `Ensure claim_id is the internal claim ID (from filetrac_list_claims "Claim ID:" column) or the file number visible in this company's list.\n` +
+        `Diag: ${diag.join(" | ")}`
+      );
+    }
 
     // Get file number in browser (JS-rendered)
     const browserFileNum = await page.waitForFunction(() => {
