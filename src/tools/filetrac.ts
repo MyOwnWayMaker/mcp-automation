@@ -632,6 +632,9 @@ export async function filetracSubmitTimeExpense(args: {
   }
 }
 
+// Matches M/D/YYYY, MM/DD/YYYY, and M/D/YY date formats found in FileTrac diary rows
+const DIARY_DATE_RE = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/;
+
 function parseNotes(html: string, claimId: string): string {
   const clean = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -645,16 +648,19 @@ function parseNotes(html: string, claimId: string): string {
       .map(td => td.replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim())
       .filter(cell => cell.length > 0);
 
-    // Accept rows with 2+ cells (date + text is enough)
-    if (cells.length >= 2) {
-      // Skip rows that look like form scaffolding (all short labels)
-      const hasSubstance = cells.some(c => c.length > 10);
-      if (hasSubstance) rows.push(cells.join(" | "));
-    }
+    if (cells.length < 2) continue;
+
+    // REQUIRE a date pattern in at least one cell.
+    // Real diary entries always have a date (M/D/YYYY); form chrome (File #:, Note Category:,
+    // Characters left:) never does. This is the primary filter against form scaffolding.
+    const hasDate = cells.some(c => DIARY_DATE_RE.test(c));
+    if (!hasDate) continue;
+
+    rows.push(cells.join(" | "));
   }
 
   if (rows.length === 0) {
-    // Return raw body text so the caller can see what's actually on the page
+    // No date-bearing rows found — return raw body text + signal for caller to show debug
     const bodyText = htmlToText(html);
     return `(table-parse-failed)\n${bodyText.substring(0, 6000)}`;
   }

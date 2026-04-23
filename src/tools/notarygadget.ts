@@ -166,9 +166,14 @@ export async function notarygadgetCreateSigning(args: {
     }
     await page.waitForTimeout(1000);
 
+    // Normalize signer_names — MCP clients sometimes deliver arrays as comma-separated strings
+    const signerNames: string[] = Array.isArray(args.signer_names)
+      ? args.signer_names
+      : String(args.signer_names).split(",").map(s => s.trim()).filter(Boolean);
+
     // Signer names — supports up to 4 signers via Add 2nd/3rd/4th Signer links
-    if (args.signer_names.length > 0) {
-      await fillSigners(page, args.signer_names);
+    if (signerNames.length > 0) {
+      await fillSigners(page, signerNames);
     }
 
     // Parse location into street / city / state / zip if not provided separately
@@ -245,7 +250,7 @@ export async function notarygadgetCreateSigning(args: {
 
     // Verify: page should show a signing summary with the signer name
     const bodyText = await page.locator("body").innerText().catch(() => "");
-    const saved = bodyText.toLowerCase().includes(args.signer_names[0]?.split(" ").pop()?.toLowerCase() ?? "");
+    const saved = bodyText.toLowerCase().includes(signerNames[0]?.split(" ").pop()?.toLowerCase() ?? "");
 
     // Calculate follow-up time (1 hour after signing)
     const followUpTime = (() => {
@@ -265,7 +270,7 @@ export async function notarygadgetCreateSigning(args: {
       await page.waitForTimeout(3000);
 
       const verifyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
-      const signerLast = (args.signer_names[0]?.split(" ").pop() ?? "").toLowerCase();
+      const signerLast = (signerNames[0]?.split(" ").pop() ?? "").toLowerCase();
       const customerFirst = args.customer.split(" ")[0].toLowerCase();
       const verified = (signerLast && verifyText.includes(signerLast)) ||
                        (customerFirst && verifyText.includes(customerFirst));
@@ -273,7 +278,7 @@ export async function notarygadgetCreateSigning(args: {
       if (!verified) {
         return ok(
           `⚠️ Signing saved but post-save verification mismatch — signing may not have persisted.\n` +
-          `Customer: ${args.customer} | Signer: ${args.signer_names.join(", ")} | Date: ${formattedDate} @ ${args.time}\n` +
+          `Customer: ${args.customer} | Signer: ${signerNames.join(", ")} | Date: ${formattedDate} @ ${args.time}\n` +
           `Check NotaryGadget manually to confirm.`
         );
       }
@@ -282,7 +287,7 @@ export async function notarygadgetCreateSigning(args: {
     if (!saved) {
       return ok(
         `⚠️ Signing may not have saved — could not confirm in NotaryGadget.\n` +
-        `Customer: ${args.customer} | Signer: ${args.signer_names.join(", ")} | Date: ${formattedDate} @ ${args.time} | Fee: $${args.fee}`
+        `Customer: ${args.customer} | Signer: ${signerNames.join(", ")} | Date: ${formattedDate} @ ${args.time} | Fee: $${args.fee}`
       );
     }
 
@@ -291,7 +296,7 @@ export async function notarygadgetCreateSigning(args: {
       `Customer: ${args.customer}\n` +
       `Date: ${formattedDate} at ${args.time}\n` +
       `Location: ${street}${city ? `, ${city}` : ""}${state ? `, ${state}` : ""}${zip ? ` ${zip}` : ""}\n` +
-      `Signers: ${args.signer_names.join(", ")}\n` +
+      `Signers: ${signerNames.join(", ")}\n` +
       `Fee: $${args.fee}\n\n` +
       `📋 Follow-up at ${followUpTime}: Ask how many notarial acts were performed, then record them and send the invoice.`
     );
@@ -378,15 +383,22 @@ export async function notarygadgetUpdateSigning(args: {
       updated.push(`Customer: ${args.customer}`);
     }
 
+    // Normalize signer_names — MCP clients sometimes deliver arrays as comma-separated strings
+    const signerNames: string[] = !args.signer_names
+      ? []
+      : Array.isArray(args.signer_names)
+        ? args.signer_names
+        : String(args.signer_names).split(",").map(s => s.trim()).filter(Boolean);
+
     // Signers — replaces all signers when provided
-    if (args.signer_names && args.signer_names.length > 0) {
-      log.push(`fillSigners(${args.signer_names.join(", ")})`);
-      await fillSigners(page, args.signer_names);
+    if (signerNames.length > 0) {
+      log.push(`fillSigners(${signerNames.join(", ")})`);
+      await fillSigners(page, signerNames);
       // Verify first signer filled correctly
       const s1first = await page.inputValue("#txtSigner1First").catch(() => "?");
       const s1last  = await page.inputValue("#txtSigner1Last").catch(() => "?");
       log.push(`signer1="${s1first} ${s1last}"`);
-      updated.push(`Signers: ${args.signer_names.join(", ")}`);
+      updated.push(`Signers: ${signerNames.join(", ")}`);
     }
 
     // Address fields — parse location string if individual fields not given
@@ -461,15 +473,15 @@ export async function notarygadgetUpdateSigning(args: {
     log.push("SaveSigning complete");
 
     // Post-save verification: check the signing row still shows correct signer
-    if (args.signer_names?.length) {
+    if (signerNames.length > 0) {
       const bodyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
-      const signerLast = (args.signer_names[0].split(" ").pop() ?? "").toLowerCase();
+      const signerLast = (signerNames[0].split(" ").pop() ?? "").toLowerCase();
       const verified = signerLast && bodyText.includes(signerLast);
       log.push(`post-save verify="${signerLast}" found=${verified}`);
       if (!verified) {
         return ok(
           `⚠️ Signing ${args.signing_id}: save completed but post-save verification mismatch.\n` +
-          `Expected to see signer "${args.signer_names[0]}" in page after save.\n` +
+          `Expected to see signer "${signerNames[0]}" in page after save.\n` +
           `Log: ${log.join(" → ")}\n` +
           `Fields attempted:\n` + updated.map(u => `  • ${u}`).join("\n")
         );
