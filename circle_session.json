@@ -1,0 +1,130 @@
+{
+  "cookies": [
+    {
+      "name": "ahoy_visitor",
+      "value": "95f044f0-725e-4473-ac52-a0d97e6c620d",
+      "domain": "adjuster-university.circle.so",
+      "path": "/",
+      "expires": 1810960721.061939,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ahoy_visit",
+      "value": "4e2918a5-9806-48c8-b076-06a7849decdd",
+      "domain": "adjuster-university.circle.so",
+      "path": "/",
+      "expires": 1776402524.901213,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "cookies_enabled",
+      "value": "true",
+      "domain": "adjuster-university.circle.so",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ahoy_visitor",
+      "value": "dfe2e204-6301-4a6c-8aa8-01cd94eea51c",
+      "domain": "login.circle.so",
+      "path": "/",
+      "expires": 1810960721.770348,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ahoy_visit",
+      "value": "f0ad1d21-2bce-4327-8b3d-bdb96ed68dbc",
+      "domain": "login.circle.so",
+      "path": "/",
+      "expires": 1776402542.897812,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "cookies_enabled",
+      "value": "true",
+      "domain": "login.circle.so",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "anonymous_user_uuid",
+      "value": "5f3e9182-ad21-4d6f-94ab-565aa276e68d",
+      "domain": ".circle.so",
+      "path": "/",
+      "expires": 1776487125.224969,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "cf_clearance",
+      "value": "o_7FzTM0iTfoL80Gk.irP6qOpPeKets_4IHLWjzR5W8-1776400723-1.2.1.1-l4fdk10165jmaFvmZ1kn8g6tw3gTYVyCSA69YEeSUcjg1GZrWEhY6yByYh_YF9fBZtP0KK8Np.aUJ9yTE.2juCo.lyFFqac33oPozA9gQs04PyIl_Yow2VlFqe.qKq_E7rXshNBWwUnsg90JWktCk03ZsNya16BJnLDTf7g07OiUrU006wvX1thRqCV8fIBz31T9.aGvAuvL5vNG.fnG7k9NtBF1hb89sfi58.tQE9Myr7NuW0RuTOrUfZVEm_bCEUgR2In.R9Je.cUpEKnzseRCljBBA2D5_rTqDdoWMAAj5kfABSWDWfMiqZXO4mgbHnLsDu63HghqpAz4gnKonw",
+      "domain": ".circle.so",
+      "path": "/",
+      "expires": 1807936723.15311,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://circle.so",
+      "_crHasCrossSiteAncestor": false
+    },
+    {
+      "name": "__cf_bm",
+      "value": "w8Tm0zMVmLxw_D7LZ9qkxfiMdj65VVgQziY4hQJuRMQ-1776400723.1468544-1.0.1.1-SeYga13IRIPF_7INElHaWFolBYnXKm8Pnzf6HAlAPv0unow3goPz6J2ocPUHDHPnCMzGvVUiYwY1pBZTHHu5jC150SMiNjXGo7BItU4bNA5hQj60.EAU2wCnZyPazV6W",
+      "domain": ".circle.so",
+      "path": "/",
+      "expires": 1776402523.153656,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "utm_params",
+      "value": "{%22original_url%22:%22https://login.circle.so/sign_in?request_host=adjuster-university.circle.so%22%2C%22referrer_url%22:%22%22}",
+      "domain": ".circle.so",
+      "path": "/",
+      "expires": 1776487125,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_circle_session",
+      "value": "hDBJQcEuglWWbXPS0J7Xj35uLQBiM1BF7PW3LBAadsTQGuyb%2BcglUuX87Kxr%2FB3ot6WvlmrcMaooJA2M2DbRALcCNmZJ1WrMkG9bAjdq7bopRUHNukcPrMMD0aLXsKWsKcoh7FlA1j6TACBdbgN7A15Q4BZU96TvCn90EPXY1Q1jQqpmobme15zXDF0%2BPJLmRP25q%2FdUkaEcQjscnbvaMUo7GYHeUHcriuptAkqIbz43XcSqxV2BYNTBM3%2BNqkHm8wCdE76JDl%2FrSsZo4EU%2FB%2Bycbg%3D%3D--bHPOrUnSVr57ZRTV--uK1pY%2BMXiT%2FyvV9D6gVtrw%3D%3D",
+      "domain": "adjuster-university.circle.so",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_circle_session",
+      "value": "H6wG%2FS7LRPTKOkWVxo1QKgOvljE8DXw3Tynip4mbkLDUffiQnMgqTPxUr6T%2FzPDLUm8kCjlqUKiMukYqoJMpygcH1XAiIKsj4k9E4mMHTReXswJfI9QBdKv0qHdo4p4I0C95xuXhS14PeDQ8es0%2BtW5JMtMV293OfCZKt%2BMbMnog8x1%2F5tjHMyhRInKhRl%2FDxZIUOnLEUWQ5yfKPk9lMcgQpNAQcCsAIrr5u3p%2BCiR17npTIyFic8t6P0zW6amszZccB4Kl1GXl8OOtQ3dwAU3lrFBtNXsYrf7dS7RU369Z3EBvFhiCM4LrZAUQTwr23whPIw%2BtV0jEKqx4YjfS0xDwg5lj%2B%2BcYVVDeQlO0FbffNF9g%3D--p%2BRA8YWryGTU%2FmRC--pmmCn8TOTVesvmpvNDE5mg%3D%3D",
+      "domain": "login.circle.so",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    }
+  ],
+  "localStorage": {
+    "current_appearance": "\"\""
+  },
+  "savedAt": "2026-04-17T04:39:49.954Z"
+}

@@ -1,0 +1,455 @@
+{
+  "cookies": [
+    {
+      "name": "wordpress_sec_2530ecf6f1a8eea79967c65d14bc774a",
+      "value": "Erseville%7C1777371924%7CHcx3FjMvDmYXKpcTxhF3BjV9YL3HZNng1HoqH0Qg2SR%7C79402812feb8638f3e404f7a3ca494a0b77636c37bc653659c56ab612e051ece",
+      "domain": "adjuster-university.com",
+      "path": "/wp-content/plugins",
+      "expires": 1777415125.101156,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_GRECAPTCHA",
+      "value": "09AKhCRwhRJswd8WMSH5YXiU4nxNYoxMwRHW8MEC3oue8Pk6jNImM9E8MhPGa2XnH0P0qnyMP041H_FV0gNWX0D2U",
+      "domain": "www.google.com",
+      "path": "/recaptcha",
+      "expires": 1791714321.18112,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "wordpress_sec_2530ecf6f1a8eea79967c65d14bc774a",
+      "value": "Erseville%7C1777371924%7CHcx3FjMvDmYXKpcTxhF3BjV9YL3HZNng1HoqH0Qg2SR%7C79402812feb8638f3e404f7a3ca494a0b77636c37bc653659c56ab612e051ece",
+      "domain": "adjuster-university.com",
+      "path": "/wp-admin",
+      "expires": 1777415125.101171,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "wordpress_test_cookie",
+      "value": "WP%20Cookie%20check",
+      "domain": "adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_lscache_vary",
+      "value": "d05da414b044ebfe69d4dedbc5e6dbc5",
+      "domain": "adjuster-university.com",
+      "path": "/",
+      "expires": 1777415125.101132,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "wordpress_logged_in_2530ecf6f1a8eea79967c65d14bc774a",
+      "value": "Erseville%7C1777371924%7CHcx3FjMvDmYXKpcTxhF3BjV9YL3HZNng1HoqH0Qg2SR%7C76d56136e33076a2450d9b9e387e8f2efc0c47e454ec905a558e70fe1271226b",
+      "domain": "adjuster-university.com",
+      "path": "/",
+      "expires": 1777415125.101189,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "wp_automatewoo_visitor_2530ecf6f1a8eea79967c65d14bc774a",
+      "value": "pwvip6f4837olzrpwrsu",
+      "domain": "adjuster-university.com",
+      "path": "/",
+      "expires": 1807698325.10125,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "wp_automatewoo_session_started",
+      "value": "1",
+      "domain": "adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_cfuvid",
+      "value": "MmlW1awdpypigkxbwhkpiW6gNY6ENqwparkz6CDUtq8-1776162327.5481-1.0.1.1-qIDjWgNw3MEmGrhYFV42OAnquj4YJevSVDbh5Z5qdOU",
+      "domain": ".affirm.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "sbjs_migrations",
+      "value": "1418474375998%3D1",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sbjs_current_add",
+      "value": "fd%3D2026-04-14%2010%3A25%3A27%7C%7C%7Cep%3Dhttps%3A%2F%2Fadjuster-university.com%2Fdashboard%2F%7C%7C%7Crf%3Dhttps%3A%2F%2Fadjuster-university.com%2Faccess%2F%3Fwfls-email-verification%3DjVVh%252B%252FV71P%252FLMsiTZRq7fTXgCorCKy4GDTCPZSODSpn6sApvss174w0vVcAbvzMVVeCldMNwqYqoWfTz5rQ0cA%253D%253D",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sbjs_first_add",
+      "value": "fd%3D2026-04-14%2010%3A25%3A27%7C%7C%7Cep%3Dhttps%3A%2F%2Fadjuster-university.com%2Fdashboard%2F%7C%7C%7Crf%3Dhttps%3A%2F%2Fadjuster-university.com%2Faccess%2F%3Fwfls-email-verification%3DjVVh%252B%252FV71P%252FLMsiTZRq7fTXgCorCKy4GDTCPZSODSpn6sApvss174w0vVcAbvzMVVeCldMNwqYqoWfTz5rQ0cA%253D%253D",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sbjs_current",
+      "value": "typ%3Dtypein%7C%7C%7Csrc%3D%28direct%29%7C%7C%7Cmdm%3D%28none%29%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%28none%29%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sbjs_first",
+      "value": "typ%3Dtypein%7C%7C%7Csrc%3D%28direct%29%7C%7C%7Cmdm%3D%28none%29%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%28none%29%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sbjs_udata",
+      "value": "vst%3D1%7C%7C%7Cuip%3D%28none%29%7C%7C%7Cuag%3DMozilla%2F5.0%20%28Macintosh%3B%20Intel%20Mac%20OS%20X%2010_15_7%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F120.0.0.0%20Safari%2F537.36",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "checkout_continuity_service",
+      "value": "46c1e66c-2da7-4582-897d-140d632bf6d1",
+      "domain": ".affirm.com",
+      "path": "/",
+      "expires": 1810722327.80719,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "t_v2_s",
+      "value": "IjQ2YzFlNjZjLTJkYTctNDU4Mi04OTdkLTE0MGQ2MzJiZjZkMSI.HL-nlw.JCObgYLAq9GYUtPMOvHLWmlwh24",
+      "domain": ".affirm.com",
+      "path": "/",
+      "expires": 1810722327.807226,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "3060738.3440491",
+      "value": "46c1e66c-2da7-4582-897d-140d632bf6d1",
+      "domain": ".affirm.com",
+      "path": "/",
+      "expires": 1810722327.807251,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "session",
+      "value": "eyJfcGVybWFuZW50Ijp0cnVlfQ.HL-nlw.PdjCNOJ45lbOEf4F7hnbDjGOHmg",
+      "domain": "www.affirm.com",
+      "path": "/",
+      "expires": 1810722327.807269,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_gcl_au",
+      "value": "1.1.402504874.1776162328",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1783938328,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "checkout_continuity_service",
+      "value": "46c1e66c-2da7-4582-897d-140d632bf6d1",
+      "domain": "adjuster-university.com",
+      "path": "/",
+      "expires": 1810739436.698526,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga",
+      "value": "GA1.1.1738057593.1776162328",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1810739436.737218,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "prism_90079524",
+      "value": "dfa43f27-908d-4aeb-be43-0b8a394e1f38",
+      "domain": "prism.app-us1.com",
+      "path": "/",
+      "expires": 1778771199.133041,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "prism_90079524",
+      "value": "dfa43f27-908d-4aeb-be43-0b8a394e1f38",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1778771199,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ttp",
+      "value": "3CLQNQBKIzR4vZh30jLV5MvTPWj",
+      "domain": ".tiktok.com",
+      "path": "/",
+      "expires": 1809875436.765975,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_tt_enable_cookie",
+      "value": "1",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1809875436,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ttp",
+      "value": "01KP5RCMKZGPXBNBCVZ1Q253P0_.tt.1",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1809875436,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_fbp",
+      "value": "fb.1.1776162329255.99137446241141320",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1783955436,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "IDE",
+      "value": "AHWqTUkIKfzZyF2xFV-sHtrzd6Tj3TSJUvB-RZXHYeCUxdYQPZnTqC53xDSyArB4",
+      "domain": ".doubleclick.net",
+      "path": "/",
+      "expires": 1810722805.624307,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "vuid",
+      "value": "pl1319165353.797437598",
+      "domain": ".vimeo.com",
+      "path": "/",
+      "expires": 1810739289.513103,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "YSC",
+      "value": "Hp9ZAdCD0u4",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://adjuster-university.com",
+      "_crHasCrossSiteAncestor": true
+    },
+    {
+      "name": "VISITOR_INFO1_LIVE",
+      "value": "H7uTD9rNEjs",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": 1791730497.957205,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://adjuster-university.com",
+      "_crHasCrossSiteAncestor": true
+    },
+    {
+      "name": "VISITOR_PRIVACY_METADATA",
+      "value": "CgJVUxIEGgAgKA%3D%3D",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": 1791730497.957258,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://adjuster-university.com",
+      "_crHasCrossSiteAncestor": true
+    },
+    {
+      "name": "__Secure-ROLLOUT_TOKEN",
+      "value": "CNG40eu3-5SqqgEQxfybk5PtkwMYi4TXl5PtkwM%3D",
+      "domain": ".youtube.com",
+      "path": "/",
+      "expires": 1791715105.522086,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://adjuster-university.com",
+      "_crHasCrossSiteAncestor": true
+    },
+    {
+      "name": "wfwaf-authcookie-e93b2df84a4c49b1ef4cebaee7c25eaf",
+      "value": "1161%7Cother%7Cread%7C03a1f2112d8fc1cb433ee041f0c542371764b70a772088cd7b916703222db33a",
+      "domain": "adjuster-university.com",
+      "path": "/",
+      "expires": 1776211204.366335,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "__cf_bm",
+      "value": "x0MUciCLho7cr2fciF.9z5EvY5ph1N04copoHfUKodc-1776177870-1.0.1.1-uX0wRaFljJzS_OgDE735lNlh3sz8ne8bZZVu_H.8UqPAvV7tzqeDx3YsXbILeK4_",
+      "domain": ".vimeo.com",
+      "path": "/",
+      "expires": 1776179670.520554,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_cfuvid",
+      "value": "i4X9s5GaYNAr8SgioXDwKH4UbI9uO4ZmlD2RnTCqilY-1776179055.4626455-1.0.1.1-kEiat9ZDqv6TIJkWWjUZbk.KAuwqzDjeDsnM41VmpwY",
+      "domain": ".vimeo.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_dd_s",
+      "value": "rum=0&expire=1776180130165",
+      "domain": "player.vimeo.com",
+      "path": "/",
+      "expires": 1776180134,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None",
+      "partitionKey": "https://adjuster-university.com",
+      "_crHasCrossSiteAncestor": true
+    },
+    {
+      "name": "sbjs_session",
+      "value": "pgs%3D2371%7C%7C%7Ccpg%3Dhttps%3A%2F%2Fadjuster-university.com%2Fcourses%2Fbuilding-a-6-figure-independent-adjuster-resume%2Flessons%2Fcase-study-of-david-dehoff%2F",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1776181236,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ttcsid",
+      "value": "1776162329222::KYF8oAjDZBAShsFIxwr8.1.1776179440152.0::1.17105645.17107581::0.0.0.0::17108810.6816.0",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1809875440,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ttcsid_COC498RC77UC9PN8NBO0",
+      "value": "1776162329221::WMBUiR5Wc05sJ7bskfg9.1.1776179440152.1",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1809875440,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ttcsid_CJ92A5BC77U0073JOHEG",
+      "value": "1776162329222::suoC9TfuGKzEzzNupTCZ.1.1776179440152.1",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1809875440,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga_0MNY1N2LSZ",
+      "value": "GS2.1.s1776162327$o1$g1$t1776179440$j51$l0$h0",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1810739440.724704,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga_LN8CCD17GP",
+      "value": "GS2.1.s1776162328$o1$g1$t1776179440$j51$l0$h0",
+      "domain": ".adjuster-university.com",
+      "path": "/",
+      "expires": 1810739440.729667,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "savedAt": "2026-04-14T15:10:43.708Z"
+}

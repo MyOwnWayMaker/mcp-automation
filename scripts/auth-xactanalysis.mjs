@@ -37,9 +37,40 @@ if (await pwdField.count() > 0) {
   await page.waitForTimeout(3000);
 }
 
-console.log("\n>>> MFA screen should now be showing.");
-console.log(">>> Choose Email or SMS, enter the code, and click SELECT/VERIFY.");
-console.log(">>> Check 'Remember this device' if offered.");
+// Step 3: Auto-select SMS on MFA screen
+console.log("\n>>> Checking for MFA screen...");
+await page.waitForTimeout(2000);
+
+try {
+  // Click the "Send it through text message" option
+  const smsOption = page.locator('text="Send it through text message"').first();
+  if (await smsOption.isVisible({ timeout: 5000 })) {
+    await smsOption.click();
+    console.log("✅ Selected 'Send it through text message'");
+    await page.waitForTimeout(1000);
+
+    // Click the Send/Select/Submit button
+    for (const selector of [
+      'button:has-text("Send")',
+      'button:has-text("SELECT")',
+      'button:has-text("Submit")',
+      'button[type="submit"]',
+    ]) {
+      const btn = page.locator(selector).first();
+      if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await btn.click();
+        console.log(`✅ Clicked submit button`);
+        break;
+      }
+    }
+    console.log("\n>>> SMS code sent to your phone. Enter it below when it arrives.");
+  } else {
+    console.log(">>> MFA screen not detected or already past it — waiting for manual completion.");
+  }
+} catch {
+  console.log(">>> Could not auto-select SMS — please complete MFA manually in the browser.");
+}
+
 console.log("\nWaiting up to 120 seconds for you to complete MFA...\n");
 
 // Wait for redirect back to xactanalysis.com

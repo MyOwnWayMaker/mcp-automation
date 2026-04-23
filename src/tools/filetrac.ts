@@ -1,5 +1,6 @@
 import { chromium, type Browser, type Page } from "playwright";
 import fs from "fs";
+import path from "path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const SESSION_PATH = process.env.FILETRAC_SESSION_PATH || "/Users/hakielmcqueen/mcp-automation/filetrac_session.json";
@@ -27,6 +28,19 @@ function loadSession(): FiletracSession {
     "FileTrac session not found. Set FILETRAC_SESSION_JSON env var or run: " +
     "node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs"
   );
+}
+
+/**
+ * Load aspBase and aspCookies from the session file.
+ * company_index is not used here (all companies share the same session),
+ * but the parameter is accepted for API consistency.
+ */
+function getAspCredentials(_companyIndex?: number): { aspBase: string; aspCookies: string } {
+  const session = loadSession();
+  return {
+    aspBase: session.aspBase ?? "",
+    aspCookies: session.aspCookies ?? "",
+  };
 }
 
 function saveAspToSession(aspBase: string, aspCookies: string): void {
@@ -1057,4 +1071,188 @@ export async function filetracListCompanies(args: Record<string, never>): Promis
   } finally {
     await browser.close();
   }
+}
+
+// ─── Document Listing & Download ──────────────────────────────────────────────
+
+interface FiletracDocument {
+  report_id: string;
+  filename: string;
+  date: string;
+  file_type: string;
+  size_kb: string;
+  url: string;
+  description: string;
+}
+
+/**
+ * Parse all uploaded report/document entries from the expanded claimList HTML.
+ * Each report entry has a data-reportid and data-path attribute on a span element.
+ */
+function parseDocumentEntries(html: string): FiletracDocument[] {
+  const docs: FiletracDocument[] = [];
+
+  // Match all spans with data-reportid and data-path
+  const spanRe = /<span[^>]+data-reportid="(\d+)"[^>]+data-path="([^"]+)"/gi;
+  let m: RegExpExecArray | null;
+
+  while ((m = spanRe.exec(html)) !== null) {
+    const reportID = m[1];
+    const dataPath = m[2];
+    const spanIdx = m.index;
+
+    // Look at context before the span for title, type, description, date
+    const lookBack = Math.max(0, spanIdx - 2000);
+    const before = html.substring(lookBack, spanIdx);
+
+    // Title: last <a href="reportEdit_TrackEditRpt...">TITLE</a>
+    const titleMatch = before.match(/reportEdit_TrackEditRpt[^"]+">([^<]+)<\/a[^>]*>\s*<\/b[^>]*>\s*\(<i>([^<]+)<\/i>\)\s*-\s*([^\n<]{0,120})/i);
+    const title = titleMatch ? titleMatch[1].trim() : "";
+    const fileType = titleMatch ? titleMatch[2].trim() : "PDF";
+    const rawDesc = titleMatch ? titleMatch[3].trim() : "";
+
+    // Date: last date pattern before this span
+    const dateMatches = [...before.matchAll(/\b(\d{1,2}\/\d{1,2}\/\d{4})\b/g)];
+    const date = dateMatches.length > 0 ? dateMatches[dateMatches.length - 1][1] : "";
+
+    // Size: look forward from span for NNNkb pattern
+    const after = html.substring(spanIdx, spanIdx + 800);
+    const sizeMatch = after.match(/>\s*(\d+KB)\s*</i);
+    const sizeKb = sizeMatch ? sizeMatch[1] : "";
+
+    // Filename from URL path segment
+    const urlParts = dataPath.replace(/\?.*/, "").split("/");
+    const filename = decodeURIComponent(urlParts[urlParts.length - 1]);
+
+    // Clean description: strip trailing HTML artifacts
+    const description = rawDesc.replace(/<[^>]+>/g, "").replace(/^\s*[-–]\s*/, "").trim();
+
+    docs.push({
+      report_id: reportID,
+      filename,
+      date,
+      file_type: fileType,
+      size_kb: sizeKb,
+      url: dataPath,
+      description: description || title,
+    });
+  }
+
+  return docs;
+}
+
+/**
+ * List uploaded documents/reports for a FileTrac claim.
+ * Returns {report_id, filename, date, file_type, size_kb, url, description}[]
+ * Use report_id or url with filetrac_download_report to download the file.
+ */
+export async function filetracListDocuments(args: {
+  claim_id: string | number;
+  company_index?: number;
+}): Promise<CallToolResult> {
+  const { aspBase, aspCookies } = getAspCredentials(args.company_index);
+  if (!aspBase || !aspCookies) {
+    return ok("FileTrac ASP session not available. Run auth-filetrac.mjs first.");
+  }
+
+  const claimID = String(args.claim_id);
+
+  // Load the expanded claim list view — this is where report entries live
+  const listUrl = `/system/claimList.asp?allBranches=1&searchType=claimID&searchTgt=${claimID}&expand=${claimID}`;
+  const html = await fetchAspPage(aspBase, aspCookies, listUrl);
+
+  if (!html) {
+    return ok(`Failed to load FileTrac claim list for claim ${claimID}. Session may be expired.`);
+  }
+
+  const docs = parseDocumentEntries(html);
+
+  if (docs.length === 0) {
+    return ok(`No documents found for claim ${claimID}. The claim may have no uploaded reports.`);
+  }
+
+  const lines = docs.map((d, i) =>
+    `${i + 1}. [${d.report_id}] ${d.filename}\n   Type: ${d.file_type} | Date: ${d.date} | Size: ${d.size_kb}\n   Desc: ${d.description}\n   URL: ${d.url}`
+  );
+
+  return ok(`Documents for claim ${claimID} (${docs.length} found):\n\n${lines.join("\n\n")}`);
+}
+
+/**
+ * Download an uploaded FileTrac report/document to a local path.
+ * Provide either:
+ *   - report_url: the data-path URL from filetrac_list_documents
+ *   - report_id + claim_id: looks up the URL automatically
+ */
+export async function filetracDownloadReport(args: {
+  claim_id?: string | number;
+  report_id?: string | number;
+  report_url?: string;
+  dest_path: string;
+  company_index?: number;
+}): Promise<CallToolResult> {
+  const { aspBase, aspCookies } = getAspCredentials(args.company_index);
+  if (!aspBase || !aspCookies) {
+    return ok("FileTrac ASP session not available. Run auth-filetrac.mjs first.");
+  }
+
+  let targetUrl = args.report_url;
+
+  // If no URL provided, look up via report_id + claim_id
+  if (!targetUrl) {
+    if (!args.claim_id || !args.report_id) {
+      return ok("Provide either report_url, or both claim_id and report_id.");
+    }
+    const claimID = String(args.claim_id);
+    const reportID = String(args.report_id);
+    const listUrl = `/system/claimList.asp?allBranches=1&searchType=claimID&searchTgt=${claimID}&expand=${claimID}`;
+    const html = await fetchAspPage(aspBase, aspCookies, listUrl);
+    if (!html) {
+      return ok(`Failed to load FileTrac claim list for claim ${claimID}. Session may be expired.`);
+    }
+    const docs = parseDocumentEntries(html);
+    const doc = docs.find(d => d.report_id === reportID);
+    if (!doc) {
+      return ok(`Report ${reportID} not found in claim ${claimID}. Available: ${docs.map(d => d.report_id).join(", ")}`);
+    }
+    targetUrl = doc.url;
+  }
+
+  // Fetch the binary file using ASP cookies
+  let res: Response;
+  try {
+    res = await fetch(targetUrl, {
+      headers: {
+        "Cookie": aspCookies,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+      },
+      redirect: "follow",
+    });
+  } catch (e: any) {
+    return ok(`Fetch failed: ${e.message}`);
+  }
+
+  if (!res.ok) {
+    return ok(`Download failed: HTTP ${res.status} from ${targetUrl}`);
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("text/html")) {
+    // Likely a login redirect — session expired
+    return ok(`Got HTML instead of file binary. Session may be expired. Re-run auth-filetrac.mjs.`);
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length === 0) {
+    return ok(`Downloaded file is empty (0 bytes).`);
+  }
+
+  // Ensure destination directory exists
+  const destResolved = path.resolve(args.dest_path);
+  fs.mkdirSync(path.dirname(destResolved), { recursive: true });
+  fs.writeFileSync(destResolved, buf);
+
+  const sizeKb = (buf.byteLength / 1024).toFixed(1);
+  const filename = path.basename(destResolved);
+  return ok(`Downloaded: ${filename}\nSaved to: ${destResolved}\nSize: ${sizeKb} KB\nContent-Type: ${contentType}`);
 }

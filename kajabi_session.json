@@ -1,0 +1,146 @@
+{
+  "cookies": [
+    {
+      "name": "__cf_bm",
+      "value": "6rCHawxlImlZT3qKoSDT4oC8s0ZBPNTi.BUB16TIExU-1776398177-1.0.1.1-ozKFr7zgvuyMuXCe9_O6Pq3KlhPwBoqQZg.b8LefRK0zIphEvef_K0dDQ9oGmC1Rkw0s3D9HElolncRXuBir9JZgYB32yb1Pa9_L5qnL6Qo",
+      "domain": ".mykajabi.com",
+      "path": "/",
+      "expires": 1776399977.62783,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_cfuvid",
+      "value": "knJ.pbpZkfp5sEyqnTKGyeSOEnAbeWE7ObEvQDDslZs-1776398177622-0.0.1.1-604800000",
+      "domain": ".mykajabi.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "rl_anonymous_id",
+      "value": "RS_ENC_v3_IjRiOTliYTIyLTY0ZGMtNDA3OC04ZjUxLThhY2Q1N2U2YTc2ZSI%3D",
+      "domain": ".mykajabi.com",
+      "path": "/",
+      "expires": 1807934236,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rl_page_init_referrer",
+      "value": "RS_ENC_v3_IiRkaXJlY3Qi",
+      "domain": ".mykajabi.com",
+      "path": "/",
+      "expires": 1807934236,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "remember_member_token",
+      "value": "eyJfcmFpbHMiOnsibWVzc2FnZSI6Ilcxc3lNakV6TURRM05ERTRYU3dpSkRKaEpERXdKRlV3YWpSc2FIZ3ZiSGxvUlVaclMxaHNTMUJKU0U4aUxDSXhOemMyTXprNE1qTTFMalk0TlRJeU5qSWlYUT09IiwiZXhwIjoiMjAyNi0wNS0wMVQwMzo1NzoxNS42ODVaIiwicHVyIjpudWxsfX0%3D--d37a9a4ab225dd0ccfdf0ed04d443e3ca8f6c5b8",
+      "domain": "tax-free-wealth-challenge.mykajabi.com",
+      "path": "/",
+      "expires": 1777607835.727352,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_kjb_session",
+      "value": "9718ff66bad4444ebe1d289073ae755d",
+      "domain": "tax-free-wealth-challenge.mykajabi.com",
+      "path": "/",
+      "expires": 1776484636.42258,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "vs_uniques_template_metadata",
+      "value": "eJyLNjI0NTY3NDcyNNOBMY0MYgE61QTm",
+      "domain": "tax-free-wealth-challenge.mykajabi.com",
+      "path": "/",
+      "expires": 1792209435.101376,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_csrf_token",
+      "value": "eyJfcmFpbHMiOnsibWVzc2FnZSI6IklrMVVYM1pNWmxwc2RqTlJYMEYyYWxkVlpXWnNkazltU1hoSFEzVk1aMlV4Y1VOWGIyRjFaVEpxYzI4aSIsImV4cCI6IjIwMjctMDQtMTdUMDM6NTc6MTUuOTY5WiIsInB1ciI6bnVsbH19--276094409bfe73e789d418daa578c809ef65d987",
+      "domain": "tax-free-wealth-challenge.mykajabi.com",
+      "path": "/",
+      "expires": 1807934235.101425,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "rl_session",
+      "value": "RS_ENC_v3_eyJhdXRvVHJhY2siOnRydWUsInRpbWVvdXQiOjE4MDAwMDAsImV4cGlyZXNBdCI6MTc3NjQwMDAzNjM0MSwiaWQiOjE3NzYzOTgxNzkzNzcsInNlc3Npb25TdGFydCI6ZmFsc2V9",
+      "domain": ".mykajabi.com",
+      "path": "/",
+      "expires": 1807934236,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rl_trait",
+      "value": "RS_ENC_v3_eyJhY2NvdW50X2lkIjoiODk1MjciLCJzaXRlX2lkIjoiOTk0MTciLCJuYW1lIjoiSGFraWVsIE1jUXVlZW4iLCJlbWFpbCI6Imhha2llbG1jcXVlZW5AZXJzZXZvbi5jb20ifQ%3D%3D",
+      "domain": ".mykajabi.com",
+      "path": "/",
+      "expires": 1807934236,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rl_user_id",
+      "value": "RS_ENC_v3_IjIyMTMwNDc0MTgi",
+      "domain": ".mykajabi.com",
+      "path": "/",
+      "expires": 1807934236,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "AWSALBTG",
+      "value": "BPEkokC1o7QLE8gQNHDg+bNtCD0/odJh+hDCkUP6mavwz78PeivPPbLm12J6V8AnAhdEG6wgrf4dscmhw3p1/mczD8Spr1ZVQe7SgXdzDESqLE9uB8sfCBMaVDj3gW4meAOEBalKQWRmJw0Mql7QYszKuLOrT8mI385ZTwG/yzXT",
+      "domain": "tax-free-wealth-challenge.mykajabi.com",
+      "path": "/",
+      "expires": 1777003036.422485,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "AWSALBTGCORS",
+      "value": "BPEkokC1o7QLE8gQNHDg+bNtCD0/odJh+hDCkUP6mavwz78PeivPPbLm12J6V8AnAhdEG6wgrf4dscmhw3p1/mczD8Spr1ZVQe7SgXdzDESqLE9uB8sfCBMaVDj3gW4meAOEBalKQWRmJw0Mql7QYszKuLOrT8mI385ZTwG/yzXT",
+      "domain": "tax-free-wealth-challenge.mykajabi.com",
+      "path": "/",
+      "expires": 1777003036.422549,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    }
+  ],
+  "localStorage": {
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.112f3867-198c-4e6b-a8da-af72ae32141b.batchQueue": "\"[]\"",
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.236a5fd8-166d-40c4-ab38-89d0a643b2ab.queue": "\"[]\"",
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.112f3867-198c-4e6b-a8da-af72ae32141b.inProgress": "\"{}\"",
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.236a5fd8-166d-40c4-ab38-89d0a643b2ab.inProgress": "\"{}\"",
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.112f3867-198c-4e6b-a8da-af72ae32141b.queue": "\"[]\"",
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.112f3867-198c-4e6b-a8da-af72ae32141b.ack": "\"1776398242344\"",
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.236a5fd8-166d-40c4-ab38-89d0a643b2ab.ack": "\"1776398235465\"",
+    "rudder_2apYBMHHHWpiGqicceKmzPebApa.236a5fd8-166d-40c4-ab38-89d0a643b2ab.batchQueue": "\"[]\""
+  },
+  "loginUrl": "https://tax-free-wealth-challenge.mykajabi.com/library",
+  "savedAt": "2026-04-17T03:57:23.186Z"
+}
