@@ -119,13 +119,13 @@ export async function driveMoveFile(args: {
     return ok(`File "${file.data.name}" is already in folder ${args.new_folder_id} — no move needed.\n[diag: ${parentsDiag}]`);
   }
 
-  const removeParents = parents.length > 0 ? parents.join(",") : "root";
+  const removeParents = parents.length > 0 ? parents.join(",") : "";
 
   try {
     const res = await drive.files.update({
       fileId: args.file_id,
       addParents: args.new_folder_id,
-      removeParents,
+      ...(removeParents ? { removeParents } : {}),
       fields: "id, name, parents",
       supportsAllDrives: true,
     });
