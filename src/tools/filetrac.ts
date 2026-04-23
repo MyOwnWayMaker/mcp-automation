@@ -9,6 +9,13 @@ const SESSION_PATH = process.env.FILETRAC_SESSION_PATH || "/Users/hakielmcqueen/
 // After the first browser flow, we save the ASP session cookie so subsequent
 // calls can skip the browser entirely and use a direct HTTP fetch (~1s vs 30s).
 
+interface AspCompanyCredential {
+  aspBase: string;
+  aspCookies: string;
+  savedAt: string;
+  companyName?: string;
+}
+
 interface FiletracSession {
   cookies: unknown[];
   localStorage: Record<string, string>;
@@ -16,6 +23,9 @@ interface FiletracSession {
   aspBase?: string;
   aspCookies?: string;  // raw Cookie header string (e.g. "ASPSESSIONIDXXXX=YYYY")
   aspCookiesSavedAt?: string;
+  // Per-company credentials keyed by "See Jobs" button index (0-3)
+  // 0=Accelerated, 1=Premier Claims, 2=Stewardship, 3=US Claim Solutions
+  aspCredentials?: Record<string, AspCompanyCredential>;
 }
 
 function loadSession(): FiletracSession {
@@ -31,28 +41,75 @@ function loadSession(): FiletracSession {
 }
 
 /**
- * Load aspBase and aspCookies from the session file.
- * company_index is not used here (all companies share the same session),
- * but the parameter is accepted for API consistency.
+ * Load aspBase and aspCookies for the given company index.
+ * Checks aspCredentials map first (per-company), falls back to top-level fields (Premier Claims).
+ * company_index: 0=Accelerated, 1=Premier Claims (default), 2=Stewardship, 3=US Claim Solutions
  */
-function getAspCredentials(_companyIndex?: number): { aspBase: string; aspCookies: string } {
+function getAspCredentials(companyIndex?: number): { aspBase: string; aspCookies: string } {
   const session = loadSession();
+  const idx = companyIndex ?? 1;
+  // Check per-company map first
+  const perCompany = session.aspCredentials?.[String(idx)];
+  if (perCompany?.aspBase && perCompany?.aspCookies) {
+    return { aspBase: perCompany.aspBase, aspCookies: perCompany.aspCookies };
+  }
+  // Fall back to top-level (Premier Claims / company 1)
   return {
     aspBase: session.aspBase ?? "",
     aspCookies: session.aspCookies ?? "",
   };
 }
 
-function saveAspToSession(aspBase: string, aspCookies: string): void {
+function saveAspToSession(aspBase: string, aspCookies: string, companyIndex?: number): void {
   // Only save to local file — Railway env var is updated separately
   if (!fs.existsSync(SESSION_PATH)) return;
   try {
     const session = JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
-    session.aspBase = aspBase;
-    session.aspCookies = aspCookies;
-    session.aspCookiesSavedAt = new Date().toISOString();
+    const now = new Date().toISOString();
+    // Save per-company if index provided
+    if (companyIndex !== undefined) {
+      if (!session.aspCredentials) session.aspCredentials = {};
+      session.aspCredentials[String(companyIndex)] = {
+        ...(session.aspCredentials[String(companyIndex)] ?? {}),
+        aspBase,
+        aspCookies,
+        savedAt: now,
+      };
+    }
+    // Also update top-level for Premier Claims (company 1) backward compat
+    if (companyIndex === undefined || companyIndex === 1) {
+      session.aspBase = aspBase;
+      session.aspCookies = aspCookies;
+      session.aspCookiesSavedAt = now;
+    }
     fs.writeFileSync(SESSION_PATH, JSON.stringify(session, null, 2));
   } catch { /* non-fatal */ }
+}
+
+/**
+ * Check whether the given ASP credentials are still valid by fetching
+ * a lightweight page. Returns false if session expired or redirected to login.
+ */
+async function isAspSessionValid(aspBase: string, aspCookies: string): Promise<boolean> {
+  if (!aspBase || !aspCookies) return false;
+  try {
+    const res = await fetch(`${aspBase}/system/claimList.asp`, {
+      headers: {
+        "Cookie": aspCookies,
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return false;
+    const html = await res.text();
+    if (html.includes("Session has expired") || html.includes("Please log in")) return false;
+    if (html.includes("ftevolve.com/auth") || html.includes("/sign-in") || html.includes("Forgot password")) return false;
+    if ((html.includes("Login") || html.includes("Sign in")) && html.includes("password") && html.length < 8000) return false;
+    return html.length > 5000;
+  } catch {
+    return false;
+  }
 }
 
 async function fetchAspPage(aspBase: string, aspCookies: string, path: string): Promise<string | null> {
@@ -247,13 +304,13 @@ async function getFiletracPage(companyIndex = 0): Promise<{
 
   const aspBase = new URL(page.url()).origin;
 
-  // Save ASP cookies for future fast-path requests
+  // Save ASP cookies for future fast-path requests (per-company and top-level)
   const cookies = await page.context().cookies();
   const aspCookies = cookies
     .filter(c => c.domain.includes(new URL(aspBase).hostname))
     .map(c => `${c.name}=${c.value}`)
     .join("; ");
-  if (aspCookies) saveAspToSession(aspBase, aspCookies);
+  if (aspCookies) saveAspToSession(aspBase, aspCookies, companyIndex);
 
   return { browser, page, aspBase };
 }
@@ -1020,6 +1077,106 @@ export async function filetracBulkAddNote(args: {
   return ok(`Bulk note results (${items.length} claims):\n${results.join("\n")}`);
 }
 
+// ─── Session Refresh ──────────────────────────────────────────────────────────
+
+/**
+ * Re-authenticate via ftevolve.com SSO for one or all companies.
+ * Refreshes the cached ASP session cookies without requiring MFA
+ * (uses existing Cognito tokens if valid; if expired, falls back to
+ * whatever browser session state exists).
+ *
+ * company_index: 0=Accelerated, 1=Premier Claims, 2=Stewardship, 3=US Claim Solutions
+ * If omitted, refreshes all 4 companies sequentially.
+ */
+export async function filetracRefreshSession(args: {
+  company_index?: number;
+}): Promise<CallToolResult> {
+  let session = loadSession();
+
+  // Proactively try Cognito token refresh — may fail if 30-day limit hit
+  let localStorage = session.localStorage;
+  try {
+    localStorage = await refreshCognitoTokens(localStorage);
+  } catch {
+    // Expired — proceed with existing tokens; browser cookies may still be valid
+  }
+
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.goto("https://ftevolve.com", { waitUntil: "domcontentloaded", timeout: 15000 });
+    await page.evaluate((ls: Record<string, string>) => {
+      for (const [k, v] of Object.entries(ls)) window.localStorage.setItem(k, v);
+    }, localStorage);
+    await page.goto("https://ftevolve.com/app/legacy/linked-companies", { waitUntil: "domcontentloaded", timeout: 15000 });
+
+    try {
+      await page.waitForSelector('button:has-text("See Jobs")', { timeout: 20000 });
+    } catch {
+      if (page.url().includes("/auth/")) {
+        return ok(
+          "FileTrac Cognito refresh token has expired (30-day limit).\n" +
+          "Re-run: node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs\n" +
+          "Then run Hakiel's update-railway-sessions.mjs to sync to Railway."
+        );
+      }
+      return ok("FileTrac linked-companies page did not render. Cannot refresh session.");
+    }
+
+    const seeJobsBtns = await page.locator('button:has-text("See Jobs")').all();
+    const companyCount = seeJobsBtns.length;
+
+    // Determine which indices to refresh
+    const indicesToRefresh = args.company_index !== undefined
+      ? [args.company_index]
+      : Array.from({ length: companyCount }, (_, i) => i);
+
+    const results: string[] = [];
+
+    for (const idx of indicesToRefresh) {
+      if (idx >= companyCount) {
+        results.push(`Company ${idx}: skipped (only ${companyCount} companies found)`);
+        continue;
+      }
+
+      // Navigate back to linked-companies before each click
+      await page.goto("https://ftevolve.com/app/legacy/linked-companies", { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForSelector('button:has-text("See Jobs")', { timeout: 15000 });
+      const btns = await page.locator('button:has-text("See Jobs")').all();
+
+      await btns[idx].click();
+      await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
+      await page.waitForTimeout(800);
+
+      const aspBase = new URL(page.url()).origin;
+      const allCookies = await context.cookies();
+      const hostname = new URL(aspBase).hostname;
+      const aspCookies = allCookies
+        .filter(c => c.domain.includes(hostname))
+        .map(c => `${c.name}=${c.value}`)
+        .join("; ");
+
+      if (aspCookies) {
+        saveAspToSession(aspBase, aspCookies, idx);
+        results.push(`Company ${idx}: ✅ refreshed — ${aspBase} (${aspCookies.substring(0, 40)}...)`);
+      } else {
+        results.push(`Company ${idx}: ⚠️ no cookies captured — ${aspBase}`);
+      }
+    }
+
+    return ok(
+      `FileTrac session refresh complete:\n${results.join("\n")}\n\n` +
+      `To sync to Railway run: node /Users/hakielmcqueen/mcp-automation/scripts/update-railway-sessions.mjs`
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
 export async function filetracListCompanies(args: Record<string, never>): Promise<CallToolResult> {
   let session: { cookies: unknown[]; localStorage: Record<string, string> };
   if (process.env.FILETRAC_SESSION_JSON) {
@@ -1083,22 +1240,24 @@ interface FiletracDocument {
   size_kb: string;
   url: string;
   description: string;
+  on_cloud: boolean;
 }
 
 /**
  * Parse all uploaded report/document entries from the expanded claimList HTML.
- * Each report entry has a data-reportid and data-path attribute on a span element.
+ * Each report entry has data-reportid, data-path, and data-on-cloud on a span element.
  */
 function parseDocumentEntries(html: string): FiletracDocument[] {
   const docs: FiletracDocument[] = [];
 
-  // Match all spans with data-reportid and data-path
-  const spanRe = /<span[^>]+data-reportid="(\d+)"[^>]+data-path="([^"]+)"/gi;
+  // Match all spans with data-reportid, data-path, and optionally data-on-cloud
+  const spanRe = /<span[^>]+data-reportid="(\d+)"[^>]+data-path="([^"]+)"[^>]*(?:data-on-cloud="([^"]*)")?/gi;
   let m: RegExpExecArray | null;
 
   while ((m = spanRe.exec(html)) !== null) {
     const reportID = m[1];
     const dataPath = m[2];
+    const onCloud = (m[3] ?? "").toLowerCase() === "true";
     const spanIdx = m.index;
 
     // Look at context before the span for title, type, description, date
@@ -1115,7 +1274,7 @@ function parseDocumentEntries(html: string): FiletracDocument[] {
     const dateMatches = [...before.matchAll(/\b(\d{1,2}\/\d{1,2}\/\d{4})\b/g)];
     const date = dateMatches.length > 0 ? dateMatches[dateMatches.length - 1][1] : "";
 
-    // Size: look forward from span for NNNkb pattern (may be up to 1500 chars ahead in action buttons)
+    // Size: look forward from span for NNNkb pattern (may be up to 1600 chars ahead)
     const after = html.substring(spanIdx, spanIdx + 1600);
     const sizeMatch = after.match(/>\s*(\d+\s*KB)\s*</i);
     const sizeKb = sizeMatch ? sizeMatch[1] : "";
@@ -1135,6 +1294,7 @@ function parseDocumentEntries(html: string): FiletracDocument[] {
       size_kb: sizeKb,
       url: dataPath,
       description: description || title,
+      on_cloud: onCloud,
     });
   }
 
@@ -1143,16 +1303,33 @@ function parseDocumentEntries(html: string): FiletracDocument[] {
 
 /**
  * List uploaded documents/reports for a FileTrac claim.
- * Returns {report_id, filename, date, file_type, size_kb, url, description}[]
- * Use report_id or url with filetrac_download_report to download the file.
+ * Returns report_id, filename, date, file_type, size_kb, url, description, on_cloud for each.
+ * Use report_id with filetrac_download_report to download.
+ *
+ * company_index: 0=Accelerated, 1=Premier Claims (default), 2=Stewardship, 3=US Claim Solutions
+ * Note: if the claim is not found, try a different company_index.
  */
 export async function filetracListDocuments(args: {
   claim_id: string | number;
   company_index?: number;
 }): Promise<CallToolResult> {
-  const { aspBase, aspCookies } = getAspCredentials(args.company_index);
+  const companyIdx = args.company_index ?? 1;
+  const { aspBase, aspCookies } = getAspCredentials(companyIdx);
   if (!aspBase || !aspCookies) {
-    return ok("FileTrac ASP session not available. Run auth-filetrac.mjs first.");
+    return ok(
+      "FileTrac ASP session not available.\n" +
+      "Run: node scripts/auth-filetrac.mjs\n" +
+      "Then run filetrac_refresh_session to capture all company cookies."
+    );
+  }
+
+  // Check session validity and give a helpful error if expired
+  const valid = await isAspSessionValid(aspBase, aspCookies);
+  if (!valid) {
+    return ok(
+      `FileTrac session for company ${companyIdx} is expired.\n` +
+      "Run filetrac_refresh_session to re-authenticate, then retry."
+    );
   }
 
   const claimID = String(args.claim_id);
@@ -1162,27 +1339,77 @@ export async function filetracListDocuments(args: {
   const html = await fetchAspPage(aspBase, aspCookies, listUrl);
 
   if (!html) {
-    return ok(`Failed to load FileTrac claim list for claim ${claimID}. Session may be expired.`);
+    return ok(
+      `Failed to load claim list for claim ${claimID} (company ${companyIdx}).\n` +
+      "If the claim belongs to a different company, specify company_index:\n" +
+      "0=Accelerated, 1=Premier Claims, 2=Stewardship, 3=US Claim Solutions"
+    );
   }
 
   const docs = parseDocumentEntries(html);
 
   if (docs.length === 0) {
-    return ok(`No documents found for claim ${claimID}. The claim may have no uploaded reports.`);
+    // Check if claim was found at all (vs. no documents)
+    const claimFound = html.includes(`claimID=${claimID}`) || html.includes(`searchTgt=${claimID}`);
+    if (!claimFound || html.length < 30000) {
+      return ok(
+        `Claim ${claimID} not found under company ${companyIdx} (${aspBase}).\n` +
+        "Try a different company_index: 0=Accelerated, 1=Premier Claims, 2=Stewardship, 3=US Claim Solutions"
+      );
+    }
+    return ok(`No documents found for claim ${claimID}. The claim exists but has no uploaded reports.`);
   }
 
+  const cloudNote = docs.some(d => d.on_cloud)
+    ? "\nNote: Cloud-stored files (on_cloud=true) require report_id for download — pass it to filetrac_download_report."
+    : "";
+
   const lines = docs.map((d, i) =>
-    `${i + 1}. [${d.report_id}] ${d.filename}\n   Type: ${d.file_type} | Date: ${d.date} | Size: ${d.size_kb}\n   Desc: ${d.description}\n   URL: ${d.url}`
+    `${i + 1}. [report_id=${d.report_id}] ${d.filename}\n` +
+    `   Type: ${d.file_type} | Date: ${d.date} | Size: ${d.size_kb} | Cloud: ${d.on_cloud}\n` +
+    (d.description ? `   Desc: ${d.description}\n` : "") +
+    `   URL: ${d.url}`
   );
 
-  return ok(`Documents for claim ${claimID} (${docs.length} found):\n\n${lines.join("\n\n")}`);
+  return ok(
+    `Documents for claim ${claimID} — company ${companyIdx} (${aspBase}) — ${docs.length} found:${cloudNote}\n\n` +
+    lines.join("\n\n")
+  );
+}
+
+/**
+ * Fetch the authoritative download URL for a report by loading reportView.asp.
+ * This is required for cloud-stored files (data-on-cloud="true") — the direct
+ * data-path URL returns 404, but reportView.asp's loadContent() JS has the
+ * correct cloudDownloads path that actually serves the file.
+ *
+ * Returns the URL string, or null if it can't be extracted.
+ */
+async function getReportDownloadUrl(
+  aspBase: string,
+  aspCookies: string,
+  reportId: string
+): Promise<string | null> {
+  const html = await fetchAspPage(aspBase, aspCookies, `/system/reportView.asp?reportID=${reportId}`);
+  if (!html) return null;
+  const urlMatch = html.match(/var URL = ['"]([^'"]+)['"]/);
+  if (!urlMatch) return null;
+  const relPath = urlMatch[1];
+  // Build absolute URL: aspBase + /system/ + ./cloudDownloads/... (or ./ENCLOSURES/...)
+  return `${aspBase}/system/${relPath}`;
 }
 
 /**
  * Download an uploaded FileTrac report/document to a local path.
- * Provide either:
- *   - report_url: the data-path URL from filetrac_list_documents
- *   - report_id + claim_id: looks up the URL automatically
+ *
+ * Preferred usage: supply report_id (and company_index if not Premier Claims).
+ * The tool will use reportView.asp to get the authoritative download URL,
+ * which works for both local-server and cloud-stored files.
+ *
+ * Alternate: supply report_url from filetrac_list_documents. Works for
+ * local-server files (on_cloud=false). Cloud files (on_cloud=true) need report_id.
+ *
+ * company_index: 0=Accelerated, 1=Premier Claims (default), 2=Stewardship, 3=US Claim Solutions
  */
 export async function filetracDownloadReport(args: {
   claim_id?: string | number;
@@ -1191,68 +1418,90 @@ export async function filetracDownloadReport(args: {
   dest_path: string;
   company_index?: number;
 }): Promise<CallToolResult> {
-  const { aspBase, aspCookies } = getAspCredentials(args.company_index);
+  const companyIdx = args.company_index ?? 1;
+  const { aspBase, aspCookies } = getAspCredentials(companyIdx);
   if (!aspBase || !aspCookies) {
-    return ok("FileTrac ASP session not available. Run auth-filetrac.mjs first.");
+    return ok(
+      "FileTrac ASP session not available.\n" +
+      "Run filetrac_refresh_session first."
+    );
   }
 
-  let targetUrl = args.report_url;
+  // Determine the final download URL
+  let targetUrl: string | undefined;
 
-  // If no URL provided, look up via report_id + claim_id
-  if (!targetUrl) {
-    if (!args.claim_id || !args.report_id) {
-      return ok("Provide either report_url, or both claim_id and report_id.");
-    }
-    const claimID = String(args.claim_id);
+  if (args.report_id) {
+    // Preferred path: get authoritative URL from reportView.asp
     const reportID = String(args.report_id);
-    const listUrl = `/system/claimList.asp?allBranches=1&searchType=claimID&searchTgt=${claimID}&expand=${claimID}`;
-    const html = await fetchAspPage(aspBase, aspCookies, listUrl);
-    if (!html) {
-      return ok(`Failed to load FileTrac claim list for claim ${claimID}. Session may be expired.`);
+    const authUrl = await getReportDownloadUrl(aspBase, aspCookies, reportID);
+    if (!authUrl) {
+      return ok(
+        `Could not get download URL for report ${reportID}.\n` +
+        "Session may be expired — run filetrac_refresh_session then retry."
+      );
     }
-    const docs = parseDocumentEntries(html);
-    const doc = docs.find(d => d.report_id === reportID);
-    if (!doc) {
-      return ok(`Report ${reportID} not found in claim ${claimID}. Available: ${docs.map(d => d.report_id).join(", ")}`);
-    }
-    targetUrl = doc.url;
+    targetUrl = authUrl;
+  } else if (args.report_url) {
+    // Caller supplied URL directly — try it, fall back to cloud variant if needed
+    targetUrl = args.report_url;
+  } else if (args.claim_id) {
+    // Look up via claim_id to get first available report — rarely needed
+    return ok("Supply report_id (from filetrac_list_documents) for a specific file, or report_url for direct download.");
+  } else {
+    return ok("Provide report_id (preferred) or report_url. Use filetrac_list_documents to get report IDs.");
   }
 
-  // Fetch the binary file using ASP cookies
-  let res: Response;
-  try {
-    res = await fetch(targetUrl, {
+  // Fetch the binary file
+  const fetchFile = async (url: string): Promise<{ buf: Buffer; contentType: string; status: number }> => {
+    const res = await fetch(url, {
       headers: {
         "Cookie": aspCookies,
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
       },
       redirect: "follow",
     });
-  } catch (e: any) {
-    return ok(`Fetch failed: ${e.message}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { buf, contentType: res.headers.get("content-type") ?? "", status: res.status };
+  };
+
+  let { buf, contentType, status } = await fetchFile(targetUrl).catch(e => ({
+    buf: Buffer.alloc(0), contentType: "", status: 0,
+  }));
+
+  // If direct URL returned HTML or error, try cloud variant as fallback
+  if ((contentType.includes("text/html") || status >= 400 || buf.length === 0) && !args.report_id) {
+    const cloudUrl = targetUrl.replace("/system/./ENCLOSURES", "/system/./cloudDownloads/ENCLOSURES");
+    if (cloudUrl !== targetUrl) {
+      const fallback = await fetchFile(cloudUrl).catch(e => ({
+        buf: Buffer.alloc(0), contentType: "", status: 0,
+      }));
+      if (!fallback.contentType.includes("text/html") && fallback.buf.length > 500) {
+        ({ buf, contentType, status } = fallback);
+        targetUrl = cloudUrl;
+      }
+    }
   }
 
-  if (!res.ok) {
-    return ok(`Download failed: HTTP ${res.status} from ${targetUrl}`);
+  if (contentType.includes("text/html") || status >= 400) {
+    return ok(
+      `Download failed (HTTP ${status}, content-type: ${contentType}).\n` +
+      "If this is a cloud-stored file, supply report_id instead of report_url so the tool can use reportView.asp to get the correct URL.\n" +
+      "If session expired, run filetrac_refresh_session first."
+    );
   }
 
-  const contentType = res.headers.get("content-type") ?? "";
-  if (contentType.includes("text/html")) {
-    // Likely a login redirect — session expired
-    return ok(`Got HTML instead of file binary. Session may be expired. Re-run auth-filetrac.mjs.`);
-  }
-
-  const buf = Buffer.from(await res.arrayBuffer());
   if (buf.length === 0) {
-    return ok(`Downloaded file is empty (0 bytes).`);
+    return ok("Downloaded file is empty (0 bytes). The file may have been deleted or the URL is invalid.");
   }
 
-  // Ensure destination directory exists
+  // Ensure destination directory exists and save
   const destResolved = path.resolve(args.dest_path);
   fs.mkdirSync(path.dirname(destResolved), { recursive: true });
   fs.writeFileSync(destResolved, buf);
 
   const sizeKb = (buf.byteLength / 1024).toFixed(1);
   const filename = path.basename(destResolved);
-  return ok(`Downloaded: ${filename}\nSaved to: ${destResolved}\nSize: ${sizeKb} KB\nContent-Type: ${contentType}`);
+  return ok(
+    `Downloaded: ${filename}\nSaved to: ${destResolved}\nSize: ${sizeKb} KB\nContent-Type: ${contentType}\nSource: ${targetUrl}`
+  );
 }
