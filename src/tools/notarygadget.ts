@@ -1,4 +1,4 @@
-import { chromium, type Page } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const NG_URL = "https://www.notarygadget.com";
@@ -318,184 +318,202 @@ export async function notarygadgetUpdateSigning(args: {
   signer_names?: string[];      // replaces ALL signers when provided
   package_type?: string;
 }): Promise<CallToolResult> {
-  const { browser, page } = await getPage();
-  const log: string[] = [];  // step-by-step log returned in result for debugging
+  const log: string[] = [];
+  const t0 = Date.now();
+  const ms = () => `+${Date.now() - t0}ms`;
 
-  try {
-    log.push("goToSignings");
-    await goToSignings(page);
+  // Normalize signer_names upfront — MCP clients can deliver arrays as comma-separated strings
+  const signerNames: string[] = !args.signer_names
+    ? []
+    : Array.isArray(args.signer_names)
+      ? args.signer_names
+      : String(args.signer_names).split(",").map(s => s.trim()).filter(Boolean);
 
-    // Select the target signing row
-    log.push(`locating #trSigning${args.signing_id}`);
-    const row = page.locator(`#trSigning${args.signing_id}`);
-    const rowCount = await row.count();
-    log.push(`row count=${rowCount}`);
+  // ── Run main flow; always return the log, even on timeout ─────────────────────
+  const runUpdate = async (): Promise<CallToolResult> => {
+    log.push(`${ms()} getPage`);
+    const { browser: br, page: pg } = await getPage();
+
+    pg.setDefaultTimeout(10000);  // 10s max per Playwright operation
+
+    try {
+
+    log.push(`${ms()} goToSignings`);
+    await goToSignings(pg);
+
+    // Locate the signing row — skip row.click(), EditSigning(id) works without it
+    log.push(`${ms()} locating #trSigning${args.signing_id}`);
+    const row = pg.locator(`#trSigning${args.signing_id}`);
+    const rowCount = await row.count().catch(() => 0);
+    log.push(`${ms()} rowCount=${rowCount}`);
     if (rowCount === 0) {
-      return ok(`Signing ID ${args.signing_id} not found in NotaryGadget.\nLog: ${log.join(" → ")}`);
+      return ok(`Signing ${args.signing_id} not found in the signings list.\nLog: ${log.join(" | ")}`);
     }
-    await row.click();
-    await page.waitForTimeout(1500);
-    log.push("row clicked");
 
-    // Open the edit form — EditSigning fetches existing data async from server
-    log.push("calling EditSigning");
-    await page.evaluate((id: string) => (window as any).EditSigning(id), args.signing_id);
+    // Click the row to select it, then open edit form
+    await row.click().catch(() => {});
+    log.push(`${ms()} row clicked`);
 
-    // Wait for the fee field to have a non-empty value — proves form data has loaded
-    // Bug fix: previous condition (el?.value !== undefined) was always true immediately
-    const formReady = await page.waitForFunction(() => {
+    log.push(`${ms()} EditSigning(${args.signing_id})`);
+    await pg.evaluate((id: string) => (window as any).EditSigning(id), args.signing_id);
+
+    // Wait for fee field to have a non-empty value (proves async form data loaded)
+    log.push(`${ms()} waiting for form data (txtSigningFee non-empty)`);
+    const formReady = await pg.waitForFunction(() => {
       const el = document.getElementById("txtSigningFee") as HTMLInputElement | null;
       return !!(el && el.value && el.value.trim().length > 0);
-    }, { timeout: 12000 }).then(() => true).catch(() => false);
+    }, { timeout: 10000 }).then(() => true).catch(() => false);
 
-    const feeValue = await page.inputValue("#txtSigningFee").catch(() => "(not found)");
-    log.push(`form ready=${formReady}, fee="${feeValue}"`);
+    const feeValue = await pg.inputValue("#txtSigningFee").catch(() => "(not found)");
+    log.push(`${ms()} formReady=${formReady} fee="${feeValue}"`);
 
     if (!formReady) {
-      // Form didn't load — dump page state and bail
-      const bodySnap = (await page.locator("body").innerText().catch(() => "")).substring(0, 500);
+      const snap = (await pg.locator("body").innerText().catch(() => "")).substring(0, 400);
       return ok(
-        `⏱ Signing ${args.signing_id}: form did not load within 12s.\n` +
-        `Log: ${log.join(" → ")}\n` +
-        `Page snapshot: ${bodySnap}`
+        `⏱ Form did not load for signing ${args.signing_id} (10s timeout).\n` +
+        `Log: ${log.join(" | ")}\nPage: ${snap}`
       );
     }
 
     const updated: string[] = [];
 
-    // Customer — re-trigger the customer selector popup
+    // Customer
     if (args.customer) {
-      await page.evaluate(() => (window as any).ShowCustomerSelector());
-      await page.waitForTimeout(2000);
-      const searchInput = page.locator('#txtCustomerSelectorSearch, input[id*="CustomerSelector"]').first();
-      if (await searchInput.isVisible().catch(() => false)) {
+      await pg.evaluate(() => (window as any).ShowCustomerSelector());
+      await pg.waitForTimeout(1500);
+      const searchInput = pg.locator('#txtCustomerSelectorSearch, input[id*="CustomerSelector"]').first();
+      if (await searchInput.isVisible({ timeout: 2000 }).catch(() => false)) {
         await searchInput.fill(args.customer);
-        await page.waitForTimeout(1500);
+        await pg.waitForTimeout(1000);
       }
-      const customerOption = page.locator('div[onclick*="SelectCustomer"], td[onclick*="SelectCustomer"]')
+      const customerOption = pg.locator('div[onclick*="SelectCustomer"], td[onclick*="SelectCustomer"]')
         .filter({ hasText: new RegExp(args.customer.split(" ")[0], "i") }).first();
-      if (await customerOption.isVisible().catch(() => false)) {
+      if (await customerOption.isVisible({ timeout: 2000 }).catch(() => false)) {
         await customerOption.click();
       } else {
-        await page.locator(`text=${args.customer.split(" ")[0]}`).first().click().catch(() => {});
+        await pg.locator(`text=${args.customer.split(" ")[0]}`).first().click().catch(() => {});
       }
-      await page.waitForTimeout(1000);
+      await pg.waitForTimeout(500);
       updated.push(`Customer: ${args.customer}`);
+      log.push(`${ms()} customer set`);
     }
 
-    // Normalize signer_names — MCP clients sometimes deliver arrays as comma-separated strings
-    const signerNames: string[] = !args.signer_names
-      ? []
-      : Array.isArray(args.signer_names)
-        ? args.signer_names
-        : String(args.signer_names).split(",").map(s => s.trim()).filter(Boolean);
-
-    // Signers — replaces all signers when provided
+    // Signers
     if (signerNames.length > 0) {
-      log.push(`fillSigners(${signerNames.join(", ")})`);
-      await fillSigners(page, signerNames);
-      // Verify first signer filled correctly
-      const s1first = await page.inputValue("#txtSigner1First").catch(() => "?");
-      const s1last  = await page.inputValue("#txtSigner1Last").catch(() => "?");
-      log.push(`signer1="${s1first} ${s1last}"`);
+      log.push(`${ms()} fillSigners([${signerNames.join(", ")}])`);
+      await fillSigners(pg, signerNames);
+      const s1f = await pg.inputValue("#txtSigner1First").catch(() => "?");
+      const s1l = await pg.inputValue("#txtSigner1Last").catch(() => "?");
+      log.push(`${ms()} signer1="${s1f} ${s1l}"`);
       updated.push(`Signers: ${signerNames.join(", ")}`);
     }
 
-    // Address fields — parse location string if individual fields not given
+    // Address
     const hasAddressChange = args.location || args.city || args.state || args.zip;
     if (hasAddressChange) {
       let street = args.location ?? "";
       let city = args.city ?? "";
       let state = args.state ?? "";
       let zip = args.zip ?? "";
-
       if (args.location && !city) {
         const parts = args.location.split(",").map(s => s.trim());
         if (parts.length >= 2) {
           street = parts[0];
-          const cityStateZip = parts.slice(1).join(", ");
-          const m = cityStateZip.match(/^(.+?)[,\s]+([A-Z]{2})[,\s]*(\d{5})?/);
+          const csz = parts.slice(1).join(", ");
+          const m = csz.match(/^(.+?)[,\s]+([A-Z]{2})[,\s]*(\d{5})?/);
           if (m) { city = m[1].trim(); state = m[2]; zip = m[3] ?? ""; }
-          else { city = cityStateZip.split(",")[0]?.trim() ?? cityStateZip; }
+          else city = csz.split(",")[0]?.trim() ?? csz;
         }
       }
-
-      if (street) { await page.fill('#txtSigningAdd1', street).catch(() => {}); updated.push(`Street: ${street}`); }
-      if (city) { await page.fill('#txtSigningCty', city).catch(() => {}); updated.push(`City: ${city}`); }
-      if (state) { await page.selectOption('#txtSigningSt', state).catch(() => {}); updated.push(`State: ${state}`); }
-      if (zip) { await page.fill('#txtSigningZp', zip).catch(() => {}); updated.push(`ZIP: ${zip}`); }
+      if (street) { await pg.fill('#txtSigningAdd1', street).catch(() => {}); updated.push(`Street: ${street}`); }
+      if (city)   { await pg.fill('#txtSigningCty', city).catch(() => {});   updated.push(`City: ${city}`); }
+      if (state)  { await pg.selectOption('#txtSigningSt', state).catch(() => {}); updated.push(`State: ${state}`); }
+      if (zip)    { await pg.fill('#txtSigningZp', zip).catch(() => {});     updated.push(`ZIP: ${zip}`); }
+      log.push(`${ms()} address set`);
     }
 
     // Date
     if (args.date) {
       const parts = args.date.split("-");
       const formatted = parts.length === 3 ? `${parts[1]}/${parts[2]}/${parts[0]}` : args.date;
-      await page.fill('#txtSigningDate', formatted).catch(() => {});
+      await pg.fill('#txtSigningDate', formatted).catch(() => {});
       updated.push(`Date: ${formatted}`);
     }
 
     // Time
     if (args.time) {
-      const timeParts = args.time.split(":");
-      if (timeParts.length >= 2) {
-        let hour = parseInt(timeParts[0]);
-        const minutes = timeParts[1].substring(0, 2);
+      const tp = args.time.split(":");
+      if (tp.length >= 2) {
+        let hour = parseInt(tp[0]);
+        const min = tp[1].substring(0, 2);
         const ampm = hour >= 12 ? "PM" : "AM";
         if (hour > 12) hour -= 12;
         if (hour === 0) hour = 12;
-        await page.fill('#txtSigningHour', String(hour)).catch(() => {});
-        await page.fill('#txtSigningMinutes', minutes).catch(() => {});
-        await page.fill('#txtSigningAMPM', ampm).catch(() => {});
+        await pg.fill('#txtSigningHour', String(hour)).catch(() => {});
+        await pg.fill('#txtSigningMinutes', min).catch(() => {});
+        await pg.fill('#txtSigningAMPM', ampm).catch(() => {});
         updated.push(`Time: ${args.time}`);
       }
     }
 
     // Fee
     if (args.fee !== undefined) {
-      await page.fill('#txtSigningFee', String(args.fee)).catch(() => {});
+      await pg.fill('#txtSigningFee', String(args.fee)).catch(() => {});
       updated.push(`Fee: $${args.fee}`);
     }
 
     // Package type
     if (args.package_type) {
-      await page.fill('#txtLoanType', args.package_type).catch(() => {});
+      await pg.fill('#txtLoanType', args.package_type).catch(() => {});
       updated.push(`Package: ${args.package_type}`);
     }
 
     if (updated.length === 0) {
-      return ok("No fields provided to update — signing unchanged.");
+      return ok(`No fields provided to update — signing ${args.signing_id} unchanged.\nLog: ${log.join(" | ")}`);
     }
 
-    // Save the updated signing
-    log.push("calling SaveSigning");
-    await page.evaluate(() => (window as any).SaveSigning());
-    await page.waitForTimeout(5000);
-    log.push("SaveSigning complete");
+    log.push(`${ms()} SaveSigning`);
+    await pg.evaluate(() => (window as any).SaveSigning());
+    log.push(`${ms()} waiting 4s for save`);
+    await pg.waitForTimeout(4000);
+    log.push(`${ms()} save done`);
 
-    // Post-save verification: check the signing row still shows correct signer
+    // Post-save verification
     if (signerNames.length > 0) {
-      const bodyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
+      const bodyText = (await pg.locator("body").innerText().catch(() => "")).toLowerCase();
       const signerLast = (signerNames[0].split(" ").pop() ?? "").toLowerCase();
       const verified = signerLast && bodyText.includes(signerLast);
-      log.push(`post-save verify="${signerLast}" found=${verified}`);
+      log.push(`${ms()} verify signer "${signerLast}"=${verified}`);
       if (!verified) {
         return ok(
-          `⚠️ Signing ${args.signing_id}: save completed but post-save verification mismatch.\n` +
-          `Expected to see signer "${signerNames[0]}" in page after save.\n` +
-          `Log: ${log.join(" → ")}\n` +
-          `Fields attempted:\n` + updated.map(u => `  • ${u}`).join("\n")
+          `⚠️ Signing ${args.signing_id}: saved but verification mismatch (signer not visible in page).\n` +
+          `Log: ${log.join(" | ")}\nFields: ${updated.join(", ")}`
         );
       }
     }
 
     return ok(
-      `✅ Signing ${args.signing_id} updated and verified:\n` +
+      `✅ Signing ${args.signing_id} updated:\n` +
       updated.map(u => `  • ${u}`).join("\n") +
-      `\nLog: ${log.join(" → ")}`
+      `\nLog: ${log.join(" | ")}`
     );
-  } finally {
-    await browser.close();
-  }
+    } finally {
+      br.close().catch(() => {});
+    }
+  };
+
+  // Race the main flow against a 52s timer — always returns the log, never hangs silently.
+  // If timeout wins, runUpdate() is still in-flight; its finally block closes the browser.
+  const timeoutResult = new Promise<CallToolResult>(resolve =>
+    setTimeout(() =>
+      resolve(ok(`⏱ notarygadget_update_signing timed out after 52s.\nSteps reached:\n${log.join("\n")}`)),
+      52000)
+  );
+
+  return Promise.race([
+    runUpdate().catch(err => ok(`❌ Error: ${(err as Error).message}\nLog: ${log.join(" | ")}`)),
+    timeoutResult,
+  ]);
 }
 
 export async function notarygadgetCompleteSigning(args: {

@@ -764,64 +764,119 @@ export async function filetracGetNotes(args: {
     diag.push("All fast-path URL patterns exhausted");
   }
 
-  // ── Step 3: Browser path — also try claimID-based URLs ───────────────────────
+  // ── Step 3: Browser path — click the actual Notes tab and intercept the URL ────
+  // URL guessing has failed. Navigate to claimView, intercept all ASP network
+  // requests, click the visible Notes/Diary tab, and report the real endpoint.
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
   try {
+    // Capture every ASP request the browser makes
+    const aspRequests: string[] = [];
+    page.on("request", req => {
+      const u = req.url();
+      if (u.includes(".asp") && !u.includes("google") && !u.includes("amazon")) {
+        aspRequests.push(u);
+      }
+    });
+
     await page.goto(`${aspBase}/system/claimView.asp?claimID=${args.claim_id}`);
     await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(3000);  // let React/JS render all tabs
 
-    // Wait up to 8s for #claimFileID to be JS-populated
+    // Get file number in browser (JS-rendered)
     const browserFileNum = await page.waitForFunction(() => {
       const el = document.getElementById("claimFileID") as HTMLInputElement | null;
       return el?.value && el.value.trim().length > 0 ? el.value.trim() : null;
     }, { timeout: 8000 }).then(h => h.jsonValue()).catch(async () => {
-      const html = await page.content();
-      return extractFileNumber(html) || null;
+      return extractFileNumber(await page.content()) || null;
     });
+    diag.push(`browserFileNum="${browserFileNum}"`);
 
-    diag.push(`Browser claimView #claimFileID → "${browserFileNum}"`);
-    const fn = (browserFileNum as string | null) || fileNum;
-
-    // Try URL patterns in browser (handles JS-gated pages)
-    const browserUrls = fn
-      ? [
-          `${aspBase}/system/quickNotesList.asp?claimFID=${fn}`,
-          `${aspBase}/system/quickNotes.asp?claimFID=${fn}`,
-          `${aspBase}/system/msgView.asp?claimFID=${fn}`,
-          `${aspBase}/system/claimDiary.asp?claimID=${args.claim_id}`,
-          `${aspBase}/system/msgView.asp?claimID=${args.claim_id}`,
-        ]
-      : [
-          `${aspBase}/system/claimDiary.asp?claimID=${args.claim_id}`,
-          `${aspBase}/system/msgView.asp?claimID=${args.claim_id}`,
-        ];
-
-    for (const url of browserUrls) {
-      await page.goto(url);
-      await page.waitForLoadState("domcontentloaded");
-      await page.waitForTimeout(2000);
-
-      const html = await page.content();
-      diag.push(`Browser ${url} → ${html.length}chars`);
-
-      if (looksLikeNotesPage(html)) {
-        const result = parseNotes(html, args.claim_id);
-        if (hasNoteContent(result)) return ok(result);
-
-        // Return with raw body + full debug so we can see exact HTML structure
-        const bodyText = await page.locator("body").innerText().catch(() => "");
-        return ok(
-          `Notes page reached but no parseable rows found.\n` +
-          `URL: ${url}\nDiag: ${diag.join(" | ")}\n\n` +
-          `=== Body text (first 4000 chars) ===\n` +
-          bodyText.replace(/\s{3,}/g, "\n").trim().substring(0, 4000)
-        );
+    // Find all navigation links/tabs on the claim page and collect their targets
+    const allLinks = await page.locator("a, [onclick]").all();
+    const linkDump: string[] = [];
+    for (const link of allLinks.slice(0, 60)) {
+      const text   = (await link.innerText().catch(() => "")).trim().substring(0, 30);
+      const href   = (await link.getAttribute("href").catch(() => "")) ?? "";
+      const onclick = (await link.getAttribute("onclick").catch(() => "")) ?? "";
+      if (text || href || onclick) {
+        linkDump.push(`"${text}" href="${href}" onclick="${onclick}"`);
       }
     }
 
+    // Click the Notes/Diary/Messages tab — broad selector to catch any variant
+    const notesTab = page.locator([
+      'a:has-text("Notes")',
+      'a:has-text("Diary")',
+      'a:has-text("Messages")',
+      'a:has-text("Activity")',
+      'a[href*="note" i]',
+      'a[href*="diary" i]',
+      'a[href*="msg" i]',
+      '[onclick*="note" i]',
+      '[onclick*="diary" i]',
+      '[onclick*="msg" i]',
+      'td:has-text("Notes")',
+      'li:has-text("Notes")',
+      'button:has-text("Notes")',
+    ].join(", ")).first();
+
+    let tabFound = false;
+    let tabHref = "";
+    let tabOnclick = "";
+    if (await notesTab.isVisible({ timeout: 3000 }).catch(() => false)) {
+      tabFound = true;
+      tabHref   = (await notesTab.getAttribute("href").catch(() => "")) ?? "";
+      tabOnclick = (await notesTab.getAttribute("onclick").catch(() => "")) ?? "";
+      diag.push(`Tab found: href="${tabHref}" onclick="${tabOnclick}"`);
+
+      const requestsBefore = aspRequests.length;
+      await notesTab.click();
+      await page.waitForTimeout(3000);
+      const newRequests = aspRequests.slice(requestsBefore);
+      diag.push(`New requests after tab click: ${newRequests.join(", ") || "(none)"}`);
+    } else {
+      diag.push("No Notes/Diary/Messages tab found on claim page");
+    }
+
+    const currentUrl = page.url();
+    diag.push(`URL after tab click: ${currentUrl}`);
+
+    // Check main frame
+    const mainHtml = await page.content();
+    if (looksLikeNotesPage(mainHtml)) {
+      const result = parseNotes(mainHtml, args.claim_id);
+      if (hasNoteContent(result)) return ok(result);
+    }
+
+    // Check all iframes — FileTrac sometimes loads content in frames
+    for (const frame of page.frames()) {
+      const fUrl = frame.url();
+      if (!fUrl || fUrl === currentUrl || fUrl === "about:blank") continue;
+      diag.push(`Frame: ${fUrl}`);
+      const fHtml = await frame.content().catch(() => "");
+      if (looksLikeNotesPage(fHtml)) {
+        const result = parseNotes(fHtml, args.claim_id);
+        if (hasNoteContent(result)) {
+          return ok(`(found in frame ${fUrl})\n` + result);
+        }
+      }
+    }
+
+    // Return full discovery data so the real URL can be identified
+    const bodyText = (await page.locator("body").innerText().catch(() => ""))
+      .replace(/\s{3,}/g, "\n").trim().substring(0, 2000);
+
     return ok(
-      `Could not locate notes for claim ${args.claim_id} (file #${fn || "unknown"}).\n` +
-      `Diag: ${diag.join(" | ")}`
+      `=== FileTrac Notes URL Discovery ===\n` +
+      `Claim ID: ${args.claim_id} | File #: ${browserFileNum || fileNum || "unknown"}\n` +
+      `Tab found: ${tabFound}${tabFound ? ` | href="${tabHref}" | onclick="${tabOnclick}"` : ""}\n` +
+      `URL after tab click: ${currentUrl}\n` +
+      `All ASP requests intercepted (${aspRequests.length}):\n` +
+      aspRequests.join("\n") +
+      `\n\nAll links on claim page:\n` +
+      linkDump.join("\n") +
+      `\n\nDiag: ${diag.join(" | ")}\n\n` +
+      `=== Page body text (2000 chars) ===\n${bodyText}`
     );
   } finally {
     await browser.close();
