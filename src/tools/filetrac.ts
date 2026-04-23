@@ -1115,9 +1115,9 @@ function parseDocumentEntries(html: string): FiletracDocument[] {
     const dateMatches = [...before.matchAll(/\b(\d{1,2}\/\d{1,2}\/\d{4})\b/g)];
     const date = dateMatches.length > 0 ? dateMatches[dateMatches.length - 1][1] : "";
 
-    // Size: look forward from span for NNNkb pattern
-    const after = html.substring(spanIdx, spanIdx + 800);
-    const sizeMatch = after.match(/>\s*(\d+KB)\s*</i);
+    // Size: look forward from span for NNNkb pattern (may be up to 1500 chars ahead in action buttons)
+    const after = html.substring(spanIdx, spanIdx + 1600);
+    const sizeMatch = after.match(/>\s*(\d+\s*KB)\s*</i);
     const sizeKb = sizeMatch ? sizeMatch[1] : "";
 
     // Filename from URL path segment
