@@ -764,14 +764,13 @@ const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
 };
 
 /**
- * Returns true if the HTML is a notes-related page (either creation form OR list).
- * Used to reject completely wrong pages (login, 404, etc).
+ * Returns true only for pages that contain FileTrac-specific note field names.
+ * Deliberately narrow — "Diary", "diary", and generic "Note+<td>" are excluded
+ * because those strings also appear on the claims list / claim overview pages.
  */
 function looksLikeNotesPage(html: string): boolean {
   return html.includes("msgDate") || html.includes("msgText") || html.includes("msgCatID") ||
-         html.includes("msgNoteID") || html.includes("quickNotes") ||
-         html.includes("Diary") || html.includes("diary") ||
-         (html.includes("Note") && /<td/i.test(html));
+         html.includes("msgNoteID") || html.includes("quickNotes");
 }
 
 /** Returns true if the parsed result actually contains note rows (not just form scaffolding). */
@@ -783,52 +782,11 @@ export async function filetracGetNotes(args: {
   claim_id: string;
   company_index?: number;
 }): Promise<CallToolResult> {
-  const session = loadSession();
   const diag: string[] = [`[filetracGetNotes] claim_id=${args.claim_id}`];
 
-  // ── Step 1: Get file number via fast-path ASP fetch ──────────────────────────
-  let fileNum = "";
-  if (session.aspBase && session.aspCookies) {
-    const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
-      `/system/claimView.asp?claimID=${args.claim_id}`);
-    if (claimHtml) {
-      fileNum = extractFileNumber(claimHtml);
-      diag.push(`Fast-path claimView ${claimHtml.length}chars → fileNum="${fileNum}"`);
-    } else {
-      diag.push("Fast-path claimView returned null — cookie expired");
-    }
-  }
-
-  // ── Step 2: Try all known notes URL patterns via fast-path ────────────────────
-  if (fileNum && session.aspBase && session.aspCookies) {
-    const urlsToTry = [
-      `/system/quickNotesList.asp?claimFID=${fileNum}`,
-      `/system/quickNotes.asp?claimFID=${fileNum}`,
-      `/system/claimDiary.asp?claimFID=${fileNum}`,
-      `/system/msgView.asp?claimFID=${fileNum}`,
-      `/system/claimNotes.asp?claimFID=${fileNum}`,
-      `/system/claimMsg.asp?claimFID=${fileNum}`,
-    ];
-
-    for (const url of urlsToTry) {
-      const html = await fetchAspPage(session.aspBase, session.aspCookies, url);
-      diag.push(`${url} → ${html ? `${html.length}chars` : "null/rejected"}`);
-
-      if (html && looksLikeNotesPage(html)) {
-        const result = parseNotes(html, args.claim_id);
-        if (hasNoteContent(result)) {
-          return ok(result);
-        }
-        // Parse returned body text fallback — keep going to try next URL
-        diag.push(`parseNotes found no rows at ${url} — trying next pattern`);
-      }
-    }
-    diag.push("All fast-path URL patterns exhausted");
-  }
-
-  // ── Step 3: Browser path — click the actual Notes tab and intercept the URL ────
-  // URL guessing has failed. Navigate to claimView, intercept all ASP network
-  // requests, click the visible Notes/Diary tab, and report the real endpoint.
+  // Fast-path skipped: URL guessing was returning the claims-list grid instead of
+  // the per-claim diary. Always use the browser path so we navigate to the specific
+  // claim and click the real Notes tab.
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
   try {
     // Capture every ASP request the browser makes
@@ -907,7 +865,7 @@ export async function filetracGetNotes(args: {
     const mainHtml = await page.content();
     if (looksLikeNotesPage(mainHtml)) {
       const result = parseNotes(mainHtml, args.claim_id);
-      if (hasNoteContent(result)) return ok(result);
+      if (hasNoteContent(result)) return ok(`[Source: main frame | URL: ${currentUrl}]\n` + result);
     }
 
     // Check all iframes — FileTrac sometimes loads content in frames
@@ -919,7 +877,7 @@ export async function filetracGetNotes(args: {
       if (looksLikeNotesPage(fHtml)) {
         const result = parseNotes(fHtml, args.claim_id);
         if (hasNoteContent(result)) {
-          return ok(`(found in frame ${fUrl})\n` + result);
+          return ok(`[Source: iframe | URL: ${fUrl}]\n` + result);
         }
       }
     }
@@ -930,7 +888,7 @@ export async function filetracGetNotes(args: {
 
     return ok(
       `=== FileTrac Notes URL Discovery ===\n` +
-      `Claim ID: ${args.claim_id} | File #: ${browserFileNum || fileNum || "unknown"}\n` +
+      `Claim ID: ${args.claim_id} | File #: ${browserFileNum || "unknown"}\n` +
       `Tab found: ${tabFound}${tabFound ? ` | href="${tabHref}" | onclick="${tabOnclick}"` : ""}\n` +
       `URL after tab click: ${currentUrl}\n` +
       `All ASP requests intercepted (${aspRequests.length}):\n` +

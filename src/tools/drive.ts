@@ -108,54 +108,80 @@ export async function driveMoveFile(args: {
 
   const file = await drive.files.get({
     fileId: args.file_id,
-    fields: "parents",
+    fields: "id, name, parents",
   });
 
-  const previousParents = (file.data.parents ?? []).join(",");
+  const parents = file.data.parents ?? [];
+
+  if (parents.includes(args.new_folder_id)) {
+    return ok(`File "${file.data.name}" is already in folder ${args.new_folder_id} — no move needed.`);
+  }
+
+  // When removeParents is empty the Drive API ignores it and rejects the addParents call
+  // with "Increasing the number of parents is not allowed." Fall back to "root" so files
+  // sitting at My Drive root can still be moved.
+  const removeParents = parents.length > 0 ? parents.join(",") : "root";
 
   const res = await drive.files.update({
     fileId: args.file_id,
     addParents: args.new_folder_id,
-    removeParents: previousParents,
+    removeParents,
     fields: "id, name, parents",
   });
 
-  return ok(`File ${res.data.name} moved to folder ${args.new_folder_id}.`);
+  return ok(`File "${res.data.name}" moved to folder ${args.new_folder_id}.`);
 }
 
+// Extension → MIME type map shared by both upload paths
+const MIME_MAP: Record<string, string> = {
+  ".pdf":  "application/pdf",
+  ".mp4":  "video/mp4",
+  ".mov":  "video/quicktime",
+  ".zip":  "application/zip",
+  ".jpg":  "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png":  "image/png",
+  ".gif":  "image/gif",
+  ".csv":  "text/csv",
+  ".txt":  "text/plain",
+  ".json": "application/json",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
 export async function driveUploadFile(args: {
-  local_path: string;
+  file_bytes_b64?: string;   // base64-encoded file content — works from any caller regardless of where the server runs
+  local_path?: string;       // deprecated: only works when the MCP server has access to the same filesystem (not Railway)
   folder_id?: string;
   name?: string;
   mime_type?: string;
 }): Promise<CallToolResult> {
   const drive = await getDrive();
 
-  if (!fs.existsSync(args.local_path)) {
-    return ok(`File not found at path: ${args.local_path}`);
+  let body: NodeJS.ReadableStream;
+  let fileName: string;
+
+  if (args.file_bytes_b64) {
+    const buf = Buffer.from(args.file_bytes_b64, "base64");
+    body = Readable.from(buf);
+    fileName = args.name ?? "upload";
+  } else if (args.local_path) {
+    if (!fs.existsSync(args.local_path)) {
+      return ok(
+        `File not found at path: ${args.local_path}\n` +
+        `Note: the MCP server runs on Railway and cannot access your local Mac filesystem. ` +
+        `Read the file locally, base64-encode it, and pass the result as file_bytes_b64 instead.`
+      );
+    }
+    body = fs.createReadStream(args.local_path);
+    fileName = args.name ?? path.basename(args.local_path);
+  } else {
+    return ok("Either file_bytes_b64 or local_path must be provided.");
   }
 
-  const fileName = args.name ?? path.basename(args.local_path);
-  const ext = path.extname(args.local_path).toLowerCase();
-
-  // Infer MIME type from extension if not provided
-  const mimeMap: Record<string, string> = {
-    ".pdf": "application/pdf",
-    ".mp4": "video/mp4",
-    ".mov": "video/quicktime",
-    ".zip": "application/zip",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".csv": "text/csv",
-    ".txt": "text/plain",
-    ".json": "application/json",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  };
-  const mimeType = args.mime_type ?? mimeMap[ext] ?? "application/octet-stream";
+  const ext = path.extname(fileName).toLowerCase();
+  const mimeType = args.mime_type ?? MIME_MAP[ext] ?? "application/octet-stream";
 
   const res = await drive.files.create({
     requestBody: {
@@ -163,10 +189,7 @@ export async function driveUploadFile(args: {
       mimeType,
       parents: args.folder_id ? [args.folder_id] : undefined,
     },
-    media: {
-      mimeType,
-      body: fs.createReadStream(args.local_path),
-    },
+    media: { mimeType, body },
     fields: "id, name, webViewLink, size",
   });
 
