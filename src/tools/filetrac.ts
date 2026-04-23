@@ -821,15 +821,6 @@ export async function filetracGetNotes(args: {
         }
         // Parse returned body text fallback — keep going to try next URL
         diag.push(`parseNotes found no rows at ${url} — trying next pattern`);
-        // If this is quickNotes.asp (most likely real page), return body text with debug
-        if (url.includes("quickNotes.asp")) {
-          return ok(
-            `Notes page reached (${url}) but table parser found no rows.\n` +
-            `Diag: ${diag.join(" | ")}\n\n` +
-            `=== Raw page body (first 5000 chars) ===\n` +
-            result  // already contains body text from parseNotes fallback
-          );
-        }
       }
     }
     diag.push("All fast-path URL patterns exhausted");

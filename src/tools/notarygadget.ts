@@ -341,7 +341,6 @@ export async function notarygadgetUpdateSigning(args: {
     log.push(`${ms()} goToSignings`);
     await goToSignings(pg);
 
-    // Locate the signing row — skip row.click(), EditSigning(id) works without it
     log.push(`${ms()} locating #trSigning${args.signing_id}`);
     const row = pg.locator(`#trSigning${args.signing_id}`);
     const rowCount = await row.count().catch(() => 0);
@@ -350,12 +349,19 @@ export async function notarygadgetUpdateSigning(args: {
       return ok(`Signing ${args.signing_id} not found in the signings list.\nLog: ${log.join(" | ")}`);
     }
 
-    // Click the row to select it, then open edit form
+    // Click the row to populate NotaryGadget's global signing state, then wait for it to settle
     await row.click().catch(() => {});
     log.push(`${ms()} row clicked`);
+    await pg.waitForTimeout(800);
 
+    // EditSigning may throw if the signing has null/undefined fields (e.g. Address).
+    // Catch the error — form data often still loads via async callback even if EditSigning throws.
     log.push(`${ms()} EditSigning(${args.signing_id})`);
-    await pg.evaluate((id: string) => (window as any).EditSigning(id), args.signing_id);
+    const editErr = await pg.evaluate((id: string) => {
+      try { (window as any).EditSigning(id); return null; }
+      catch (e: unknown) { return String(e); }
+    }, args.signing_id).catch((e: Error) => e.message);
+    if (editErr) log.push(`${ms()} EditSigning error (continuing): ${editErr}`);
 
     // Wait for fee field to have a non-empty value (proves async form data loaded)
     log.push(`${ms()} waiting for form data (txtSigningFee non-empty)`);
