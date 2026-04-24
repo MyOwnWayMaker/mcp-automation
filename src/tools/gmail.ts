@@ -206,26 +206,89 @@ export async function gmailReplyToEmail(args: {
 
 export async function gmailDownloadAttachment(args: {
   message_id: string;
-  attachment_id: string;
+  attachment_id?: string;
   dest_path: string;
+  drive_file_id?: string;
 }): Promise<CallToolResult> {
+  const destPath = path.resolve(args.dest_path);
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+
+  // ── Path A: drive_file_id supplied directly ──────────────────────────────
+  if (args.drive_file_id) {
+    return downloadFromDrive(args.drive_file_id, destPath);
+  }
+
+  // ── Path B: standard Gmail attachment ────────────────────────────────────
+  if (args.attachment_id) {
+    const gmail = await getGmail();
+    const att = await gmail.users.messages.attachments.get({
+      userId: "me",
+      messageId: args.message_id,
+      id: args.attachment_id,
+    });
+    const data = att.data.data;
+    if (!data) return makeTextContent("Attachment has no data.");
+    const buf = Buffer.from(data, "base64url");
+    fs.writeFileSync(destPath, buf);
+    return makeTextContent(`Attachment saved: ${destPath}\nSize: ${(buf.length / 1024).toFixed(1)} KB`);
+  }
+
+  // ── Path C: no attachment_id — scan body for Drive links ─────────────────
   const gmail = await getGmail();
-  const att = await gmail.users.messages.attachments.get({
-    userId: "me",
-    messageId: args.message_id,
-    id: args.attachment_id,
-  });
+  const msg = await gmail.users.messages.get({ userId: "me", id: args.message_id, format: "full" });
+  const body = extractBody(msg.data.payload);
 
-  const data = att.data.data;
-  if (!data) return makeTextContent("Attachment has no data.");
+  const drivePattern = /https:\/\/drive\.google\.com\/(?:file\/d\/|open\?id=)([A-Za-z0-9_-]+)/g;
+  const ids: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = drivePattern.exec(body)) !== null) ids.push(m[1]);
 
-  const buf = Buffer.from(data, "base64url");
-  fs.mkdirSync(path.dirname(path.resolve(args.dest_path)), { recursive: true });
-  fs.writeFileSync(args.dest_path, buf);
+  if (ids.length === 0) {
+    return makeTextContent(
+      `No attachment_id provided and no Google Drive links found in message ${args.message_id}.\n` +
+      "Use gmail_get_email to inspect the message and pass attachment_id or drive_file_id."
+    );
+  }
 
-  return makeTextContent(
-    `Attachment saved: ${args.dest_path}\nSize: ${(buf.length / 1024).toFixed(1)} KB`
-  );
+  // Download first Drive link found
+  return downloadFromDrive(ids[0], destPath, ids.length > 1 ? ids : undefined);
+}
+
+async function downloadFromDrive(
+  fileId: string,
+  destPath: string,
+  allIds?: string[]
+): Promise<CallToolResult> {
+  const { google: goog } = await import("googleapis");
+  const { getGoogleAuthClient } = await import("../auth/google.js");
+  const auth = await getGoogleAuthClient();
+  const drive = goog.drive({ version: "v3", auth });
+
+  try {
+    const res = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "arraybuffer" }
+    );
+    const buf = Buffer.from(res.data as ArrayBuffer);
+    fs.writeFileSync(destPath, buf);
+    const extra = allIds && allIds.length > 1
+      ? `\nOther Drive IDs found in message: ${allIds.slice(1).join(", ")}`
+      : "";
+    return makeTextContent(
+      `Drive file downloaded: ${destPath}\nFile ID: ${fileId}\nSize: ${(buf.length / 1024).toFixed(1)} KB${extra}`
+    );
+  } catch (err: any) {
+    const status = err?.response?.status ?? err?.code ?? "unknown";
+    if (status === 403 || status === 404) {
+      return makeTextContent(
+        `Cannot download Drive file ${fileId} — access denied or file not found.\n` +
+        `Status: ${status}\n` +
+        `Open in browser: https://drive.google.com/file/d/${fileId}/view\n` +
+        (allIds && allIds.length > 1 ? `Other IDs in message: ${allIds.slice(1).join(", ")}` : "")
+      );
+    }
+    throw err;
+  }
 }
 
 export async function gmailArchiveEmail(args: {

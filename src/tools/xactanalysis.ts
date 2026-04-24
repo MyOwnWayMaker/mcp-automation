@@ -96,24 +96,45 @@ export async function xactListAssignments(args: {
     await page.waitForLoadState("domcontentloaded");
     await page.waitForTimeout(5000);
 
-    const links = await page.locator("a").all();
+    // Collect all assignment links across pages
     const assignments: string[] = [];
-    const limit = args.max_results ?? 20;
+    const limit = args.max_results ?? 200;
+    let pageNum = 1;
 
-    for (const link of links) {
-      if (assignments.length >= limit) break;
-      const href = await link.getAttribute("href").catch(() => "");
-      const text = (await link.innerText().catch(() => "")).trim();
-      if (href?.includes("detail.jsp") && text) {
-        const mfnMatch = href.match(/mfn=([A-Z0-9]+)/);
-        const mfn = mfnMatch ? mfnMatch[1] : "";
-        assignments.push(`Claim #: ${text} | MFN: ${mfn} | URL: ${href}`);
+    while (assignments.length < limit) {
+      const pageUrl = pageNum === 1 ? url : `${url}&page=${pageNum}`;
+      if (pageNum > 1) {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("domcontentloaded");
+        await page.waitForTimeout(4000);
       }
+
+      const links = await page.locator("a").all();
+      let addedThisPage = 0;
+      for (const link of links) {
+        if (assignments.length >= limit) break;
+        const href = await link.getAttribute("href").catch(() => "");
+        const text = (await link.innerText().catch(() => "")).trim();
+        if (href?.includes("detail.jsp") && text) {
+          const mfnMatch = href.match(/mfn=([A-Z0-9]+)/);
+          const mfn = mfnMatch ? mfnMatch[1] : "";
+          const entry = `Claim #: ${text} | MFN: ${mfn} | URL: ${href}`;
+          if (!assignments.includes(entry)) {
+            assignments.push(entry);
+            addedThisPage++;
+          }
+        }
+      }
+
+      // Stop paginating if no new results were found on this page
+      const hasNextPage = await page.locator('a:has-text("Next"), a:has-text("next"), [rel="next"]').count() > 0;
+      if (!hasNextPage || addedThisPage === 0) break;
+      pageNum++;
     }
 
     if (assignments.length === 0) return ok("No assignments found.");
 
-    // Also get the table body text for more context
+    // Table context from current page
     const tableText = (await page.locator("body").innerText().catch(() => ""))
       .split("\n")
       .filter(l => l.trim())
@@ -358,6 +379,65 @@ export async function xactAddNote(args: {
       `=== Note-related window functions ===\n${noteFns || "(none found)"}\n\n` +
       `=== Clickable elements in #d_notes ===\n${clickableInNotes}`
     );
+  } finally {
+    await browser.close();
+  }
+}
+
+export async function xactFindAssignmentByClaim(args: {
+  claim_number: string;
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+
+  try {
+    // Load all assignments (no date restriction) and scan for the claim number
+    const url = `${BASE}/xactanalysis/search.jsp?date_type=received&columns=cache`;
+    await page.goto(url);
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(5000);
+
+    const links = await page.locator("a").all();
+    const matches: string[] = [];
+
+    for (const link of links) {
+      const href = await link.getAttribute("href").catch(() => "");
+      const text = (await link.innerText().catch(() => "")).trim();
+      if (href?.includes("detail.jsp") && text) {
+        const mfnMatch = href.match(/mfn=([A-Z0-9]+)/);
+        const mfn = mfnMatch ? mfnMatch[1] : "";
+        // Match partial or full claim number (case-insensitive)
+        if (text.toLowerCase().includes(args.claim_number.toLowerCase())) {
+          matches.push(`Claim #: ${text} | MFN: ${mfn} | URL: ${href}`);
+        }
+      }
+    }
+
+    // If not found in default window, try include_all
+    if (matches.length === 0) {
+      const allUrl = `${BASE}/xactanalysis/search.jsp?date_type=received&columns=cache`;
+      await page.goto(allUrl);
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(5000);
+
+      const allLinks = await page.locator("a").all();
+      for (const link of allLinks) {
+        const href = await link.getAttribute("href").catch(() => "");
+        const text = (await link.innerText().catch(() => "")).trim();
+        if (href?.includes("detail.jsp") && text) {
+          const mfnMatch = href.match(/mfn=([A-Z0-9]+)/);
+          const mfn = mfnMatch ? mfnMatch[1] : "";
+          if (text.toLowerCase().includes(args.claim_number.toLowerCase())) {
+            matches.push(`Claim #: ${text} | MFN: ${mfn} | URL: ${href}`);
+          }
+        }
+      }
+    }
+
+    if (matches.length === 0) {
+      return ok(`No assignment found matching claim number "${args.claim_number}". Try xact_list_assignments with include_all=true to browse all records.`);
+    }
+
+    return ok(`Found ${matches.length} match(es) for "${args.claim_number}":\n\n${matches.join("\n---\n")}`);
   } finally {
     await browser.close();
   }

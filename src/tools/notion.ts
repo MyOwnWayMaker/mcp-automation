@@ -526,6 +526,89 @@ export async function notionUpdateSubtask(args: {
 /**
  * Returns a summary of all subtask statuses and hours for a claim page.
  */
+// ─── Block Primitives ─────────────────────────────────────────────────────────
+
+export async function notionListPageBlocks(args: {
+  page_id: string;
+}): Promise<CallToolResult> {
+  const allBlocks: any[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const qs = cursor ? `?page_size=100&start_cursor=${cursor}` : "?page_size=100";
+    const res = await notionFetch(`/blocks/${args.page_id}/children${qs}`);
+    allBlocks.push(...res.results);
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+
+  if (allBlocks.length === 0) return ok(`Page ${args.page_id} has no blocks.`);
+
+  const lines = allBlocks.map((b: any) => {
+    const type: string = b.type;
+    const content = b[type];
+    const text = content?.rich_text ? extractPlainText(content.rich_text) : "";
+    const tag = type.startsWith("heading_") ? type.toUpperCase() : type;
+    return `ID: ${b.id}\n[${tag}] ${text.substring(0, 120)}`;
+  });
+
+  return ok(`Page ${args.page_id} — ${allBlocks.length} block(s):\n\n${lines.join("\n\n")}`);
+}
+
+export async function notionArchiveBlock(args: {
+  block_id: string;
+}): Promise<CallToolResult> {
+  await notionFetch(`/blocks/${args.block_id}`, "PATCH", { archived: true });
+  return ok(`Block ${args.block_id} archived (recoverable from Notion trash for 30 days).`);
+}
+
+export async function notionInsertAfterBlock(args: {
+  target_block_id: string;
+  content: string;
+  block_type?: "paragraph" | "heading_1" | "heading_2" | "heading_3" | "bulleted_list_item" | "numbered_list_item" | "to_do" | "quote" | "callout";
+}): Promise<CallToolResult> {
+  const type = args.block_type ?? "paragraph";
+  const richText = [{ type: "text", text: { content: args.content } }];
+  const block: any = { object: "block", type, [type]: { rich_text: richText } };
+  if (type === "to_do") block[type].checked = false;
+
+  // Get the target block to find its parent
+  const targetBlock = await notionFetch(`/blocks/${args.target_block_id}`);
+  const parentId = targetBlock.parent?.block_id ?? targetBlock.parent?.page_id;
+  if (!parentId) throw new Error(`Could not determine parent of block ${args.target_block_id}`);
+
+  await notionFetch(`/blocks/${parentId}/children`, "PATCH", {
+    children: [block],
+    after: args.target_block_id,
+  });
+
+  return ok(`Block inserted after ${args.target_block_id} in parent ${parentId} (type: ${type}).`);
+}
+
+export async function notionAppendMultiBlock(args: {
+  page_id: string;
+  blocks: Array<{
+    content: string;
+    block_type?: string;
+  }>;
+}): Promise<CallToolResult> {
+  const VALID_TYPES = new Set(["paragraph","heading_1","heading_2","heading_3","bulleted_list_item","numbered_list_item","to_do","quote","callout","code","divider"]);
+
+  const children = args.blocks.map((b) => {
+    const type = VALID_TYPES.has(b.block_type ?? "") ? (b.block_type as string) : "paragraph";
+    if (type === "divider") return { object: "block", type: "divider", divider: {} };
+    const richText = [{ type: "text", text: { content: b.content } }];
+    const block: any = { object: "block", type, [type]: { rich_text: richText } };
+    if (type === "to_do") block[type].checked = false;
+    return block;
+  });
+
+  const notion = getNotion();
+  await notion.blocks.children.append({ block_id: args.page_id, children });
+  return ok(`${children.length} block(s) appended to page ${args.page_id}.`);
+}
+
+// ─── Subtask Status ───────────────────────────────────────────────────────────
+
 export async function notionGetSubtaskStatus(args: {
   page_id: string;
 }): Promise<CallToolResult> {
