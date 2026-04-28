@@ -804,6 +804,8 @@ export async function filetracGetNotes(args: {
           `/system/msgView.asp?claimFID=${fileNum}`,
           `/system/claimNotes.asp?claimFID=${fileNum}`,
         ];
+        let lastBody = "";
+        let lastUrl = "";
         for (const url of fastUrls) {
           const html = await fetchAspPage(fastAspBase, aspCookies, url);
           if (!html) { diag.push(`Fast: ${url} → null`); continue; }
@@ -814,15 +816,22 @@ export async function filetracGetNotes(args: {
               return ok(`[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result);
             }
             diag.push(`  → notes page but no date rows`);
+            lastBody = result;
+            lastUrl = url;
           }
         }
         // File # known + cookies valid + none of the fast URLs gave parseable notes.
-        // Don't fall through to Playwright (it hangs on Railway). Report cleanly.
+        // Don't fall through to Playwright (it hangs on Railway). Surface body text
+        // for debugging so we can see what's actually on the page.
+        const bodyDump = lastBody
+          ? `\n=== Body text snippet from ${lastUrl} (parser missed structure) ===\n${lastBody.substring(0, 4000)}\n`
+          : "";
         return ok(
           `=== FileTrac Notes — claim ${args.claim_id} (File #${fileNum}) — fast-path ===\n` +
           `No diary entries parsed from any of: quickNotes.asp, claimDiary.asp, msgView.asp, claimNotes.asp.\n` +
           `If you expect entries here, run filetrac_refresh_session and retry.\n\n` +
-          `Diag: ${diag.join(" | ")}`
+          `Diag: ${diag.join(" | ")}\n` +
+          bodyDump
         );
       }
     } else {
