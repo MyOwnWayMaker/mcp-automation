@@ -785,6 +785,53 @@ export async function filetracGetNotes(args: {
 }): Promise<CallToolResult> {
   const diag: string[] = [`[filetracGetNotes] claim_id=${args.claim_id}`];
 
+  // ── Fast-path: direct HTTP GET with cached ASP cookies (no Playwright) ──
+  // Avoids Chromium hangs on Railway. Same fetch mechanism as filetrac_get_claim.
+  // Falls through to browser path only if fast-path can't determine the file number.
+  try {
+    const { aspBase: fastAspBase, aspCookies } = getAspCredentials(args.company_index);
+    if (fastAspBase && aspCookies) {
+      const claimViewHtml = await fetchAspPage(
+        fastAspBase, aspCookies, `/system/claimView.asp?claimID=${args.claim_id}`
+      );
+      const fileNum = claimViewHtml ? extractFileNumber(claimViewHtml) : "";
+      diag.push(`Fast-path: aspBase=${fastAspBase} fileNum=${fileNum || "n/a"}`);
+
+      if (fileNum) {
+        const fastUrls = [
+          `/system/quickNotes.asp?claimFID=${fileNum}`,
+          `/system/claimDiary.asp?claimFID=${fileNum}`,
+          `/system/msgView.asp?claimFID=${fileNum}`,
+          `/system/claimNotes.asp?claimFID=${fileNum}`,
+        ];
+        for (const url of fastUrls) {
+          const html = await fetchAspPage(fastAspBase, aspCookies, url);
+          if (!html) { diag.push(`Fast: ${url} → null`); continue; }
+          diag.push(`Fast: ${url} → ${html.length}c`);
+          if (looksLikeNotesPage(html)) {
+            const result = parseNotes(html, args.claim_id);
+            if (hasNoteContent(result)) {
+              return ok(`[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result);
+            }
+            diag.push(`  → notes page but no date rows`);
+          }
+        }
+        // File # known + cookies valid + none of the fast URLs gave parseable notes.
+        // Don't fall through to Playwright (it hangs on Railway). Report cleanly.
+        return ok(
+          `=== FileTrac Notes — claim ${args.claim_id} (File #${fileNum}) — fast-path ===\n` +
+          `No diary entries parsed from any of: quickNotes.asp, claimDiary.asp, msgView.asp, claimNotes.asp.\n` +
+          `If you expect entries here, run filetrac_refresh_session and retry.\n\n` +
+          `Diag: ${diag.join(" | ")}`
+        );
+      }
+    } else {
+      diag.push(`Fast-path: no aspCredentials for company_index=${args.company_index ?? 1}`);
+    }
+  } catch (e) {
+    diag.push(`Fast-path error: ${(e as Error).message}`);
+  }
+
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
   try {
     // Capture ALL non-asset requests — Notes tab may fire AJAX rather than .asp navigation
