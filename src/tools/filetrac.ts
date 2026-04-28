@@ -797,15 +797,32 @@ export async function filetracGetNotes(args: {
       const fileNum = claimViewHtml ? extractFileNumber(claimViewHtml) : "";
       diag.push(`Fast-path: aspBase=${fastAspBase} fileNum=${fileNum || "n/a"}`);
 
+      let lastBody = "";
+      let lastUrl = "";
+
+      // Step A: claimView.asp may have diary entries inlined (Notes tab is just JS show/hide)
+      if (claimViewHtml && looksLikeNotesPage(claimViewHtml)) {
+        const cvResult = parseNotes(claimViewHtml, args.claim_id);
+        if (hasNoteContent(cvResult)) {
+          return ok(
+            `[Source: fast-path claimView | URL: ${fastAspBase}/system/claimView.asp?claimID=${args.claim_id}]\n` + cvResult
+          );
+        }
+        diag.push(`claimView has notes markers but no date rows`);
+        lastBody = cvResult;
+        lastUrl = `/system/claimView.asp?claimID=${args.claim_id}`;
+      }
+
       if (fileNum) {
+        // quickNotesList first — name suggests it's the listing page (vs. quickNotes.asp = add form)
         const fastUrls = [
+          `/system/quickNotesList.asp?claimFID=${fileNum}`,
+          `/system/claimMsg.asp?claimFID=${fileNum}`,
           `/system/quickNotes.asp?claimFID=${fileNum}`,
           `/system/claimDiary.asp?claimFID=${fileNum}`,
           `/system/msgView.asp?claimFID=${fileNum}`,
           `/system/claimNotes.asp?claimFID=${fileNum}`,
         ];
-        let lastBody = "";
-        let lastUrl = "";
         for (const url of fastUrls) {
           const html = await fetchAspPage(fastAspBase, aspCookies, url);
           if (!html) { diag.push(`Fast: ${url} → null`); continue; }
@@ -820,16 +837,14 @@ export async function filetracGetNotes(args: {
             lastUrl = url;
           }
         }
-        // File # known + cookies valid + none of the fast URLs gave parseable notes.
-        // Don't fall through to Playwright (it hangs on Railway). Surface body text
-        // for debugging so we can see what's actually on the page.
+        // File # known + cookies valid + no parseable notes anywhere.
+        // Don't fall through to Playwright (it hangs on Railway). Surface body text.
         const bodyDump = lastBody
           ? `\n=== Body text snippet from ${lastUrl} (parser missed structure) ===\n${lastBody.substring(0, 4000)}\n`
           : "";
         return ok(
           `=== FileTrac Notes — claim ${args.claim_id} (File #${fileNum}) — fast-path ===\n` +
-          `No diary entries parsed from any of: quickNotes.asp, claimDiary.asp, msgView.asp, claimNotes.asp.\n` +
-          `If you expect entries here, run filetrac_refresh_session and retry.\n\n` +
+          `No diary entries parsed. If you expect entries here, run filetrac_refresh_session and retry.\n\n` +
           `Diag: ${diag.join(" | ")}\n` +
           bodyDump
         );
