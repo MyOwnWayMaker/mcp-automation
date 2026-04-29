@@ -161,9 +161,9 @@ async function postFiletracNoteForm(
 
   // 2. Find the <form> block — try several name/id patterns + action containing quickNotes.asp
   const formBlock =
-    formHtml.match(/<form\b[^>]*\bname=["']?frmNotes["']?[\s\S]*?<\/form>/i)?.[0] ??
+    formHtml.match(/<form\b[^>]*\bname\s*=\s*["']?frmNotes["']?[\s\S]*?<\/form>/i)?.[0] ??
     formHtml.match(/<form\b[^>]*\bid=["']?frmNotes["']?[\s\S]*?<\/form>/i)?.[0] ??
-    formHtml.match(/<form\b[^>]*\baction=["'][^"']*quickNotes\.asp[^"']*["'][\s\S]*?<\/form>/i)?.[0];
+    formHtml.match(/<form\b[^>]*\baction\s*=\s*["'][^"']*quickNotes\.asp[^"']*["'][\s\S]*?<\/form>/i)?.[0];
   if (!formBlock) {
     return {
       ok: false, status: getRes.status, bodyPreview: "",
@@ -173,7 +173,7 @@ async function postFiletracNoteForm(
   }
 
   // 3. Resolve action URL
-  const actionAttr = formBlock.match(/<form\b[^>]*\baction=["']([^"']*)["']/i)?.[1] ?? "";
+  const actionAttr = formBlock.match(/<form\b[^>]*\baction\s*=\s*["']([^"']*)["']/i)?.[1] ?? "";
   let action = actionAttr || formPath;
   if (!/[?&]GO=1\b/i.test(action)) {
     action += action.includes("?") ? "&GO=1" : "?GO=1";
@@ -188,26 +188,26 @@ async function postFiletracNoteForm(
   const formData: Record<string, string> = {};
   for (const m of formBlock.matchAll(/<input\b[^>]+>/gi)) {
     const tag = m[0];
-    const name = tag.match(/\bname=["']([^"']+)["']/i)?.[1];
+    const name = tag.match(/\bname\s*=\s*["']([^"']+)["']/i)?.[1];
     if (!name) continue;
-    const type = (tag.match(/\btype=["']?([a-z]+)/i)?.[1] ?? "text").toLowerCase();
+    const type = (tag.match(/\btype\s*=\s*["']?([a-z]+)/i)?.[1] ?? "text").toLowerCase();
     if (type === "checkbox" || type === "radio" || type === "submit" || type === "button") continue;
-    const value = tag.match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? "";
+    const value = tag.match(/\bvalue\s*=\s*["']([^"']*)["']/i)?.[1] ?? "";
     formData[name] = value;
   }
   // <textarea> defaults
-  for (const m of formBlock.matchAll(/<textarea\b[^>]*\bname=["']([^"']+)["'][^>]*>([\s\S]*?)<\/textarea>/gi)) {
+  for (const m of formBlock.matchAll(/<textarea\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/textarea>/gi)) {
     formData[m[1]] = m[2];
   }
   // <select> defaults — selected option, else first option
-  for (const sm of formBlock.matchAll(/<select\b[^>]*\bname=["']([^"']+)["'][^>]*>([\s\S]*?)<\/select>/gi)) {
+  for (const sm of formBlock.matchAll(/<select\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/select>/gi)) {
     const selName = sm[1];
     const inner = sm[2];
-    const sel = inner.match(/<option\b[^>]*\bselected\b[^>]*\bvalue=["']([^"']*)["']/i)
-      ?? inner.match(/<option\b[^>]*\bvalue=["']([^"']*)["'][^>]*\bselected\b/i);
+    const sel = inner.match(/<option\b[^>]*\bselected\b[^>]*\bvalue\s*=\s*["']([^"']*)["']/i)
+      ?? inner.match(/<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["'][^>]*\bselected\b/i);
     if (sel) formData[selName] = sel[1];
     else {
-      const first = inner.match(/<option\b[^>]*\bvalue=["']([^"']*)["']/i);
+      const first = inner.match(/<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["']/i);
       if (first) formData[selName] = first[1];
     }
   }
@@ -217,8 +217,8 @@ async function postFiletracNoteForm(
   formData["msgText"] = args.note;
 
   // Always extract msgCatID options (for dry-run report + label matching)
-  const catSelInner = formBlock.match(/<select\b[^>]*\bname=["']?msgCatID["']?[^>]*>([\s\S]*?)<\/select>/i)?.[1] ?? "";
-  const categoryOptions = [...catSelInner.matchAll(/<option\b[^>]*\bvalue=["']([^"']*)["'][^>]*>([\s\S]*?)<\/option>/gi)]
+  const catSelInner = formBlock.match(/<select\b[^>]*\bname\s*=\s*["']?msgCatID["']?[^>]*>([\s\S]*?)<\/select>/i)?.[1] ?? "";
+  const categoryOptions = [...catSelInner.matchAll(/<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/option>/gi)]
     .map(o => ({
       value: o[1],
       label: o[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim(),
@@ -309,11 +309,11 @@ function extractFileNumber(html: string): string {
 
 function extractInputValue(html: string, id: string): string {
   // Pattern A: id/name BEFORE value — only return if value is non-empty
-  const mA = html.match(new RegExp(`(?:id|name)=["']?${id}["']?[^>]*value=["']([^"']+)["']`, "i"));
+  const mA = html.match(new RegExp(`(?:id|name)=["']?${id}["']?[^>]*value\s*=\s*["']([^"']+)["']`, "i"));
   if (mA?.[1]) return mA[1];
 
   // Pattern B: value BEFORE id/name  (<input value="Y" ... id="X">) — common in ASP
-  const mB = html.match(new RegExp(`<[a-z]+[^>]+value=["']([^"']+)["'][^>]*(?:id|name)=["']?${id}["']`, "i"));
+  const mB = html.match(new RegExp(`<[a-z]+[^>]+value\s*=\s*["']([^"']+)["'][^>]*(?:id|name)=["']?${id}["']`, "i"));
   if (mB?.[1]) return mB[1];
 
   // Pattern C: element innerText  (<span id="X">Y</span>)
