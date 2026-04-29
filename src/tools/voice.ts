@@ -139,7 +139,7 @@ export async function voiceListThreads(args: {
 
   const { browser, page } = await getVoicePage();
   try {
-    await page.goto("https://voice.google.com/u/0/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.goto("https://voice.google.com/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForTimeout(2500);
 
     const auth = await ensureSignedIn(page);
@@ -221,12 +221,12 @@ export async function voiceGetThread(args: {
     // Prefer direct thread URL when we have it
     if (args.thread_id) {
       await page.goto(
-        `https://voice.google.com/u/0/messages/t/${encodeURIComponent(args.thread_id)}`,
+        `https://voice.google.com/messages/t/${encodeURIComponent(args.thread_id)}`,
         { waitUntil: "domcontentloaded", timeout: 30_000 },
       );
     } else {
       // Look up by contact: open inbox and click the matching thread
-      await page.goto("https://voice.google.com/u/0/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await page.goto("https://voice.google.com/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
       await page.waitForTimeout(2000);
       const auth0 = await ensureSignedIn(page);
       if (!auth0.ok) {
