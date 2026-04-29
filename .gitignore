@@ -7,5 +7,8 @@ quickbooks_token.json
 token_notary.json
 filetrac_cookies.json
 xactanalysis_cookies.json
+voice_session.json
+voice_session.compact.json
+*_session.json
 .DS_Store
 gh
