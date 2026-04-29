@@ -40,15 +40,33 @@ function ok(text: string): CallToolResult {
 }
 
 function loadVoiceSession(): VoiceSession {
-  if (process.env.VOICE_SESSION_JSON) {
-    return JSON.parse(process.env.VOICE_SESSION_JSON);
+  // VOICE_SESSION_JSON is supposed to be the file CONTENTS (a JSON blob),
+  // but it's an easy footgun to paste a path into the Railway dashboard
+  // by mistake. Detect that case and fail loud with a useful message
+  // instead of letting JSON.parse blow up on backslashes.
+  const fromEnv = process.env.VOICE_SESSION_JSON;
+  if (fromEnv) {
+    const trimmed = fromEnv.trim();
+    if (trimmed.startsWith("{")) {
+      return JSON.parse(trimmed);
+    }
+    // Looks like a filesystem path — try to read it (works locally, not on Railway)
+    if (fs.existsSync(trimmed)) {
+      return JSON.parse(fs.readFileSync(trimmed, "utf-8"));
+    }
+    throw new Error(
+      `VOICE_SESSION_JSON is set but doesn't look like JSON (it starts with "${trimmed.slice(0, 20)}…"). ` +
+      `Expected: the full CONTENTS of voice_session.json (which begins with "{"). ` +
+      `If you pasted a Windows path like C:\\Users\\... into the Railway dashboard, that won't work — ` +
+      `Railway runs Linux and can't read your local filesystem. Re-paste the file contents instead.`,
+    );
   }
   if (fs.existsSync(SESSION_PATH)) {
     return JSON.parse(fs.readFileSync(SESSION_PATH, "utf-8"));
   }
   throw new Error(
     "Google Voice session not found. Run `node scripts/auth-voice.mjs` to capture one, " +
-    "or set the VOICE_SESSION_JSON env var (Railway).",
+    "or set the VOICE_SESSION_JSON env var (Railway) to the FILE CONTENTS (not a path).",
   );
 }
 
