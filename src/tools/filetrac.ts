@@ -730,6 +730,8 @@ export async function filetracAddNote(args: {
   visible_to_client?: boolean;
   company_index?: number;
   dry_run?: boolean;
+  force?: boolean;
+  skip_verify?: boolean;
 }): Promise<CallToolResult> {
   if (!args.file_number && !args.claim_id) {
     return ok("filetrac_add_note requires either file_number or claim_id.");
@@ -770,20 +772,62 @@ export async function filetracAddNote(args: {
     }
   }
 
-  // ── Fast-path: HTTP form POST (no Playwright) ──
+  // ── Fast-path: HTTP form POST (no Playwright) with read-write-read sandwich ──
   // Bypasses Chromium hangs on Railway. Does not fall through to Playwright on
   // failure — Playwright path is broken in current deployment, returning an
   // error is more useful than hanging for 60s.
+  //
+  // Sandwich (skipped only for dry_run, or when skip_verify=true, or when we have
+  // no claim_id to drive comments.asp):
+  //   1. Read existing entries → reject if a duplicate of this note already exists
+  //      (unless force=true). FileTrac notes are PERMANENT and visible to the
+  //      client, so the cost of an accidental dupe is high.
+  //   2. POST.
+  //   3. Read again → confirm exactly one new occurrence of this note text in the
+  //      diary. HTTP status alone is unreliable (FileTrac frequently returns 500
+  //      on commits that succeeded server-side).
   try {
     const { aspBase: fastAspBase, aspCookies } = getAspCredentials(args.company_index);
     if (fastAspBase && aspCookies) {
+      const noteSnippet = args.note.substring(0, 120) + (args.note.length > 120 ? "..." : "");
+      const canVerify = !args.skip_verify && !args.dry_run && !!args.claim_id;
+      let preEntries: DiaryEntry[] | null = null;
+      let preMatchCount = 0;
+      let preReadError: string | undefined;
+
+      // Step 1: pre-write read (duplicate check)
+      if (canVerify) {
+        const pre = await fetchDiaryEntries(fastAspBase, aspCookies, args.claim_id!);
+        if (pre.ok) {
+          preEntries = pre.entries;
+          preMatchCount = findEntriesMatchingNote(preEntries, args.note).length;
+          if (preMatchCount > 0 && !args.force) {
+            const matchedHeaders = findEntriesMatchingNote(preEntries, args.note)
+              .slice(0, 3)
+              .map(i => `  • ${preEntries![i].header}`)
+              .join("\n");
+            return ok(
+              `🛑 DUPLICATE DETECTED — refusing to post to File #${fileNumber}\n\n` +
+              `${preMatchCount} existing entr${preMatchCount === 1 ? "y" : "ies"} already match the first 60 chars of this note:\n` +
+              `${matchedHeaders}\n\n` +
+              `Note: "${noteSnippet}"\n\n` +
+              `If this is intentional (e.g., posting an updated revision), retry with force: true.\n` +
+              `Diary read from: ${fastAspBase}${pre.url}`
+            );
+          }
+        } else {
+          preReadError = pre.error;
+        }
+      }
+
+      // Step 2: POST
       const result = await postFiletracNoteForm(fastAspBase, aspCookies, fileNumber, {
         note: args.note,
         category: args.category,
         visible_to_client: args.visible_to_client,
         dry_run: args.dry_run,
       });
-      const noteSnippet = args.note.substring(0, 120) + (args.note.length > 120 ? "..." : "");
+
       if (result.dryRun) {
         const optList = (result.categoryOptions ?? [])
           .map(o => `  ${o.value.padEnd(8)} ${o.label}`).join("\n") || "  (no options found)";
@@ -797,6 +841,63 @@ export async function filetracAddNote(args: {
           `--- Form HTML (first 5000 chars) ---\n${result.formDump ?? "(none)"}`
         );
       }
+
+      // Step 3: post-write read (verification)
+      // Run regardless of HTTP status — FileTrac returns 500 on successful commits.
+      if (canVerify) {
+        const post = await fetchDiaryEntries(fastAspBase, aspCookies, args.claim_id!);
+        if (post.ok) {
+          const postMatchCount = findEntriesMatchingNote(post.entries, args.note).length;
+          const newMatches = postMatchCount - preMatchCount;
+          const httpStatusLine = `HTTP status: ${result.status}${result.ok && result.status < 400 ? " (success)" : " (note: FileTrac often returns 500 on successful commits)"}`;
+
+          if (newMatches === 1) {
+            return ok(
+              `✅ VERIFIED: Note posted to File #${fileNumber}\n` +
+              `Pre-read entries: ${preEntries?.length ?? "?"} | Post-read entries: ${post.entries.length}\n` +
+              `${httpStatusLine}\n` +
+              `Category resolved: ${result.categoryResolvedTo ?? "(default / not set)"}\n` +
+              `Visible to client: ${args.visible_to_client ? "yes" : "no"}\n` +
+              `Note: "${noteSnippet}"`
+            );
+          }
+          if (newMatches === 0) {
+            return ok(
+              `⚠️  POST RETURNED BUT NOTE NOT FOUND IN DIARY — File #${fileNumber}\n` +
+              `${httpStatusLine}\n` +
+              `Pre-match count: ${preMatchCount} | Post-match count: ${postMatchCount} (no new entry)\n` +
+              `Final URL: ${result.finalUrl ?? "(unknown)"}\n\n` +
+              `The note text was NOT detected in the diary after the POST. Possible causes:\n` +
+              `  • POST succeeded but FileTrac rejected the entry (form validation, session expiry)\n` +
+              `  • The note rendered with significantly different formatting (unlikely)\n` +
+              `  • Diary read from wrong URL or stale cache\n\n` +
+              `Diary read from: ${fastAspBase}${post.url}\n\n` +
+              `--- Response body preview (first 1500 chars) ---\n${result.bodyPreview}`
+            );
+          }
+          // newMatches >= 2: double post (this should be rare with the pre-check; could
+          // happen if force=true was used or if pre-read missed an existing duplicate)
+          return ok(
+            `🚨 DOUBLE POST DETECTED — File #${fileNumber} (${newMatches} new copies of this note)\n` +
+            `${httpStatusLine}\n` +
+            `Pre-match count: ${preMatchCount} | Post-match count: ${postMatchCount}\n\n` +
+            `FileTrac diary entries CANNOT be deleted. The user will need to manually blank ` +
+            `the body of ${newMatches - 1} extra entr${newMatches - 1 === 1 ? "y" : "ies"} via the FileTrac UI.\n\n` +
+            `Note: "${noteSnippet}"\n` +
+            `Diary read from: ${fastAspBase}${post.url}`
+          );
+        }
+        // post-read failed — fall through to status-only response
+        preReadError = preReadError ?? `Post-read failed: ${post.error}`;
+      }
+
+      // No verification possible (skip_verify, no claim_id, or read failed) — return status-only
+      const verifyNote = canVerify
+        ? `\n⚠️  Verification was attempted but the post-read failed (${preReadError ?? "unknown"}). HTTP status alone is NOT reliable.`
+        : args.skip_verify
+          ? `\nVerification skipped (skip_verify=true).`
+          : `\n⚠️  Cannot verify without claim_id. Pass claim_id (not just file_number) to enable read-write-read verification. HTTP status alone is NOT reliable — FileTrac returns 500 on successful commits.`;
+
       if (result.ok && result.status >= 200 && result.status < 400) {
         return ok(
           `✅ Note submitted via HTTP fast-path — File #${fileNumber}\n` +
@@ -804,9 +905,7 @@ export async function filetracAddNote(args: {
           `Final URL: ${result.finalUrl ?? "(unknown)"}\n` +
           `Category resolved: ${result.categoryResolvedTo ?? "(default / not set)"}\n` +
           `Visible to client: ${args.visible_to_client ? "yes" : "no"}\n` +
-          `Note: "${noteSnippet}"\n\n` +
-          `IMPORTANT: HTTP-side success indicates the POST landed without error, but does ` +
-          `not guarantee the entry rendered in the diary. Verify in FileTrac UI before relying on it.\n\n` +
+          `Note: "${noteSnippet}"${verifyNote}\n\n` +
           `--- Response body preview (first 1500 chars) ---\n${result.bodyPreview}`
         );
       }
@@ -814,7 +913,7 @@ export async function filetracAddNote(args: {
         `❌ HTTP fast-path failed for File #${fileNumber}\n` +
         `Status: ${result.status} | Error: ${result.error ?? "(see body)"}\n` +
         `Final URL: ${result.finalUrl ?? "(none)"}\n` +
-        `Category attempted: ${args.category ?? "(none)"} → resolved: ${result.categoryResolvedTo ?? "(no match)"}\n\n` +
+        `Category attempted: ${args.category ?? "(none)"} → resolved: ${result.categoryResolvedTo ?? "(no match)"}${verifyNote}\n\n` +
         `--- Sent POST body (first 2000 chars) ---\n${result.sentBody ?? "(no sent body)"}\n\n` +
         `--- Form HTML dump (first 5000 chars) ---\n${result.formDump ?? "(no form dump)"}\n\n` +
         `--- POST response body preview ---\n${result.bodyPreview}`
@@ -964,20 +1063,16 @@ export async function filetracSubmitTimeExpense(args: {
 // Matches M/D/YYYY, MM/DD/YYYY, and M/D/YY date formats found in FileTrac diary rows
 const DIARY_DATE_RE = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/;
 
-function parseNotes(html: string, claimId: string): string {
+type DiaryEntry = { header: string; body: string[] };
+
+function parseDiaryEntries(html: string): DiaryEntry[] {
   const clean = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "");
 
   const trMatches = clean.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
-
-  // FileTrac diary tables use a header row (date | author | category | edit)
-  // followed by one or more body rows (often <td colspan="N">note text</td>) that
-  // have NO date. Group each date-bearing header row with the non-date rows that
-  // follow it until the next header row.
-  type Entry = { header: string; body: string[] };
-  const entries: Entry[] = [];
-  let current: Entry | null = null;
+  const entries: DiaryEntry[] = [];
+  let current: DiaryEntry | null = null;
 
   for (const tr of trMatches) {
     const cells = (tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [])
@@ -989,37 +1084,76 @@ function parseNotes(html: string, claimId: string): string {
     const hasDate = cells.some(c => DIARY_DATE_RE.test(c));
 
     if (hasDate) {
-      // Start a new entry
-      if (cells.length < 2) {
-        // Date-only row — still treat as a header and look for body in next rows
-        current = { header: cells.join(" | "), body: [] };
-        entries.push(current);
-        continue;
-      }
       current = { header: cells.join(" | "), body: [] };
       entries.push(current);
     } else if (current) {
-      // Continuation row — body content for the previous entry.
-      // Skip rows that are only navigation/chrome (very short, single cell).
       const text = cells.join(" ").trim();
-      // Drop obvious form chrome / nav strings
       if (text.length < 2) continue;
       if (/^(edit|delete|view|print|save|cancel|reply|x)$/i.test(text)) continue;
       current.body.push(text);
     }
   }
 
+  return entries;
+}
+
+function parseNotes(html: string, claimId: string): string {
+  const entries = parseDiaryEntries(html);
   if (entries.length === 0) {
     const bodyText = htmlToText(html);
     return `(table-parse-failed)\n${bodyText.substring(0, 6000)}`;
   }
-
   const formatted = entries.map(e => {
     const bodyJoined = e.body.length > 0 ? `\n${e.body.join("\n")}` : "";
     return `${e.header}${bodyJoined}`;
   });
-
   return `Claim ${claimId} — Notes/Diary (${entries.length} entries):\n\n${formatted.join("\n---\n")}`;
+}
+
+/**
+ * Normalize note text for duplicate comparison. Lowercases, strips HTML entities
+ * we commonly see in scraped output, collapses whitespace, drops trailing punctuation.
+ */
+function normalizeNoteText(s: string): string {
+  return s
+    .replace(/&[a-z]+;/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Returns indices of entries whose body text contains a substantial prefix of the note.
+ * Used to detect duplicates before posting and to verify a post landed.
+ */
+function findEntriesMatchingNote(entries: DiaryEntry[], noteText: string): number[] {
+  const normNote = normalizeNoteText(noteText);
+  if (normNote.length < 12) return []; // too short to match reliably
+  // Use first 60 chars (or full if shorter) as the match anchor.
+  const anchor = normNote.substring(0, Math.min(60, normNote.length));
+  const matches: number[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const bodyNorm = normalizeNoteText(entries[i].body.join(" "));
+    if (bodyNorm.includes(anchor)) matches.push(i);
+  }
+  return matches;
+}
+
+async function fetchDiaryEntries(
+  aspBase: string,
+  aspCookies: string,
+  claimId: string,
+): Promise<{ entries: DiaryEntry[]; url: string; ok: boolean; error?: string }> {
+  const url = `/system/comments.asp?claimID=${claimId}`;
+  try {
+    const html = await fetchAspPage(aspBase, aspCookies, url);
+    if (!html) return { entries: [], url, ok: false, error: "fetchAspPage returned null" };
+    return { entries: parseDiaryEntries(html), url, ok: true };
+  } catch (e) {
+    return { entries: [], url, ok: false, error: (e as Error).message };
+  }
 }
 
 // Known FileTrac diary URL patterns to try in order
