@@ -1159,7 +1159,9 @@ async function fetchDiaryEntries(
 // Known FileTrac diary URL patterns to try in order
 // fileNum = the 8-digit file number (claimFileID) — quickNotes uses claimFID (file number), not claimID
 const DIARY_PATH_PATTERNS = (claimId: string, fileNum?: string) => {
-  const patterns: string[] = [];
+  // comments.asp is the most reliable diary listing URL (works on both claims.filetrac.net
+  // and data.filetrac.net) — uses claimID, so it's always tried first regardless of fileNum.
+  const patterns: string[] = [`/system/comments.asp?claimID=${claimId}`];
   if (fileNum) {
     patterns.push(
       `/system/quickNotes.asp?claimFID=${fileNum}`,      // add-note form also shows existing notes
@@ -1231,35 +1233,37 @@ export async function filetracGetNotes(args: {
         lastUrl = `/system/claimView.asp?claimID=${args.claim_id}`;
       }
 
+      // Build the fast-path URL list. comments.asp uses claimID (not the file number),
+      // so it's tried regardless of whether extractFileNumber succeeded — that matters
+      // for backends like data.filetrac.net (US Claim Solutions) where the claimView
+      // markup differs from claims.filetrac.net and fileNum extraction may fail.
+      // The remaining URLs need the file number, so they're only added if available.
+      const fastUrls: string[] = [`/system/comments.asp?claimID=${args.claim_id}`];
       if (fileNum) {
-        // comments.asp is the diary popup — discovered via window.open() in claimView nav hints.
-        // Uses claimID (not claimFID) and opens a separate window, which is why network captures
-        // miss it. Try it FIRST since it's the most likely match.
-        const fastUrls = [
-          `/system/comments.asp?claimID=${args.claim_id}`,
+        fastUrls.push(
           `/system/quickNotesList.asp?claimFID=${fileNum}`,
           `/system/claimMsg.asp?claimFID=${fileNum}`,
           `/system/quickNotes.asp?claimFID=${fileNum}`,
           `/system/claimDiary.asp?claimFID=${fileNum}`,
           `/system/msgView.asp?claimFID=${fileNum}`,
           `/system/claimNotes.asp?claimFID=${fileNum}`,
-        ];
-        for (const url of fastUrls) {
-          const html = await fetchAspPage(fastAspBase, aspCookies, url);
-          if (!html) { diag.push(`Fast: ${url} → null`); continue; }
-          diag.push(`Fast: ${url} → ${html.length}c`);
-          // Always attempt parseNotes — its internal date-row filter is the real gate.
-          // looksLikeNotesPage was too narrow (only form-field markers) and missed listing pages.
-          const result = parseNotes(html, args.claim_id);
-          if (hasNoteContent(result)) {
-            return ok(`[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result);
-          }
-          diag.push(`  → no date rows ${looksLikeNotesPage(html) ? "(has form markers)" : "(no form markers)"}`);
-          lastBody = result;
-          lastUrl = url;
-          lastRawHtml = html;
+        );
+      }
+      for (const url of fastUrls) {
+        const html = await fetchAspPage(fastAspBase, aspCookies, url);
+        if (!html) { diag.push(`Fast: ${url} → null`); continue; }
+        diag.push(`Fast: ${url} → ${html.length}c`);
+        const result = parseNotes(html, args.claim_id);
+        if (hasNoteContent(result)) {
+          return ok(`[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result);
         }
-        // File # known + cookies valid + no parseable notes anywhere.
+        diag.push(`  → no date rows ${looksLikeNotesPage(html) ? "(has form markers)" : "(no form markers)"}`);
+        lastBody = result;
+        lastUrl = url;
+        lastRawHtml = html;
+      }
+      {
+        // Cookies valid + no parseable notes on any tried URL.
         // Don't fall through to Playwright (it hangs on Railway). Surface body text +
         // chunks of claimView HTML around date patterns (diary entries are M/D/YYYY).
         const bodyDump = lastBody
