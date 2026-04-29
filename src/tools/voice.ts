@@ -388,6 +388,10 @@ export async function voiceDumpHtml(args: {
   context_chars?: number;
   max_matches?: number;
   scroll_to_start?: boolean;
+  /** Extra ms to wait after navigation, on top of domcontentloaded. Default 3000. */
+  wait_ms?: number;
+  /** If set, wait for this CSS selector to appear (timeout 30s) before dumping. */
+  wait_for_selector?: string;
 }): Promise<CallToolResult> {
   const targetUrl = args.path?.startsWith("http")
     ? args.path
@@ -396,7 +400,10 @@ export async function voiceDumpHtml(args: {
   const { browser, page } = await getVoicePage();
   try {
     await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.waitForTimeout(3000);
+    if (args.wait_for_selector) {
+      await page.waitForSelector(args.wait_for_selector, { timeout: 30_000 }).catch(() => null);
+    }
+    await page.waitForTimeout(args.wait_ms ?? 3000);
 
     if (args.scroll_to_start) {
       for (let i = 0; i < 30; i++) {
