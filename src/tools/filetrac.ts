@@ -1057,6 +1057,7 @@ export async function filetracGetNotes(args: {
 
       let lastBody = "";
       let lastUrl = "";
+      let lastRawHtml = "";  // for diagnostic — last successful fetched HTML
 
       // Step A: claimView.asp may have diary entries inlined (Notes tab is just JS show/hide)
       if (claimViewHtml && looksLikeNotesPage(claimViewHtml)) {
@@ -1093,6 +1094,7 @@ export async function filetracGetNotes(args: {
             diag.push(`  → notes page but no date rows`);
             lastBody = result;
             lastUrl = url;
+            lastRawHtml = html;  // capture for date-pattern diagnostic
           }
         }
         // File # known + cookies valid + no parseable notes anywhere.
@@ -1101,31 +1103,34 @@ export async function filetracGetNotes(args: {
         const bodyDump = lastBody
           ? `\n=== Body text snippet from ${lastUrl} (parser missed structure) ===\n${lastBody.substring(0, 2500)}\n`
           : "";
-        let cvDump = "";
-        if (claimViewHtml) {
+        const dumpDateChunks = (label: string, html: string, max: number): string => {
           const dateRe = /\b\d{1,2}\/\d{1,2}\/202\d\b/g;
           const seen = new Set<number>();
           const matches: string[] = [];
           let dm: RegExpExecArray | null;
           let mc = 0;
-          while ((dm = dateRe.exec(claimViewHtml)) !== null && mc < 8) {
-            // Dedupe overlapping context blocks
-            const block = Math.floor(dm.index / 1200);
+          while ((dm = dateRe.exec(html)) !== null && mc < max) {
+            const block = Math.floor(dm.index / 1500);
             if (seen.has(block)) continue;
             seen.add(block);
-            const start = Math.max(0, dm.index - 600);
-            const end = Math.min(claimViewHtml.length, dm.index + 600);
-            matches.push(`--- date "${dm[0]}" @offset ${dm.index} ---\n${claimViewHtml.substring(start, end)}`);
+            const start = Math.max(0, dm.index - 700);
+            const end = Math.min(html.length, dm.index + 700);
+            matches.push(`--- "${dm[0]}" @${dm.index} ---\n${html.substring(start, end)}`);
             mc++;
           }
-          cvDump = `\n=== claimView HTML chunks around date patterns (${matches.length} unique blocks of ${claimViewHtml.length}c total) ===\n${matches.join("\n\n")}\n`;
-        }
+          return matches.length === 0
+            ? `\n=== ${label} (${html.length}c) — no M/D/202d date matches ===\n`
+            : `\n=== ${label} chunks around date patterns (${matches.length} unique of ${html.length}c) ===\n${matches.join("\n\n")}\n`;
+        };
+        const cvDump = claimViewHtml ? dumpDateChunks(`claimView.asp HTML`, claimViewHtml, 8) : "";
+        const lastHtmlDump = lastRawHtml ? dumpDateChunks(`${lastUrl} HTML`, lastRawHtml, 12) : "";
         return ok(
           `=== FileTrac Notes — claim ${args.claim_id} (File #${fileNum}) — fast-path ===\n` +
           `No diary entries parsed. If you expect entries here, run filetrac_refresh_session and retry.\n\n` +
           `Diag: ${diag.join(" | ")}\n` +
           bodyDump +
-          cvDump
+          cvDump +
+          lastHtmlDump
         );
       }
     } else {
