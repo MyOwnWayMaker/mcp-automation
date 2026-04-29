@@ -140,7 +140,7 @@ export async function voiceListThreads(args: {
   const { browser, page } = await getVoicePage();
   try {
     await page.goto("https://voice.google.com/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(1500);
 
     const auth = await ensureSignedIn(page);
     if (!auth.ok) {
@@ -150,6 +150,17 @@ export async function voiceListThreads(args: {
         `Re-run scripts/auth-voice.mjs to refresh the session, then push the new compact JSON to Railway:\n` +
         `  Get-Content voice_session.compact.json -Raw | railway variables --set-from-stdin VOICE_SESSION_JSON`
       );
+    }
+
+    // Voice's thread list is populated via a long-poll XHR (signaler-pa.clients6.google.com/...)
+    // AFTER the static HTML hydrates. Wait for at least one thread anchor to appear before
+    // scraping — otherwise we get an empty list.
+    const threadAnchorSelector = 'a[href*="/messages/t/"]';
+    let waitErr: string | null = null;
+    try {
+      await page.waitForSelector(threadAnchorSelector, { timeout: 25_000 });
+    } catch (e) {
+      waitErr = (e as Error).message;
     }
 
     // Voice renders threads as <gv-thread-item> custom elements (or plain divs
@@ -183,14 +194,25 @@ export async function voiceListThreads(args: {
       return Number.isNaN(ts) ? true : ts >= sinceTs;
     }) : threads;
 
+    // Diagnostic counts so we can tell apart "long-poll never arrived" vs "selectors are wrong"
+    const counts = await page.evaluate(() => ({
+      thread_anchors: document.querySelectorAll('a[href*="/messages/t/"]').length,
+      gv_thread_items: document.querySelectorAll('gv-thread-item').length,
+      role_listitem: document.querySelectorAll('[role="listitem"]').length,
+      role_list: document.querySelectorAll('[role="list"]').length,
+    }));
+
     return ok(JSON.stringify({
       account: loadVoiceSession().account,
       url: page.url(),
       thread_count: filtered.length,
       threads: filtered,
-      diagnostic_note: threadHandles.length === 0
-        ? "No thread elements found — selectors may need updating. Use voice_dump_html on /messages to inspect."
-        : undefined,
+      ...(threadHandles.length === 0 ? {
+        diagnostic_note: waitErr
+          ? `Timed out waiting for thread anchors to appear in DOM (Voice's long-poll XHR didn't deliver thread list within 25s). Check session validity or network. Wait error: ${waitErr}`
+          : "No thread elements matched current selectors, but DOM had anchors. Selectors need tuning.",
+        dom_counts: counts,
+      } : { dom_counts: counts }),
     }, null, 2));
   } finally {
     await browser.close();
@@ -252,6 +274,15 @@ export async function voiceGetThread(args: {
       return ok(
         `unauthenticated: ${auth1.reason}\nlanded on: ${auth1.url}\nRe-run scripts/auth-voice.mjs.`
       );
+    }
+
+    // Wait for the thread's messages to populate (long-poll XHR, same as inbox)
+    const messageSelector = '[role="article"], gv-text-message-item, [data-test-id="message-item"]';
+    let getThreadWaitErr: string | null = null;
+    try {
+      await page.waitForSelector(messageSelector, { timeout: 30_000 });
+    } catch (e) {
+      getThreadWaitErr = (e as Error).message;
     }
 
     // Scroll the message list to the top to force-load full history.
@@ -322,15 +353,25 @@ export async function voiceGetThread(args: {
 
     const ordered = order === "newest_first" ? [...normalized].reverse() : normalized;
 
+    const threadCounts = await page.evaluate(() => ({
+      role_article: document.querySelectorAll('[role="article"]').length,
+      gv_text_message_item: document.querySelectorAll('gv-text-message-item').length,
+      role_log: document.querySelectorAll('[role="log"]').length,
+      role_list: document.querySelectorAll('[role="list"]').length,
+    }));
+
     return ok(JSON.stringify({
       account: loadVoiceSession().account,
       thread_url: page.url(),
       message_count: ordered.length,
       order,
       messages: ordered,
-      diagnostic_note: ordered.length === 0
-        ? "No messages parsed. Selectors may need tuning. Run voice_dump_html on this URL to inspect."
-        : undefined,
+      ...(ordered.length === 0 ? {
+        diagnostic_note: getThreadWaitErr
+          ? `Timed out waiting for messages to appear in DOM (Voice's long-poll XHR didn't deliver message list within 30s). Wait error: ${getThreadWaitErr}`
+          : "No messages matched current selectors despite DOM elements present. Selectors need tuning.",
+        dom_counts: threadCounts,
+      } : { dom_counts: threadCounts }),
     }, null, 2));
   } finally {
     await browser.close();
