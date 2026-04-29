@@ -1093,15 +1093,15 @@ export async function filetracGetNotes(args: {
           // looksLikeNotesPage was too narrow (only form-field markers) and missed listing pages.
           const result = parseNotes(html, args.claim_id);
           if (hasNoteContent(result)) {
-            // Temporary: include a sample of the source HTML so we can verify body-row markup
-            // (will be removed once the parser captures bodies properly).
-            const sampleStart = html.search(/4\/28\/202\d/);
+            // Temporary: include a sample of source HTML around a real diary row
+            // ("( Edit )" only appears in adjuster diary entries).
+            const sampleStart = html.indexOf("( Edit )");
             const sample = sampleStart >= 0
-              ? html.substring(Math.max(0, sampleStart - 1500), Math.min(html.length, sampleStart + 3500))
-              : html.substring(0, 5000);
+              ? html.substring(Math.max(0, sampleStart - 2000), Math.min(html.length, sampleStart + 4000))
+              : html.substring(html.length - 6000);
             return ok(
               `[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result +
-              `\n\n=== Source HTML sample (~5KB around first 4/28 date) for parser-tuning ===\n${sample}`
+              `\n\n=== Source HTML sample (~6KB around "( Edit )" — a real diary row) ===\n${sample}`
             );
           }
           diag.push(`  → no date rows ${looksLikeNotesPage(html) ? "(has form markers)" : "(no form markers)"}`);
