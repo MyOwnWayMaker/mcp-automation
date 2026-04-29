@@ -1124,11 +1124,38 @@ export async function filetracGetNotes(args: {
         };
         const cvDump = claimViewHtml ? dumpDateChunks(`claimView.asp HTML`, claimViewHtml, 8) : "";
         const lastHtmlDump = lastRawHtml ? dumpDateChunks(`${lastUrl} HTML`, lastRawHtml, 12) : "";
+
+        // Hunt for note/diary references in claimView: iframes, anchor hrefs, onclick handlers, window.open calls
+        let navHints = "";
+        if (claimViewHtml) {
+          const hints: string[] = [];
+          // <iframe> / <frame>
+          for (const m of claimViewHtml.matchAll(/<i?frame\b[^>]*>/gi)) hints.push(`IFRAME: ${m[0]}`);
+          // <a> with href containing note|diary|msg|message
+          for (const m of claimViewHtml.matchAll(/<a\b[^>]*\bhref\s*=\s*(?:"[^"]*(?:note|diary|msg|message)[^"]*"|'[^']*(?:note|diary|msg|message)[^']*'|[^\s>]*(?:note|diary|msg|message)[^\s>]*)[^>]*>[\s\S]{0,200}?<\/a>/gi)) {
+            hints.push(`ANCHOR: ${m[0].substring(0, 400)}`);
+          }
+          // onclick handlers mentioning note/diary/msg/window.open
+          for (const m of claimViewHtml.matchAll(/\bonclick\s*=\s*(?:"[^"]*(?:note|diary|msg|message|showNote|loadNote|viewNote)[^"]*"|'[^']*(?:note|diary|msg|message|showNote|loadNote|viewNote)[^']*')/gi)) {
+            hints.push(`ONCLICK: ${m[0].substring(0, 300)}`);
+          }
+          // window.open(...) calls
+          for (const m of claimViewHtml.matchAll(/window\.open\([^)]{0,200}\)/gi)) hints.push(`WINDOW.OPEN: ${m[0]}`);
+          // Bare references — any *.asp filename containing "note" or "diary" or "msg"
+          for (const m of claimViewHtml.matchAll(/[A-Za-z]*(?:[Nn]ote|[Dd]iary|[Mm]sg|[Mm]essage)[A-Za-z]*\.asp\b[^"'\s<>]*/g)) {
+            hints.push(`ASP-URL: ${m[0]}`);
+          }
+          // Dedup + cap
+          const seenH = new Set<string>();
+          const uniq = hints.filter(h => seenH.has(h) ? false : (seenH.add(h), true)).slice(0, 40);
+          navHints = `\n=== claimView nav hints (iframes / note-related anchors, onclicks, window.open, *.asp URLs) ===\n${uniq.join("\n")}\n`;
+        }
         return ok(
           `=== FileTrac Notes — claim ${args.claim_id} (File #${fileNum}) — fast-path ===\n` +
           `No diary entries parsed. If you expect entries here, run filetrac_refresh_session and retry.\n\n` +
           `Diag: ${diag.join(" | ")}\n` +
           bodyDump +
+          navHints +
           cvDump +
           lastHtmlDump
         );
