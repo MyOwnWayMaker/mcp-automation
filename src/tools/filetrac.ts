@@ -1073,8 +1073,11 @@ export async function filetracGetNotes(args: {
       }
 
       if (fileNum) {
-        // quickNotesList first — name suggests it's the listing page (vs. quickNotes.asp = add form)
+        // comments.asp is the diary popup — discovered via window.open() in claimView nav hints.
+        // Uses claimID (not claimFID) and opens a separate window, which is why network captures
+        // miss it. Try it FIRST since it's the most likely match.
         const fastUrls = [
+          `/system/comments.asp?claimID=${args.claim_id}`,
           `/system/quickNotesList.asp?claimFID=${fileNum}`,
           `/system/claimMsg.asp?claimFID=${fileNum}`,
           `/system/quickNotes.asp?claimFID=${fileNum}`,
@@ -1086,16 +1089,16 @@ export async function filetracGetNotes(args: {
           const html = await fetchAspPage(fastAspBase, aspCookies, url);
           if (!html) { diag.push(`Fast: ${url} → null`); continue; }
           diag.push(`Fast: ${url} → ${html.length}c`);
-          if (looksLikeNotesPage(html)) {
-            const result = parseNotes(html, args.claim_id);
-            if (hasNoteContent(result)) {
-              return ok(`[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result);
-            }
-            diag.push(`  → notes page but no date rows`);
-            lastBody = result;
-            lastUrl = url;
-            lastRawHtml = html;  // capture for date-pattern diagnostic
+          // Always attempt parseNotes — its internal date-row filter is the real gate.
+          // looksLikeNotesPage was too narrow (only form-field markers) and missed listing pages.
+          const result = parseNotes(html, args.claim_id);
+          if (hasNoteContent(result)) {
+            return ok(`[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result);
           }
+          diag.push(`  → no date rows ${looksLikeNotesPage(html) ? "(has form markers)" : "(no form markers)"}`);
+          lastBody = result;
+          lastUrl = url;
+          lastRawHtml = html;
         }
         // File # known + cookies valid + no parseable notes anywhere.
         // Don't fall through to Playwright (it hangs on Railway). Surface body text +
