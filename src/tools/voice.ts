@@ -85,8 +85,10 @@ async function getVoicePage(): Promise<{ browser: Browser; context: BrowserConte
   // (signaler-pa.clients6.google.com) silently refuses to deliver thread data.
   // The page hydrates but never populates → after a timeout, Voice's app
   // redirects to workspace.google.com/products/voice as a fallback.
+  // Set VOICE_HEADLESS=false to watch the runtime browser locally (debugging)
+  const headless = process.env.VOICE_HEADLESS !== "false";
   const browser = await chromium.launch({
-    headless: true,
+    headless,
     args: [
       "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
@@ -175,54 +177,69 @@ export async function voiceListThreads(args: {
       );
     }
 
-    // Voice's thread list is populated via a long-poll XHR (signaler-pa.clients6.google.com/...)
-    // AFTER the static HTML hydrates. Wait for at least one thread anchor to appear before
-    // scraping — otherwise we get an empty list.
-    const threadAnchorSelector = 'a[href*="/messages/t/"]';
+    // Voice is an Angular SPA. Threads render as <gv-thread-list-item> custom
+    // elements inside a <cdk-virtual-scroll-viewport>. Navigation is JS-routed,
+    // so there are NO <a href="/messages/t/..."> anchors — clicks are handled
+    // by Angular Router, and the URL only updates after click.
     let waitErr: string | null = null;
     try {
-      await page.waitForSelector(threadAnchorSelector, { timeout: 25_000 });
+      await page.waitForSelector("gv-thread-list-item", { timeout: 25_000 });
     } catch (e) {
       waitErr = (e as Error).message;
     }
 
-    // Voice renders threads as <gv-thread-item> custom elements (or plain divs
-    // with role="listitem"). Try a few selectors and pick whatever returns rows.
-    const threadHandles = await page.locator(
-      'gv-thread-item, [data-test-id="thread-item"], [role="listitem"]:has(a[href*="/messages/t/"])'
-    ).all();
+    const threads: Array<Record<string, unknown>> = await page.evaluate((max) => {
+      const items = Array.from(document.querySelectorAll<HTMLElement>("gv-thread-list-item"));
+      return items.slice(0, max).map((item, idx) => {
+        // The user-visible details live in .thread-details / .thread-info; the
+        // outer textContent also includes Material icon names ("check", "person")
+        // and a screen-reader pause sequence we don't want.
+        const detailsEl = item.querySelector<HTMLElement>(".thread-details, .thread-info");
+        const detailsText = (detailsEl?.innerText || item.innerText || "")
+          .replace(/‪|‬/g, "") // strip LRE/PDF directional marks
+          .replace(/\s+/g, " ").trim();
 
-    const threads: Array<Record<string, unknown>> = [];
-    for (const h of threadHandles.slice(0, limit * 2)) {
-      const text = await h.innerText().catch(() => "");
-      const href = await h.locator('a[href*="/messages/t/"]').first().getAttribute("href").catch(() => null);
-      const threadId = href?.match(/\/messages\/t\/([^/?#]+)/)?.[1] ?? null;
+        // Best signal for the contact name/number: aria-label on the clickable container
+        const button = item.querySelector<HTMLElement>('[role="button"]');
+        const ariaLabel = button?.getAttribute("aria-label") || item.getAttribute("aria-label") || "";
 
-      // Lines: contact name, preview, timestamp (varies with locale)
-      const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
-      threads.push({
-        thread_id: threadId,
-        contact: lines[0] ?? null,
-        preview: lines.find(l => l !== lines[0] && !/^\d+([smhdw]| ago| min| hour| day)/i.test(l)) ?? null,
-        last_activity_text: lines.find(l => /\d/.test(l) && (/(ago|AM|PM|:|\/)/.test(l))) ?? null,
-        unread: text.toLowerCase().includes("unread"),
-        raw: text.length > 400 ? text.substring(0, 400) + "…" : text,
+        // Look for a Material chip indicating unread
+        const unread = !!item.querySelector('[class*="unread"]') ||
+                       /unread/i.test(item.getAttribute("aria-label") || "");
+
+        // Heuristic split on the details text:
+        //   "<contact>  <preview text>  <timestamp>"
+        // Last token that looks like a timestamp wins; everything before the timestamp
+        // is contact + preview (Voice runs them together with separators).
+        const tsMatch = detailsText.match(/((?:\d{1,2}:\d{2}\s?[AP]M)|(?:Yesterday)|(?:[A-Z][a-z]{2}\s\d{1,2})|(?:\d{1,2}\/\d{1,2}\/\d{2,4}))\s*$/);
+        const timestamp = tsMatch ? tsMatch[1] : null;
+        const beforeTs = tsMatch ? detailsText.slice(0, tsMatch.index).trim() : detailsText;
+
+        return {
+          // Voice navigates via Angular Router — there's no stable thread ID in
+          // the DOM until you click. For voice_get_thread, callers should pass
+          // `contact` (matched by aria_label/details_text) which makes us click.
+          thread_id: null,
+          index: idx,
+          contact: ariaLabel || null,
+          details_text: detailsText.slice(0, 300),
+          preview_and_contact: beforeTs.slice(0, 200),
+          last_activity_text: timestamp,
+          unread,
+        };
       });
-      if (threads.length >= limit) break;
-    }
+    }, limit * 2);
 
-    // since-filter (best-effort — relies on parseable timestamps)
-    const filtered = sinceTs ? threads.filter(t => {
+    const filtered = (sinceTs ? threads.filter(t => {
       const ts = typeof t.last_activity_text === "string" ? Date.parse(t.last_activity_text) : NaN;
       return Number.isNaN(ts) ? true : ts >= sinceTs;
-    }) : threads;
+    }) : threads).slice(0, limit);
 
-    // Diagnostic counts so we can tell apart "long-poll never arrived" vs "selectors are wrong"
     const counts = await page.evaluate(() => ({
-      thread_anchors: document.querySelectorAll('a[href*="/messages/t/"]').length,
-      gv_thread_items: document.querySelectorAll('gv-thread-item').length,
-      role_listitem: document.querySelectorAll('[role="listitem"]').length,
-      role_list: document.querySelectorAll('[role="list"]').length,
+      gv_thread_list_item: document.querySelectorAll("gv-thread-list-item").length,
+      gv_message_thread_list_item: document.querySelectorAll("gv-message-thread-list-item").length,
+      virtual_scroll_viewports: document.querySelectorAll("cdk-virtual-scroll-viewport").length,
+      thread_buttons: document.querySelectorAll('gv-thread-list-item [role="button"]').length,
     }));
 
     return ok(JSON.stringify({
@@ -230,10 +247,10 @@ export async function voiceListThreads(args: {
       url: page.url(),
       thread_count: filtered.length,
       threads: filtered,
-      ...(threadHandles.length === 0 ? {
+      ...(filtered.length === 0 ? {
         diagnostic_note: waitErr
-          ? `Timed out waiting for thread anchors to appear in DOM (Voice's long-poll XHR didn't deliver thread list within 25s). Check session validity or network. Wait error: ${waitErr}`
-          : "No thread elements matched current selectors, but DOM had anchors. Selectors need tuning.",
+          ? `Timed out waiting for gv-thread-list-item to appear (${waitErr}). Either Voice didn't deliver thread data within 25s, or the markup changed.`
+          : "Selectors found 0 gv-thread-list-item elements despite no wait error. Markup may have changed.",
         dom_counts: counts,
       } : { dom_counts: counts }),
     }, null, 2));
@@ -270,26 +287,58 @@ export async function voiceGetThread(args: {
         { waitUntil: "domcontentloaded", timeout: 30_000 },
       );
     } else {
-      // Look up by contact: open inbox and click the matching thread
+      // Look up by contact: open inbox, wait for thread items, click the matching one.
+      // Voice is Angular-routed — there are no <a href> targets; the URL only updates
+      // after a click, so we navigate via the click itself.
       await page.goto("https://voice.google.com/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1500);
       const auth0 = await ensureSignedIn(page);
       if (!auth0.ok) {
         return ok(
           `unauthenticated: ${auth0.reason}\nlanded on: ${auth0.url}\nRe-run scripts/auth-voice.mjs.`
         );
       }
-      const needle = args.contact!.trim();
-      const isPhone = /\d{7,}/.test(digitsOnly(needle));
-      // Strategies: text match, then phone-digit match
-      const byText = page.locator(`a[href*="/messages/t/"]:has-text("${needle}")`).first();
-      const opened = await byText.click({ timeout: 5000 }).then(() => true).catch(() => false);
-      if (!opened && isPhone) {
-        const digits = digitsOnly(needle);
-        const phoneLink = page.locator(`a[href*="/messages/t/"]`).filter({ hasText: digits.slice(-7) }).first();
-        await phoneLink.click({ timeout: 5000 }).catch(() => null);
+      try {
+        await page.waitForSelector("gv-thread-list-item", { timeout: 25_000 });
+      } catch (e) {
+        return ok(
+          `Voice did not deliver thread list within 25s. Wait error: ${(e as Error).message}`,
+        );
       }
-      await page.waitForTimeout(1500);
+
+      const needle = args.contact!.trim();
+      const digits = digitsOnly(needle);
+      const isPhone = /\d{7,}/.test(digits);
+      const phoneTail = isPhone ? digits.slice(-7) : null;
+
+      // Click the first gv-thread-list-item whose visible text or aria-label
+      // contains our needle (name) or last-7 digits (phone).
+      const clicked = await page.evaluate((arg: { needle: string; phoneTail: string | null }) => {
+        const items = Array.from(document.querySelectorAll<HTMLElement>("gv-thread-list-item"));
+        for (const item of items) {
+          const text = (item.innerText || "").replace(/\s+/g, " ");
+          const aria = item.querySelector('[role="button"]')?.getAttribute("aria-label") ?? "";
+          const haystack = (text + " " + aria).toLowerCase();
+          const hit = haystack.includes(arg.needle.toLowerCase()) ||
+                      (arg.phoneTail !== null && haystack.replace(/\D/g, "").includes(arg.phoneTail));
+          if (hit) {
+            const button = item.querySelector<HTMLElement>('[role="button"]') || item;
+            button.click();
+            return true;
+          }
+        }
+        return false;
+      }, { needle, phoneTail });
+
+      if (!clicked) {
+        return ok(
+          `Could not find a thread matching "${needle}" in the inbox. ` +
+          `Use voice_list_threads to see what's currently visible.`,
+        );
+      }
+      // Give Angular Router a moment to navigate
+      await page.waitForURL(url => url.href.includes("/messages/t/"), { timeout: 10_000 }).catch(() => null);
+      await page.waitForTimeout(1000);
     }
 
     const auth1 = await ensureSignedIn(page);
@@ -299,8 +348,10 @@ export async function voiceGetThread(args: {
       );
     }
 
-    // Wait for the thread's messages to populate (long-poll XHR, same as inbox)
-    const messageSelector = '[role="article"], gv-text-message-item, [data-test-id="message-item"]';
+    // Wait for messages (Voice loads them via long-poll). Voice's per-thread
+    // markup uses gv-message-list / gv-text-message inside cdk-virtual-scroll-viewport.
+    // We also accept a broader set of likely selectors.
+    const messageSelector = "gv-text-message, gv-message-bubble, gv-message-thread-message, [data-test-id='message-item'], [role='article']";
     let getThreadWaitErr: string | null = null;
     try {
       await page.waitForSelector(messageSelector, { timeout: 30_000 });
@@ -308,25 +359,28 @@ export async function voiceGetThread(args: {
       getThreadWaitErr = (e as Error).message;
     }
 
-    // Scroll the message list to the top to force-load full history.
-    // Voice lazy-loads in batches as you scroll up.
+    // Scroll the cdk-virtual-scroll-viewport for the message pane to the top
+    // to force-load the full history (Voice lazy-loads as you scroll up).
     if (scrollToStart) {
       let prevCount = -1;
       let stable = 0;
       const maxScrollIterations = 80;
       for (let i = 0; i < maxScrollIterations; i++) {
-        // Scroll the most likely message-pane scroll container to top
         await page.evaluate(() => {
-          const candidates: HTMLElement[] = [];
-          document.querySelectorAll<HTMLElement>('[role="log"], [role="list"], gv-thread-list, .gv-message-list, [class*="messages"]').forEach(el => candidates.push(el));
-          // Also try the body's main scrollable region
-          for (const el of candidates) {
-            if (el.scrollHeight > el.clientHeight) el.scrollTop = 0;
+          // The thread's message pane is the LAST cdk-virtual-scroll-viewport
+          // (the first is the inbox thread list).
+          const viewports = Array.from(document.querySelectorAll<HTMLElement>("cdk-virtual-scroll-viewport"));
+          for (const vp of viewports) {
+            if (vp.scrollHeight > vp.clientHeight) vp.scrollTop = 0;
           }
+          // Fallbacks
+          document.querySelectorAll<HTMLElement>('[role="log"], [class*="message-list"]').forEach(el => {
+            if (el.scrollHeight > el.clientHeight) el.scrollTop = 0;
+          });
           window.scrollTo(0, 0);
         });
         await page.waitForTimeout(400);
-        const count = await page.locator('[role="article"], gv-text-message-item, [data-test-id="message-item"]').count().catch(() => 0);
+        const count = await page.locator(messageSelector).count().catch(() => 0);
         if (count === prevCount) {
           stable++;
           if (stable >= 3) break;
@@ -337,21 +391,19 @@ export async function voiceGetThread(args: {
       }
     }
 
-    // Extract messages. Voice marks outbound messages with class names like
-    // "outbound" or aria attributes; these are not stable across releases.
-    // We grab a generous set of fields and let the caller see what came through.
-    const messages = await page.evaluate((max: number) => {
-      const sel = '[role="article"], gv-text-message-item, [data-test-id="message-item"]';
+    const messages = await page.evaluate((args: { sel: string; max: number }) => {
       const out: Array<Record<string, unknown>> = [];
-      const els = Array.from(document.querySelectorAll<HTMLElement>(sel));
-      for (const el of els.slice(0, max)) {
-        const text = el.innerText || el.textContent || "";
-        const cls = el.className || "";
+      const els = Array.from(document.querySelectorAll<HTMLElement>(args.sel));
+      for (const el of els.slice(0, args.max)) {
+        const text = (el.innerText || el.textContent || "").replace(/‪|‬/g, "").trim();
+        const cls = (el.className?.toString() || "");
         const ariaLabel = el.getAttribute("aria-label") || "";
-        const tsAttr = el.querySelector("[data-tooltip], time, [datetime]");
-        const tsTooltip = tsAttr?.getAttribute("data-tooltip") || tsAttr?.getAttribute("datetime") || tsAttr?.textContent || "";
-        const direction = /outbound|sent|outgoing/i.test(cls + " " + ariaLabel) ? "outbound"
-                       : /inbound|received|incoming/i.test(cls + " " + ariaLabel) ? "inbound"
+        const tsAttr = el.querySelector("[data-tooltip], time, [datetime], .timestamp, [class*='time']");
+        const tsTooltip = tsAttr?.getAttribute("data-tooltip") ||
+                          tsAttr?.getAttribute("datetime") ||
+                          (tsAttr?.textContent || "").trim();
+        const direction = /outbound|sent|outgoing|self|me\b/i.test(cls + " " + ariaLabel) ? "outbound"
+                       : /inbound|received|incoming|other|them/i.test(cls + " " + ariaLabel) ? "inbound"
                        : null;
         const hasMedia = !!el.querySelector('img:not([alt=""]), video, audio, [class*="attachment"], [class*="media"]');
         out.push({
@@ -359,13 +411,13 @@ export async function voiceGetThread(args: {
           timestamp_text: tsTooltip || null,
           aria_label: ariaLabel || null,
           body: text.split(/\n/).filter(Boolean).join(" ").slice(0, 4000),
+          class_hint: cls.slice(0, 200) || null,
           has_media: hasMedia,
         });
       }
       return out;
-    }, maxMessages);
+    }, { sel: messageSelector, max: maxMessages });
 
-    // Try to ISO-normalize timestamps where possible
     const normalized = messages.map(m => {
       const t = typeof m.timestamp_text === "string" ? Date.parse(m.timestamp_text) : NaN;
       return {
@@ -377,10 +429,17 @@ export async function voiceGetThread(args: {
     const ordered = order === "newest_first" ? [...normalized].reverse() : normalized;
 
     const threadCounts = await page.evaluate(() => ({
+      gv_text_message: document.querySelectorAll("gv-text-message").length,
+      gv_message_bubble: document.querySelectorAll("gv-message-bubble").length,
+      gv_message_thread_message: document.querySelectorAll("gv-message-thread-message").length,
       role_article: document.querySelectorAll('[role="article"]').length,
-      gv_text_message_item: document.querySelectorAll('gv-text-message-item').length,
-      role_log: document.querySelectorAll('[role="log"]').length,
-      role_list: document.querySelectorAll('[role="list"]').length,
+      cdk_virtual_scroll_viewport: document.querySelectorAll("cdk-virtual-scroll-viewport").length,
+      // List ALL custom elements present so we can spot the right one if our guesses miss
+      custom_element_tags: Array.from(new Set(
+        Array.from(document.querySelectorAll("*"))
+          .map(el => el.tagName.toLowerCase())
+          .filter(t => t.includes("-") && (t.includes("message") || t.includes("thread") || t.includes("text") || t.includes("bubble")))
+      )),
     }));
 
     return ok(JSON.stringify({

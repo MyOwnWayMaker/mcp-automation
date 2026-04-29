@@ -1,0 +1,176 @@
+{
+  "iframes": [
+    {
+      "src": "https://ogs.google.com/u/0/widget/app?awwd=1&em=2&dpi=111538494&origin=https%3A%2F%2Fvoice.google.com&cn=app&pid=72&spid=72&hl=en",
+      "name": "app",
+      "id": ""
+    },
+    {
+      "src": "data:text/html;charset=UTF-8;base64,PCFET0NUWVBFIGh0bWw+PGJvZHk+PGlucHV0IHR5cGU9ImhpZGRlbiIgaWQ9Im5vbmNlIiB2YWx1ZT0iMjI4LjI1MS4yNTIuNzMuNi4xNTAuMTQ5LjExMC4xNzguNzQuMTEyLjM1LjI0NS4xNTAuMTgwLjc5IiAvPjxzY3JpcHQgbm9uY2U9IkhOWlZOWHJjQmViM3FsSXpTcXNCZ3ciPnZhciBnPXR5cGVvZiBPYmplY3QuZGVmaW5lUHJvcGVydGllcz09ImZ1bmN0aW9uIj9PYmplY3QuZGVmaW5lUHJvcGVydHk6ZnVuY3Rpb24oYSxiLGMpe2lmKGE9PUFycmF5LnByb3RvdHlwZXx8YT09T2JqZWN0LnByb3RvdHlwZSlyZXR1cm4gYTthW2JdPWMudmFsdWU7cmV0dXJuIGF9LGg9ZnVuY3Rpb24oYSl7YT1bIm9iamVjdCI9PXR5cGVvZiBnbG9iYWxUaGlzJiZnbG9iYWxUaGlzLGEsIm9iamVjdCI9PXR5cGVvZiB3aW5kb3cmJndpbmRvdywib2JqZWN0Ij09dHlwZW9mIHNlbGYmJnNlbGYsIm9iamVjdCI9PXR5cGVvZiBnbG9iYWwmJmdsb2JhbF07Zm9yKHZhciBiPTA7YjxhLmxlbmd0aDsrK2Ipe3ZhciBjPWFbYl07aWYoYyYmYy5NYXRoPT1NYXRoKXJldHVybiBjfXRocm93IEVycm9yKCJDYW5ub3QgZmluZCBnbG9iYWwgb2JqZWN0Iik7fSxrPWgodGhpcyksbD1mdW5jdGlvbihhLGIpe2lmKGIpYTp7dmFyIGM9azthPWEuc3BsaXQoIi4iKTtmb3IodmFyIGQ9MDtkPGEubGVuZ3RoLQoxO2QrKyl7dmFyIGU9YVtkXTtpZighKGUgaW4gYykpYnJlYWsgYTtjPWNbZV19YT1hW2EubGVuZ3RoLTFdO2Q9Y1thXTtiPWIoZCk7YiE9ZCYmYiE9bnVsbCYmZyhjLGEse2NvbmZpZ3VyYWJsZTohMCx3cml0YWJsZTohMCx2YWx1ZTpifSl9fSxtPWZ1bmN0aW9uKCl7Zm9yKHZhciBhPU51bWJlcih0aGlzKSxiPVtdLGM9YTtjPGFyZ3VtZW50cy5sZW5ndGg7YysrKWJbYy1hXT1hcmd1bWVudHNbY107cmV0dXJuIGJ9O2woImdsb2JhbFRoaXMiLGZ1bmN0aW9uKGEpe3JldHVybiBhfHxrfSk7LyoKCiBDb3B5cmlnaHQgR29vZ2xlIExMQwogU1BEWC1MaWNlbnNlLUlkZW50aWZpZXI6IEFwYWNoZS0yLjAKKi8KdmFyIG49Z2xvYmFsVGhpcy50cnVzdGVkVHlwZXMscDtmdW5jdGlvbiBxKCl7dmFyIGE9bnVsbDtpZighbilyZXR1cm4gYTt0cnl7dmFyIGI9ZnVuY3Rpb24oYyl7cmV0dXJuIGN9O2E9bi5jcmVhdGVQb2xpY3koImdvb2cjaHRtbCIse2NyZWF0ZUhUTUw6YixjcmVhdGVTY3JpcHQ6YixjcmVhdGVTY3JpcHRVUkw6Yn0pfWNhdGNoKGMpe31yZXR1cm4gYX07dmFyIHI9ZnVuY3Rpb24oYSl7dGhpcy5nPWF9O3IucHJvdG90eXBlLnRvU3RyaW5nPWZ1bmN0aW9uKCl7cmV0dXJuIHRoaXMuZysiIn07ZnVuY3Rpb24gdChhKXt2YXIgYjtwPT09dm9pZCAwJiYocD1xKCkpO2E9KGI9cCk/Yi5jcmVhdGVTY3JpcHQoYSk6YTtyZXR1cm4gbmV3IHIoYSl9ZnVuY3Rpb24gdShhKXtpZihhIGluc3RhbmNlb2YgcilyZXR1cm4gYS5nO3Rocm93IEVycm9yKCIiKTt9O2Z1bmN0aW9uIHYoYSxiKXthLnRleHRDb250ZW50PXUoYik7dmFyIGM7Yj1hLm93bmVyRG9jdW1lbnQ7Yj1iPT09dm9pZCAwP2RvY3VtZW50OmI7dmFyIGQ7Yj0oZD0oYz1iKS5xdWVyeVNlbGVjdG9yKT09bnVsbD92b2lkIDA6ZC5jYWxsKGMsInNjcmlwdFtub25jZV0iKTsoYz1iPT1udWxsPyIiOmIubm9uY2V8fGIuZ2V0QXR0cmlidXRlKCJub25jZSIpfHwiIikmJmEuc2V0QXR0cmlidXRlKCJub25jZSIsYyl9O3ZhciB3PWZ1bmN0aW9uKGEpe3ZhciBiPW0uYXBwbHkoMSxhcmd1bWVudHMpLGMsZDsiZXZhbENzcENvbXBhdGlibHlEYXRhImluIHdpbmRvd3x8KHdpbmRvdy5ldmFsQ3NwQ29tcGF0aWJseURhdGE9e2luZGV4OjB9KTt2YXIgZT13aW5kb3cuZXZhbENzcENvbXBhdGlibHlEYXRhLmluZGV4Kys7d2luZG93LmV2YWxDc3BDb21wYXRpYmx5RGF0YVtlXT17YXJnczpiLGNhbGxiYWNrOmZ1bmN0aW9uKGYseCl7Yz1mO2Q9eH19O2I9ZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgic2NyaXB0Iik7Yi5hc3luYz0hMTtiLnNldEF0dHJpYnV0ZSgiZGF0YS1pbmRleCIsZSk7ZT0nInVzZSBzdHJpY3QiO1x2KGZ1bmN0aW9uKCl7dmFyIGlkeD1wYXJzZUludCgoZG9jdW1lbnQuY3VycmVudFNjcmlwdHx8QXJyYXkucHJvdG90eXBlLnNsaWNlLmNhbGwoZG9jdW1lbnQucXVlcnlTZWxlY3RvckFsbCgiaGVhZCBzY3JpcHRbZGF0YS1pbmRleF0iKSwtMSlbMF0pLmdldEF0dHJpYnV0ZSgiZGF0YS1pbmRleCIpLDEwKSxjdXJFdmFsRGF0YT1ldmFsQ3NwQ29tcGF0aWJseURhdGFbaWR4XTtkZWxldGUgZXZhbENzcENvbXBhdGlibHlEYXRhW2lkeF07KGZ1bmN0aW9uKCl7dmFyIGNhbGxiYWNrPWN1ckV2YWxEYXRhLmNhbGxiYWNrO3RyeXtjYWxsYmFjayh0cnVlLCgnKwpTdHJpbmcodShhKSkrIlxuKSk7fWNhdGNoKGV4KXtjYWxsYmFjayhmYWxzZSwgZXgpO319KS5hcHBseSh0aGlzLCBjdXJFdmFsRGF0YS5hcmdzKTt9KSgpIjtlPXQoZSk7dihiLGUpO2U9ZnVuY3Rpb24oZil7Yz0hMTtkPWYuZXJyb3J8fGZ9O3dpbmRvdy5hZGRFdmVudExpc3RlbmVyKCJlcnJvciIsZSk7ZG9jdW1lbnQuaGVhZC5hcHBlbmRDaGlsZChiKTt3aW5kb3cucmVtb3ZlRXZlbnRMaXN0ZW5lcigiZXJyb3IiLGUpO2RvY3VtZW50LmhlYWQucmVtb3ZlQ2hpbGQoYik7aWYoIWMpdGhyb3cgZDtyZXR1cm4gZH07dmFyIHk9ZG9jdW1lbnQuZ2V0RWxlbWVudEJ5SWQoIm5vbmNlIiksej15P3kudmFsdWU6KG5ldyBVUkwobG9jYXRpb24uaHJlZikpLnNlYXJjaFBhcmFtcy5nZXQoIm5vbmNlIik7ZnVuY3Rpb24gQSgpe2lmKHNlbGYub3JpZ2luKXJldHVybiBzZWxmLm9yaWdpbj09Im51bGwiO2lmKGxvY2F0aW9uLmhvc3QhPSIiKXJldHVybiExO3RyeXtyZXR1cm4gd2luZG93LnBhcmVudC5lc2NhcGUoIiIpLCExfWNhdGNoKGEpe3JldHVybiEwfX0KKGZ1bmN0aW9uKCl7aWYoIUEoKSl0aHJvdyJzYW5kYm94aW5nIGVycm9yIjt2YXIgYT1uZXcgTWVzc2FnZUNoYW5uZWw7YS5wb3J0MS5vbm1lc3NhZ2U9ZnVuY3Rpb24oYyl7dHJ5e3ZhciBkPXcuYXBwbHkobnVsbCxbdCgiKGZ1bmN0aW9uKCIrYy5kYXRhLnBhcmFtTmFtZXMuam9pbigiLCAiKSsiKSB7XG4iK2MuZGF0YS5jb2RlKyJcbn0pLmFwcGx5KG51bGwsIGFyZ3VtZW50cykiKV0uY29uY2F0KGMuZGF0YS52YWx1ZXMpKTtjLnBvcnRzWzBdLnBvc3RNZXNzYWdlKHtyZXN1bHQ6ZH0pfWNhdGNoKGUpe2MucG9ydHNbMF0ucG9zdE1lc3NhZ2Uoe2Vycm9yOmUudG9TdHJpbmcoKX0pfX07dmFyIGI9IioiO2xvY2F0aW9uLnByb3RvY29sPT0iY2hyb21lLWV4dGVuc2lvbjoiJiYoYj1sb2NhdGlvbi5vcmlnaW4pO3dpbmRvdy5wYXJlbnQucG9zdE1lc3NhZ2UoeixiLFthLnBvcnQyXSl9KSgpOwo8L3NjcmlwdD48L2JvZHk+",
+      "name": "",
+      "id": ""
+    },
+    {
+      "src": "https://clients6.google.com/static/proxy.html?usegapi=1&jsh=m%3B%2F_%2Fscs%2Fabc-static%2F_%2Fjs%2Fk%3Dgapi.lb.en.HLcjcliCxoY.O%2Fd%3D1%2Frs%3DAHpOoo-EKlLcELGvY6Qdg_kTBmN3Ra8MLw%2Fm%3D__features__#parent=https%3A%2F%2Fvoice.google.com&rpctoken=662496565",
+      "name": "apiproxy5dd763850186a428269f2bf4302a8660deb6388f0.2706222574",
+      "id": "apiproxy5dd763850186a428269f2bf4302a8660deb6388f0.2706222574"
+    },
+    {
+      "src": "https://www.google.com/recaptcha/enterprise/anchor?ar=1&k=6Lfv4cYpAAAAABTKDTZu0jpcgdQ5Ak4XxeUBqA7B&co=aHR0cHM6Ly92b2ljZS5nb29nbGUuY29tOjQ0Mw..&hl=en&v=gTpTIWhbKpxADzTzkcabhXN4&size=invisible&anchor-ms=20000&execute-ms=30000&cb=j3pd9t95zmr7",
+      "name": "a-m362vfifn5us",
+      "id": ""
+    },
+    {
+      "src": "",
+      "name": "",
+      "id": ""
+    }
+  ],
+  "top_level": {
+    "a_total": 16,
+    "a_to_messages_t": 0,
+    "role_listitem": 0,
+    "role_list": 0,
+    "gv_thread_item": 0,
+    "custom_elements": [
+      "gv-availability-chip",
+      "mat-icon",
+      "gv-base-product-controls",
+      "gv-ogb-audio-button",
+      "gv-audio-callouts",
+      "gv-ogb-help-button",
+      "gv-ogb-settings-button",
+      "gv-app",
+      "gv-ogb-product-controls",
+      "ogb-product-control-portal",
+      "gv-user-change",
+      "gv-side-panel",
+      "mat-sidenav-container",
+      "mat-sidenav",
+      "gv-side-nav",
+      "mat-nav-list",
+      "mat-sidenav-content",
+      "gv-app-banner",
+      "gv-tel-registration-banner",
+      "mat-divider",
+      "router-outlet",
+      "gv-messaging-view",
+      "gv-thread-list",
+      "cdk-virtual-scroll-viewport",
+      "gv-message-thread-list-item",
+      "gv-thread-list-item",
+      "multi-avatar",
+      "gv-avatar",
+      "gv-avatar-badge",
+      "gv-annotation",
+      "gv-screenreader-pause",
+      "gv-thread-details",
+      "gv-inbox-summary",
+      "gv-call-sidebar",
+      "gv-in-call",
+      "gv-make-call-panel",
+      "gv-call-as-banner",
+      "gv-call-as-select",
+      "mat-menu",
+      "gv-contact-list",
+      "gv-contact-item",
+      "gv-dialpad",
+      "gv-dialpad-toggle"
+    ]
+  },
+  "shadow_hosts": [],
+  "total_shadow_hosts_with_threads": 0,
+  "total_shadow_hosts": 0,
+  "text_matches_top10": [
+    {
+      "tag": "div",
+      "cls": "gb_pe",
+      "role": "",
+      "text": "Google Voice"
+    },
+    {
+      "tag": "div",
+      "cls": "gb_Pd gb_Sd",
+      "role": "",
+      "text": "Voice Call Availability settings  phone_callback  Receiving calls arrow_drop_downUpgrade30% offheads"
+    },
+    {
+      "tag": "div",
+      "cls": "gb_Xd gb_6d gb_Qe gb_2e gb_3e gb_6e",
+      "role": "",
+      "text": "Call Availability settings  phone_callback  Receiving calls arrow_drop_downUpgrade30% offheadset_mic"
+    },
+    {
+      "tag": "div",
+      "cls": "gb_v gb_we",
+      "role": "",
+      "text": "Call Availability settings  phone_callback  Receiving calls arrow_drop_downUpgrade30% offheadset_mic"
+    },
+    {
+      "tag": "div",
+      "cls": "gb_ye gb_xe",
+      "role": "",
+      "text": "Call Availability settings  phone_callback  Receiving calls arrow_drop_down"
+    },
+    {
+      "tag": "gv-availability-chip",
+      "cls": "ng-star-inserted",
+      "role": "",
+      "text": "Call Availability settings  phone_callback  Receiving calls arrow_drop_down"
+    },
+    {
+      "tag": "button",
+      "cls": "mat-ripple chip ng-star-inserted",
+      "role": "",
+      "text": "Call Availability settings  phone_callback  Receiving calls arrow_drop_down"
+    },
+    {
+      "tag": "span",
+      "cls": "visually-hidden ng-star-inserted",
+      "role": "",
+      "text": "Call Availability settings"
+    },
+    {
+      "tag": "p",
+      "cls": "details",
+      "role": "",
+      "text": "Register Google Voice so it can make calls in your browser when you click a phone number link"
+    },
+    {
+      "tag": "li",
+      "cls": "list-item ng-star-inserted",
+      "role": "",
+      "text": "check personperson‪(407) 310-2679‬, ‪(770) 542-7802‬ 4 0 7 3 1 0 2 6 7 9, 7 7 0 5 4 2 7 8 0 2 . 8:15"
+    },
+    {
+      "tag": "gv-message-thread-list-item",
+      "cls": "ng-star-inserted",
+      "role": "",
+      "text": "check personperson‪(407) 310-2679‬, ‪(770) 542-7802‬ 4 0 7 3 1 0 2 6 7 9, 7 7 0 5 4 2 7 8 0 2 . 8:15"
+    },
+    {
+      "tag": "gv-thread-list-item",
+      "cls": "ng-star-inserted",
+      "role": "",
+      "text": "check personperson‪(407) 310-2679‬, ‪(770) 542-7802‬ 4 0 7 3 1 0 2 6 7 9, 7 7 0 5 4 2 7 8 0 2 . 8:15"
+    },
+    {
+      "tag": "div",
+      "cls": "mat-ripple container ng-star-inserted",
+      "role": "button",
+      "text": "check personperson‪(407) 310-2679‬, ‪(770) 542-7802‬ 4 0 7 3 1 0 2 6 7 9, 7 7 0 5 4 2 7 8 0 2 . 8:15"
+    },
+    {
+      "tag": "div",
+      "cls": "thread-details",
+      "role": "",
+      "text": "‪(407) 310-2679‬, ‪(770) 542-7802‬ 4 0 7 3 1 0 2 6 7 9, 7 7 0 5 4 2 7 8 0 2 . 8:15 AM ‪(407) 310-267"
+    },
+    {
+      "tag": "div",
+      "cls": "thread-info",
+      "role": "",
+      "text": "‪(407) 310-2679‬, ‪(770) 542-7802‬ 4 0 7 3 1 0 2 6 7 9, 7 7 0 5 4 2 7 8 0 2 . 8:15 AM ‪(407) 310-267"
+    }
+  ]
+}
