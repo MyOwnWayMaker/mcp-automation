@@ -136,6 +136,130 @@ async function fetchAspPage(aspBase: string, aspCookies: string, path: string): 
 }
 
 /**
+ * HTTP fast-path note submit — bypasses Playwright by GETting the form,
+ * harvesting hidden inputs, then POSTing with cached cookies. Used when
+ * Chromium is unreliable (e.g., on Railway).
+ */
+async function postFiletracNoteForm(
+  aspBase: string,
+  aspCookies: string,
+  fileNumber: string,
+  args: { note: string; category?: string; visible_to_client?: boolean }
+): Promise<{ ok: boolean; status: number; bodyPreview: string; finalUrl?: string; formDump?: string; error?: string; categoryResolvedTo?: string }> {
+  const formPath = `/system/quickNotes.asp?claimFID=${fileNumber}`;
+  const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36";
+
+  // 1. GET the form
+  const getRes = await fetch(`${aspBase}${formPath}`, {
+    headers: { "Cookie": aspCookies, "User-Agent": ua },
+    redirect: "follow",
+  });
+  if (!getRes.ok) {
+    return { ok: false, status: getRes.status, bodyPreview: "", error: `GET form failed: ${getRes.status}` };
+  }
+  const formHtml = await getRes.text();
+
+  // 2. Find the <form> block — try several name/id patterns + action containing quickNotes.asp
+  const formBlock =
+    formHtml.match(/<form\b[^>]*\bname=["']?frmNotes["']?[\s\S]*?<\/form>/i)?.[0] ??
+    formHtml.match(/<form\b[^>]*\bid=["']?frmNotes["']?[\s\S]*?<\/form>/i)?.[0] ??
+    formHtml.match(/<form\b[^>]*\baction=["'][^"']*quickNotes\.asp[^"']*["'][\s\S]*?<\/form>/i)?.[0];
+  if (!formBlock) {
+    return {
+      ok: false, status: getRes.status, bodyPreview: "",
+      error: "frmNotes <form> not found in form page HTML",
+      formDump: formHtml.substring(0, 3000),
+    };
+  }
+
+  // 3. Resolve action URL
+  const actionAttr = formBlock.match(/<form\b[^>]*\baction=["']([^"']*)["']/i)?.[1] ?? "";
+  let action = actionAttr || formPath;
+  if (!/[?&]GO=1\b/i.test(action)) {
+    action += action.includes("?") ? "&GO=1" : "?GO=1";
+  }
+  const postUrl = action.startsWith("http")
+    ? action
+    : action.startsWith("/")
+      ? `${aspBase}${action}`
+      : `${aspBase}/system/${action.replace(/^\.?\/?/, "")}`;
+
+  // 4. Harvest all <input> defaults (skip checkboxes/radios — set explicitly)
+  const formData: Record<string, string> = {};
+  for (const m of formBlock.matchAll(/<input\b[^>]+>/gi)) {
+    const tag = m[0];
+    const name = tag.match(/\bname=["']([^"']+)["']/i)?.[1];
+    if (!name) continue;
+    const type = (tag.match(/\btype=["']?([a-z]+)/i)?.[1] ?? "text").toLowerCase();
+    if (type === "checkbox" || type === "radio" || type === "submit" || type === "button") continue;
+    const value = tag.match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? "";
+    formData[name] = value;
+  }
+  // <textarea> defaults
+  for (const m of formBlock.matchAll(/<textarea\b[^>]*\bname=["']([^"']+)["'][^>]*>([\s\S]*?)<\/textarea>/gi)) {
+    formData[m[1]] = m[2];
+  }
+  // <select> defaults — selected option, else first option
+  for (const sm of formBlock.matchAll(/<select\b[^>]*\bname=["']([^"']+)["'][^>]*>([\s\S]*?)<\/select>/gi)) {
+    const selName = sm[1];
+    const inner = sm[2];
+    const sel = inner.match(/<option\b[^>]*\bselected\b[^>]*\bvalue=["']([^"']*)["']/i)
+      ?? inner.match(/<option\b[^>]*\bvalue=["']([^"']*)["'][^>]*\bselected\b/i);
+    if (sel) formData[selName] = sel[1];
+    else {
+      const first = inner.match(/<option\b[^>]*\bvalue=["']([^"']*)["']/i);
+      if (first) formData[selName] = first[1];
+    }
+  }
+
+  // 5. User-provided overrides
+  formData["claimFileID"] = fileNumber;
+  formData["msgText"] = args.note;
+
+  // Resolve category by label → option value
+  let categoryResolvedTo: string | undefined;
+  if (args.category) {
+    const catSel = formBlock.match(/<select\b[^>]*\bname=["']?msgCatID["']?[^>]*>([\s\S]*?)<\/select>/i)?.[1];
+    if (catSel) {
+      const target = args.category.toLowerCase();
+      const opts = [...catSel.matchAll(/<option\b[^>]*\bvalue=["']([^"']*)["'][^>]*>([\s\S]*?)<\/option>/gi)];
+      const exact = opts.find(o => o[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim().toLowerCase() === target);
+      const partial = exact ?? opts.find(o => o[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim().toLowerCase().includes(target));
+      if (partial) {
+        formData["msgCatID"] = partial[1];
+        categoryResolvedTo = `${partial[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim()} (value=${partial[1]})`;
+      }
+    }
+  }
+
+  // Visible to client
+  if (args.visible_to_client) formData["msgCustomerView"] = "1";
+
+  // 6. POST
+  const body = new URLSearchParams(formData).toString();
+  const postRes = await fetch(postUrl, {
+    method: "POST",
+    headers: {
+      "Cookie": aspCookies,
+      "User-Agent": ua,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Referer": `${aspBase}${formPath}`,
+      "Origin": aspBase,
+    },
+    body,
+    redirect: "follow",
+  });
+  const postBody = await postRes.text();
+  return {
+    ok: postRes.ok,
+    status: postRes.status,
+    bodyPreview: postBody.substring(0, 1500),
+    finalUrl: postRes.url,
+    categoryResolvedTo,
+  };
+}
+
+/**
  * Extract the 7-9 digit FileTrac file number from claimView HTML.
  * Tries multiple strategies because claimFileID value="" is JS-rendered (empty in static HTML),
  * but the file number DOES appear in navigation links as claimFID=XXXXXXXX.
@@ -564,6 +688,45 @@ export async function filetracAddNote(args: {
       return ok(`Could not determine file number for claim ID ${args.claim_id}. ` +
         `Please provide file_number directly (8-digit number shown in FileTrac).`);
     }
+  }
+
+  // ── Fast-path: HTTP form POST (no Playwright) ──
+  // Bypasses Chromium hangs on Railway. Does not fall through to Playwright on
+  // failure — Playwright path is broken in current deployment, returning an
+  // error is more useful than hanging for 60s.
+  try {
+    const { aspBase: fastAspBase, aspCookies } = getAspCredentials(args.company_index);
+    if (fastAspBase && aspCookies) {
+      const result = await postFiletracNoteForm(fastAspBase, aspCookies, fileNumber, {
+        note: args.note,
+        category: args.category,
+        visible_to_client: args.visible_to_client,
+      });
+      const noteSnippet = args.note.substring(0, 120) + (args.note.length > 120 ? "..." : "");
+      if (result.ok && result.status >= 200 && result.status < 400) {
+        return ok(
+          `✅ Note submitted via HTTP fast-path — File #${fileNumber}\n` +
+          `Status: ${result.status}\n` +
+          `Final URL: ${result.finalUrl ?? "(unknown)"}\n` +
+          `Category resolved: ${result.categoryResolvedTo ?? "(default / not set)"}\n` +
+          `Visible to client: ${args.visible_to_client ? "yes" : "no"}\n` +
+          `Note: "${noteSnippet}"\n\n` +
+          `IMPORTANT: HTTP-side success indicates the POST landed without error, but does ` +
+          `not guarantee the entry rendered in the diary. Verify in FileTrac UI before relying on it.\n\n` +
+          `--- Response body preview (first 1500 chars) ---\n${result.bodyPreview}`
+        );
+      }
+      return ok(
+        `❌ HTTP fast-path failed for File #${fileNumber}\n` +
+        `Status: ${result.status} | Error: ${result.error ?? "(see body)"}\n` +
+        `Final URL: ${result.finalUrl ?? "(none)"}\n` +
+        `Category attempted: ${args.category ?? "(none)"} → resolved: ${result.categoryResolvedTo ?? "(no match)"}\n\n` +
+        `--- Form HTML dump (first 3000 chars) ---\n${result.formDump ?? "(no form dump)"}\n\n` +
+        `--- POST response body preview ---\n${result.bodyPreview}`
+      );
+    }
+  } catch (e) {
+    return ok(`❌ HTTP fast-path threw for File #${fileNumber}: ${(e as Error).message}`);
   }
 
   const { browser, page, aspBase } = await getFiletracPage(args.company_index ?? 1);
