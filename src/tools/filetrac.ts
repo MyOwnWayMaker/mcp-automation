@@ -184,16 +184,20 @@ async function postFiletracNoteForm(
       ? `${aspBase}${action}`
       : `${aspBase}/system/${action.replace(/^\.?\/?/, "")}`;
 
-  // 4. Harvest all <input> defaults (skip checkboxes/radios — set explicitly)
+  // 4. Harvest all <input> defaults (skip checkboxes/radios — set explicitly).
+  // Captures BOTH quoted (value="0") and unquoted (value=0) attribute syntax.
   const formData: Record<string, string> = {};
   for (const m of formBlock.matchAll(/<input\b[^>]+>/gi)) {
     const tag = m[0];
-    const name = tag.match(/\bname\s*=\s*["']([^"']+)["']/i)?.[1];
-    if (!name) continue;
-    const type = (tag.match(/\btype\s*=\s*["']?([a-z]+)/i)?.[1] ?? "text").toLowerCase();
+    const name = tag.match(/\bname\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/i);
+    const nameVal = name?.[1] ?? name?.[2];
+    if (!nameVal) continue;
+    const type = (tag.match(/\btype\s*=\s*(?:["']([a-z]+)["']|([a-z]+))/i)?.[1] ??
+                  tag.match(/\btype\s*=\s*(?:["']([a-z]+)["']|([a-z]+))/i)?.[2] ?? "text").toLowerCase();
     if (type === "checkbox" || type === "radio" || type === "submit" || type === "button") continue;
-    const value = tag.match(/\bvalue\s*=\s*["']([^"']*)["']/i)?.[1] ?? "";
-    formData[name] = value;
+    const valueMatch = tag.match(/\bvalue\s*=\s*(?:["']([^"']*)["']|([^\s>]+))/i);
+    const value = valueMatch ? (valueMatch[1] ?? valueMatch[2] ?? "") : "";
+    formData[nameVal] = value;
   }
   // <textarea> defaults
   for (const m of formBlock.matchAll(/<textarea\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/textarea>/gi)) {
