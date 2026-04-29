@@ -80,10 +80,33 @@ async function getVoicePage(): Promise<{ browser: Browser; context: BrowserConte
   if (!session.storageState) {
     throw new Error("voice_session.json missing `storageState`. Re-run scripts/auth-voice.mjs.");
   }
-  const browser = await chromium.launch({ headless: true });
+  // Apply the same anti-detection flags that auth-voice.mjs uses, otherwise
+  // Google flags the headless Chromium as automation and the Voice long-poll
+  // (signaler-pa.clients6.google.com) silently refuses to deliver thread data.
+  // The page hydrates but never populates → after a timeout, Voice's app
+  // redirects to workspace.google.com/products/voice as a fallback.
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+    ],
+    ignoreDefaultArgs: ["--enable-automation"],
+  });
   const context = await browser.newContext({
     storageState: session.storageState as any,
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    viewport: { width: 1280, height: 800 },
+    locale: "en-US",
+    timezoneId: "America/Los_Angeles",
+  });
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    Object.defineProperty(navigator, "plugins", {
+      get: () => [{ name: "Chrome PDF Plugin" }, { name: "Chrome PDF Viewer" }, { name: "Native Client" }],
+    });
   });
   const page = await context.newPage();
   return { browser, context, page };
