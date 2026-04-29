@@ -969,32 +969,57 @@ function parseNotes(html: string, claimId: string): string {
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "");
 
-  const rows: string[] = [];
   const trMatches = clean.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
+
+  // FileTrac diary tables use a header row (date | author | category | edit)
+  // followed by one or more body rows (often <td colspan="N">note text</td>) that
+  // have NO date. Group each date-bearing header row with the non-date rows that
+  // follow it until the next header row.
+  type Entry = { header: string; body: string[] };
+  const entries: Entry[] = [];
+  let current: Entry | null = null;
 
   for (const tr of trMatches) {
     const cells = (tr.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [])
       .map(td => td.replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim())
       .filter(cell => cell.length > 0);
 
-    if (cells.length < 2) continue;
+    if (cells.length === 0) continue;
 
-    // REQUIRE a date pattern in at least one cell.
-    // Real diary entries always have a date (M/D/YYYY); form chrome (File #:, Note Category:,
-    // Characters left:) never does. This is the primary filter against form scaffolding.
     const hasDate = cells.some(c => DIARY_DATE_RE.test(c));
-    if (!hasDate) continue;
 
-    rows.push(cells.join(" | "));
+    if (hasDate) {
+      // Start a new entry
+      if (cells.length < 2) {
+        // Date-only row — still treat as a header and look for body in next rows
+        current = { header: cells.join(" | "), body: [] };
+        entries.push(current);
+        continue;
+      }
+      current = { header: cells.join(" | "), body: [] };
+      entries.push(current);
+    } else if (current) {
+      // Continuation row — body content for the previous entry.
+      // Skip rows that are only navigation/chrome (very short, single cell).
+      const text = cells.join(" ").trim();
+      // Drop obvious form chrome / nav strings
+      if (text.length < 2) continue;
+      if (/^(edit|delete|view|print|save|cancel|reply|x)$/i.test(text)) continue;
+      current.body.push(text);
+    }
   }
 
-  if (rows.length === 0) {
-    // No date-bearing rows found — return raw body text + signal for caller to show debug
+  if (entries.length === 0) {
     const bodyText = htmlToText(html);
     return `(table-parse-failed)\n${bodyText.substring(0, 6000)}`;
   }
 
-  return `Claim ${claimId} — Notes/Diary (${rows.length} entries):\n\n${rows.join("\n---\n")}`;
+  const formatted = entries.map(e => {
+    const bodyJoined = e.body.length > 0 ? `\n${e.body.join("\n")}` : "";
+    return `${e.header}${bodyJoined}`;
+  });
+
+  return `Claim ${claimId} — Notes/Diary (${entries.length} entries):\n\n${formatted.join("\n---\n")}`;
 }
 
 // Known FileTrac diary URL patterns to try in order
@@ -1093,16 +1118,7 @@ export async function filetracGetNotes(args: {
           // looksLikeNotesPage was too narrow (only form-field markers) and missed listing pages.
           const result = parseNotes(html, args.claim_id);
           if (hasNoteContent(result)) {
-            // Temporary: include a sample of source HTML around a real diary row
-            // ("( Edit )" only appears in adjuster diary entries).
-            const sampleStart = html.indexOf("( Edit )");
-            const sample = sampleStart >= 0
-              ? html.substring(Math.max(0, sampleStart - 2000), Math.min(html.length, sampleStart + 4000))
-              : html.substring(html.length - 6000);
-            return ok(
-              `[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result +
-              `\n\n=== Source HTML sample (~6KB around "( Edit )" — a real diary row) ===\n${sample}`
-            );
+            return ok(`[Source: fast-path | URL: ${fastAspBase}${url}]\n` + result);
           }
           diag.push(`  → no date rows ${looksLikeNotesPage(html) ? "(has form markers)" : "(no form markers)"}`);
           lastBody = result;
