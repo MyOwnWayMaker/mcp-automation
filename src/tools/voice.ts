@@ -191,41 +191,77 @@ export async function voiceListThreads(args: {
     const threads: Array<Record<string, unknown>> = await page.evaluate((max) => {
       const items = Array.from(document.querySelectorAll<HTMLElement>("gv-thread-list-item"));
       return items.slice(0, max).map((item, idx) => {
-        // The user-visible details live in .thread-details / .thread-info; the
-        // outer textContent also includes Material icon names ("check", "person")
-        // and a screen-reader pause sequence we don't want.
+        // The user-visible details live in .thread-details. The outer textContent
+        // also includes Material icon names ("check", "person") which we don't want.
         const detailsEl = item.querySelector<HTMLElement>(".thread-details, .thread-info");
-        const detailsText = (detailsEl?.innerText || item.innerText || "")
-          .replace(/‪|‬/g, "") // strip LRE/PDF directional marks
-          .replace(/\s+/g, " ").trim();
+        let detailsText = (detailsEl?.innerText || item.innerText || "")
+          .replace(/[‪‬‫‭‮]/g, "")          // strip Unicode directional marks
+          .replace(/ | /g, " ")     // narrow no-break space, nbsp → space
+          .replace(/\s+/g, " ")
+          .trim();
 
-        // Best signal for the contact name/number: aria-label on the clickable container
-        const button = item.querySelector<HTMLElement>('[role="button"]');
-        const ariaLabel = button?.getAttribute("aria-label") || item.getAttribute("aria-label") || "";
+        // Voice's accessible label spells out digits for screen readers:
+        //   "(407) 310-2679 4 0 7 3 1 0 2 6 7 9"
+        // The spelled run must NOT start mid-phone-number. The lookbehind ensures
+        // the first digit of the run is not preceded by another digit (otherwise
+        // the trailing digit of the visible phone number gets consumed).
+        const detailsClean = detailsText
+          .replace(/(?<!\d)(?:\d\s){4,}\d/g, "")  // strip spelled-digit runs (4+ pairs covers 5-digit codes too)
+          .replace(/\s+/g, " ")
+          .replace(/,\s*\./g, ".")                // ", ." → "."
+          .replace(/\s+\./g, ".")
+          .replace(/\s+,/g, ",")
+          .trim();
 
-        // Look for a Material chip indicating unread
-        const unread = !!item.querySelector('[class*="unread"]') ||
-                       /unread/i.test(item.getAttribute("aria-label") || "");
+        // Unread marker is appended at the end of the accessible label as " . Unread ."
+        const unread = / Unread\s*\.?\s*$/i.test(detailsText) ||
+                       !!item.querySelector('[class*="unread"]');
 
-        // Heuristic split on the details text:
-        //   "<contact>  <preview text>  <timestamp>"
-        // Last token that looks like a timestamp wins; everything before the timestamp
-        // is contact + preview (Voice runs them together with separators).
-        const tsMatch = detailsText.match(/((?:\d{1,2}:\d{2}\s?[AP]M)|(?:Yesterday)|(?:[A-Z][a-z]{2}\s\d{1,2})|(?:\d{1,2}\/\d{1,2}\/\d{2,4}))\s*$/);
-        const timestamp = tsMatch ? tsMatch[1] : null;
-        const beforeTs = tsMatch ? detailsText.slice(0, tsMatch.index).trim() : detailsText;
+        // Full timestamp pattern Voice uses: "Wednesday, April 29 2026, 8:15 AM"
+        const fullTsRe = /(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\s+\d{4},?\s+\d{1,2}:\d{2}\s?(AM|PM)/i;
+        const fullTs = detailsClean.match(fullTsRe)?.[0] || null;
+        // Short timestamp at the head of the row: "8:15 AM", "Tue", "Yesterday", "4/27"
+        const shortTsRe = /(?:^|\s)((?:\d{1,2}:\d{2}\s?[AP]M)|(?:Yesterday|Today)|(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)|(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?))\s+/;
+        const shortTsMatch = detailsClean.match(shortTsRe);
+        const shortTs = shortTsMatch?.[1] || null;
+
+        // The contact display is everything BEFORE the short timestamp marker.
+        const contact = ((shortTsMatch && shortTsMatch.index !== undefined)
+          ? detailsClean.slice(0, shortTsMatch.index).trim()
+          : detailsClean.split(".")[0].trim()
+        ).replace(/[,\s.]+$/, "");
+
+        // The preview text sits between the short timestamp and the full timestamp:
+        //   <contact> <shortTs> <preview text> <fullTs> [Unread]
+        let preview: string | null = null;
+        if (shortTsMatch && shortTsMatch.index !== undefined) {
+          const afterShort = detailsClean.slice(shortTsMatch.index + shortTsMatch[0].length);
+          const stop = fullTs ? afterShort.indexOf(fullTs) : -1;
+          preview = (stop >= 0 ? afterShort.slice(0, stop) : afterShort)
+            .replace(/\s*\.\s*$/, "")
+            .replace(/^\s*\.\s*/, "")
+            .trim() || null;
+        }
+
+        // Synthesize thread_id from the FIRST phone number in the contact display.
+        // Voice's thread URL pattern is ?itemId=t.+<E164>. For US numbers (10 digits)
+        // we prepend +1. Group threads have a UUID instead — those will be null here
+        // and need click-based navigation.
+        const firstPhone = (contact || "").match(/\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4}/)?.[0] ?? null;
+        const phoneDigits = firstPhone ? firstPhone.replace(/\D/g, "") : null;
+        const threadId = phoneDigits
+          ? `t.+${phoneDigits.length === 10 ? "1" + phoneDigits : phoneDigits}`
+          : null;
 
         return {
-          // Voice navigates via Angular Router — there's no stable thread ID in
-          // the DOM until you click. For voice_get_thread, callers should pass
-          // `contact` (matched by aria_label/details_text) which makes us click.
-          thread_id: null,
+          thread_id: threadId,              // synthesized for direct ?itemId= navigation
           index: idx,
-          contact: ariaLabel || null,
-          details_text: detailsText.slice(0, 300),
-          preview_and_contact: beforeTs.slice(0, 200),
-          last_activity_text: timestamp,
+          contact: contact || null,
+          last_activity: fullTs,            // ISO-style full timestamp
+          last_activity_short: shortTs,     // Voice's short format ("Tue", "8:15 AM", etc.)
+          preview,
           unread,
+          raw: detailsClean.slice(0, 400),  // keep raw for fallback / debugging
         };
       });
     }, limit * 2);
@@ -280,10 +316,13 @@ export async function voiceGetThread(args: {
 
   const { browser, page } = await getVoicePage();
   try {
-    // Prefer direct thread URL when we have it
+    // Prefer direct thread URL when we have it. Voice uses ?itemId=<id>
+    // where id is typically "t.+<E164phone>" (e.g. "t.+19097092452") for SMS
+    // threads, or a UUID for group threads. Caller can pass either.
     if (args.thread_id) {
+      const itemId = args.thread_id.startsWith("t.") ? args.thread_id : `t.${args.thread_id}`;
       await page.goto(
-        `https://voice.google.com/messages/t/${encodeURIComponent(args.thread_id)}`,
+        `https://voice.google.com/messages?itemId=${encodeURIComponent(itemId)}`,
         { waitUntil: "domcontentloaded", timeout: 30_000 },
       );
     } else {
@@ -348,10 +387,10 @@ export async function voiceGetThread(args: {
       );
     }
 
-    // Wait for messages (Voice loads them via long-poll). Voice's per-thread
-    // markup uses gv-message-list / gv-text-message inside cdk-virtual-scroll-viewport.
-    // We also accept a broader set of likely selectors.
-    const messageSelector = "gv-text-message, gv-message-bubble, gv-message-thread-message, [data-test-id='message-item'], [role='article']";
+    // Voice's per-thread markup uses <gv-message-list> wrapping <gv-message-item>
+    // entries inside a cdk-virtual-scroll-viewport. (Confirmed via diag dump:
+    // custom_element_tags = gv-message-list, gv-message-item, gv-message-entry, ...)
+    const messageSelector = "gv-message-item";
     let getThreadWaitErr: string | null = null;
     try {
       await page.waitForSelector(messageSelector, { timeout: 30_000 });
@@ -394,37 +433,82 @@ export async function voiceGetThread(args: {
     const messages = await page.evaluate((args: { sel: string; max: number }) => {
       const out: Array<Record<string, unknown>> = [];
       const els = Array.from(document.querySelectorAll<HTMLElement>(args.sel));
+
+      // Voice's per-message text concats:
+      //   "[date_hdr?] Message from [you|<phone>], <body>, <full_timestamp>. <icon> <body> <icon>"
+      // The body appears twice (aria-label + visible). The full timestamp is
+      // always "DAY, MONTH DD YYYY, HH:MM AM/PM".
+      const tsRe = /(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}\s+\d{4},?\s+\d{1,2}:\d{2}\s?(AM|PM)/i;
+      // Lazy zero-or-more — must allow empty capture, since stripping the spelled-digit
+      // run leaves inbound senders blank: "Message from , <body>".
+      const fromRe = /Message from ([^,]*?),/;
+      // Inbound messages are prefixed with a header like "(909) 709-2452 • Mar 4, 10:32 AM"
+      // OR "(909) 709-2452 • Tue 3:01 PM" (relative dates this week) OR "• 8:24 AM" (today).
+      // Match phone + bullet + arbitrary date/time text, stopping at "Message from".
+      const inboundHeaderRe = /^(\(?\d{3}\)?\s*\d{3}[\s-]\d{4})\s*[•·][^]{1,80}?(?=Message from)/;
+
       for (const el of els.slice(0, args.max)) {
-        const text = (el.innerText || el.textContent || "").replace(/‪|‬/g, "").trim();
-        const cls = (el.className?.toString() || "");
-        const ariaLabel = el.getAttribute("aria-label") || "";
-        const tsAttr = el.querySelector("[data-tooltip], time, [datetime], .timestamp, [class*='time']");
-        const tsTooltip = tsAttr?.getAttribute("data-tooltip") ||
-                          tsAttr?.getAttribute("datetime") ||
-                          (tsAttr?.textContent || "").trim();
-        const direction = /outbound|sent|outgoing|self|me\b/i.test(cls + " " + ariaLabel) ? "outbound"
-                       : /inbound|received|incoming|other|them/i.test(cls + " " + ariaLabel) ? "inbound"
-                       : null;
-        const hasMedia = !!el.querySelector('img:not([alt=""]), video, audio, [class*="attachment"], [class*="media"]');
+        let text = (el.innerText || el.textContent || "")
+          .replace(/[‪‬‫‭‮]/g, "")
+          .replace(/ | /g, " ")
+          .replace(/(?<!\d)(?:\d\s){4,}\d/g, "")  // strip spelled-digit runs (screen-reader sequences)
+          .replace(/\s+/g, " ")
+          .trim();
+
+        // Inbound messages have a leading "PHONE • DATE TIME " header — capture
+        // the phone (the actual sender) and strip the header from the text.
+        const inboundHeaderMatch = text.match(inboundHeaderRe);
+        const inboundSenderPhone = inboundHeaderMatch?.[1] || null;
+        if (inboundHeaderMatch) {
+          text = text.slice(inboundHeaderMatch[0].length);
+        }
+
+        const fromMatch = text.match(fromRe);
+        const fromText = (fromMatch?.[1] || "").trim();
+        const direction = fromMatch
+          ? (/^you$/i.test(fromText) ? "outbound" : "inbound")
+          : (inboundSenderPhone ? "inbound" : null);
+
+        const tsMatch = text.match(tsRe);
+        const timestampText = tsMatch?.[0] || null;
+        const tsParsed = timestampText ? Date.parse(timestampText) : NaN;
+        const timestampIso = Number.isNaN(tsParsed) ? null : new Date(tsParsed).toISOString();
+
+        // Body sits between "Message from X, " and the long timestamp.
+        let body = "";
+        if (fromMatch && fromMatch.index !== undefined) {
+          const after = text.slice(fromMatch.index + fromMatch[0].length).trim();
+          const stop = timestampText ? after.indexOf(timestampText) : -1;
+          body = (stop >= 0 ? after.slice(0, stop) : after)
+            .replace(/,\s*$/, "")
+            .trim();
+        } else {
+          body = text;
+        }
+
+        // Detect non-emoji media: real images (alt non-empty AND not just emoji),
+        // audio, video, or explicit attachment containers. Pure emoji messages are
+        // text — Voice still wraps them in <img> for some platforms but with empty alt.
+        const realMediaEl = el.querySelector(
+          'img[alt]:not([alt=""]):not([alt~="emoji"]), video, audio, [class*="attachment"]:not([class*="media-icon"])'
+        );
+        const hasMedia = !!realMediaEl;
+
+        const senderResolved = direction === "outbound" ? "you" : (inboundSenderPhone || fromText || null);
+
         out.push({
           direction,
-          timestamp_text: tsTooltip || null,
-          aria_label: ariaLabel || null,
-          body: text.split(/\n/).filter(Boolean).join(" ").slice(0, 4000),
-          class_hint: cls.slice(0, 200) || null,
+          sender: senderResolved,
+          timestamp_text: timestampText,
+          timestamp_iso: timestampIso,
+          body: body.slice(0, 4000),
           has_media: hasMedia,
         });
       }
       return out;
     }, { sel: messageSelector, max: maxMessages });
 
-    const normalized = messages.map(m => {
-      const t = typeof m.timestamp_text === "string" ? Date.parse(m.timestamp_text) : NaN;
-      return {
-        ...m,
-        timestamp_iso: Number.isNaN(t) ? null : new Date(t).toISOString(),
-      };
-    });
+    const normalized = messages;
 
     const ordered = order === "newest_first" ? [...normalized].reverse() : normalized;
 
