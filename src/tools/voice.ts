@@ -90,18 +90,33 @@ async function getVoicePage(): Promise<{ browser: Browser; context: BrowserConte
 }
 
 /**
- * Confirm we are signed in. Returns true if the URL stayed on voice.google.com
- * after navigating, false if we got bounced to accounts.google.com.
+ * Confirm we are on a logged-in Voice page. Returns a structured result so
+ * callers can surface WHY they think we're not signed in (URL pattern,
+ * visible sign-in CTA, etc.).
  */
-async function ensureSignedIn(page: Page): Promise<boolean> {
+async function ensureSignedIn(page: Page): Promise<{ ok: boolean; reason?: string; url: string }> {
   const url = page.url();
-  if (url.includes("accounts.google.com")) return false;
-  if (!url.includes("voice.google.com")) return false;
-  // Voice's "Sign in" landing page also sits on voice.google.com but renders
-  // a sign-in CTA. Detect that by looking for a sign-in button.
-  const signInVisible = await page.locator('a[href*="accounts.google.com"], button:has-text("Sign in")')
-    .first().isVisible({ timeout: 1000 }).catch(() => false);
-  return !signInVisible;
+  if (url.includes("accounts.google.com")) {
+    return { ok: false, reason: "redirected to accounts.google.com (cookies not accepted)", url };
+  }
+  if (url.includes("workspace.google.com/products/voice")) {
+    return { ok: false, reason: "redirected to workspace.google.com — Voice not enabled for this account", url };
+  }
+  if (!url.includes("voice.google.com")) {
+    return { ok: false, reason: `unexpected URL after navigation`, url };
+  }
+  // The signed-out landing has a visible Sign-in CTA in the page heading.
+  // The signed-in inbox does NOT — it has the actual messages UI. Be specific:
+  // role=link or role=button with name "Sign in" (not just any link to accounts.google.com,
+  // since the logged-in account-switcher menu also points at accounts.google.com).
+  const signInLink = await page.getByRole("link", { name: /^Sign in/i }).first()
+    .isVisible({ timeout: 800 }).catch(() => false);
+  const signInBtn = await page.getByRole("button", { name: /^Sign in/i }).first()
+    .isVisible({ timeout: 800 }).catch(() => false);
+  if (signInLink || signInBtn) {
+    return { ok: false, reason: "Sign-in CTA visible — session not active on voice.google.com", url };
+  }
+  return { ok: true, url };
 }
 
 /** Normalize a phone number to digits only (drops +, spaces, dashes, parens). */
@@ -127,8 +142,14 @@ export async function voiceListThreads(args: {
     await page.goto("https://voice.google.com/u/0/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForTimeout(2500);
 
-    if (!(await ensureSignedIn(page))) {
-      return ok("unauthenticated: Voice session expired or signed out. Re-run scripts/auth-voice.mjs.");
+    const auth = await ensureSignedIn(page);
+    if (!auth.ok) {
+      return ok(
+        `unauthenticated: ${auth.reason}\n` +
+        `landed on: ${auth.url}\n` +
+        `Re-run scripts/auth-voice.mjs to refresh the session, then push the new compact JSON to Railway:\n` +
+        `  Get-Content voice_session.compact.json -Raw | railway variables --set-from-stdin VOICE_SESSION_JSON`
+      );
     }
 
     // Voice renders threads as <gv-thread-item> custom elements (or plain divs
@@ -207,8 +228,11 @@ export async function voiceGetThread(args: {
       // Look up by contact: open inbox and click the matching thread
       await page.goto("https://voice.google.com/u/0/messages", { waitUntil: "domcontentloaded", timeout: 30_000 });
       await page.waitForTimeout(2000);
-      if (!(await ensureSignedIn(page))) {
-        return ok("unauthenticated: Voice session expired or signed out. Re-run scripts/auth-voice.mjs.");
+      const auth0 = await ensureSignedIn(page);
+      if (!auth0.ok) {
+        return ok(
+          `unauthenticated: ${auth0.reason}\nlanded on: ${auth0.url}\nRe-run scripts/auth-voice.mjs.`
+        );
       }
       const needle = args.contact!.trim();
       const isPhone = /\d{7,}/.test(digitsOnly(needle));
@@ -223,8 +247,11 @@ export async function voiceGetThread(args: {
       await page.waitForTimeout(1500);
     }
 
-    if (!(await ensureSignedIn(page))) {
-      return ok("unauthenticated: Voice session expired or signed out. Re-run scripts/auth-voice.mjs.");
+    const auth1 = await ensureSignedIn(page);
+    if (!auth1.ok) {
+      return ok(
+        `unauthenticated: ${auth1.reason}\nlanded on: ${auth1.url}\nRe-run scripts/auth-voice.mjs.`
+      );
     }
 
     // Scroll the message list to the top to force-load full history.
