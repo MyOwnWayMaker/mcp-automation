@@ -1096,15 +1096,36 @@ export async function filetracGetNotes(args: {
           }
         }
         // File # known + cookies valid + no parseable notes anywhere.
-        // Don't fall through to Playwright (it hangs on Railway). Surface body text.
+        // Don't fall through to Playwright (it hangs on Railway). Surface body text +
+        // chunks of claimView HTML around date patterns (diary entries are M/D/YYYY).
         const bodyDump = lastBody
-          ? `\n=== Body text snippet from ${lastUrl} (parser missed structure) ===\n${lastBody.substring(0, 4000)}\n`
+          ? `\n=== Body text snippet from ${lastUrl} (parser missed structure) ===\n${lastBody.substring(0, 2500)}\n`
           : "";
+        let cvDump = "";
+        if (claimViewHtml) {
+          const dateRe = /\b\d{1,2}\/\d{1,2}\/202\d\b/g;
+          const seen = new Set<number>();
+          const matches: string[] = [];
+          let dm: RegExpExecArray | null;
+          let mc = 0;
+          while ((dm = dateRe.exec(claimViewHtml)) !== null && mc < 8) {
+            // Dedupe overlapping context blocks
+            const block = Math.floor(dm.index / 1200);
+            if (seen.has(block)) continue;
+            seen.add(block);
+            const start = Math.max(0, dm.index - 600);
+            const end = Math.min(claimViewHtml.length, dm.index + 600);
+            matches.push(`--- date "${dm[0]}" @offset ${dm.index} ---\n${claimViewHtml.substring(start, end)}`);
+            mc++;
+          }
+          cvDump = `\n=== claimView HTML chunks around date patterns (${matches.length} unique blocks of ${claimViewHtml.length}c total) ===\n${matches.join("\n\n")}\n`;
+        }
         return ok(
           `=== FileTrac Notes — claim ${args.claim_id} (File #${fileNum}) — fast-path ===\n` +
           `No diary entries parsed. If you expect entries here, run filetrac_refresh_session and retry.\n\n` +
           `Diag: ${diag.join(" | ")}\n` +
-          bodyDump
+          bodyDump +
+          cvDump
         );
       }
     } else {
