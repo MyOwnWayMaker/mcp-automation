@@ -136,6 +136,58 @@ async function fetchAspPage(aspBase: string, aspCookies: string, path: string): 
 }
 
 /**
+ * Debug tool: fetch any FileTrac URL with the cached ASP cookies and return
+ * either the full HTML (truncated) or only chunks around a search string.
+ * Useful for reverse-engineering markup the parser hasn't seen yet.
+ */
+export async function filetracDumpHtml(args: {
+  path: string;
+  search?: string;
+  company_index?: number;
+  context_chars?: number;
+  max_matches?: number;
+}): Promise<CallToolResult> {
+  const { aspBase, aspCookies } = getAspCredentials(args.company_index);
+  if (!aspBase || !aspCookies) {
+    return ok("filetrac_dump_html: no aspCredentials. Run filetrac_refresh_session first.");
+  }
+  const path = args.path.startsWith("/") ? args.path : `/${args.path}`;
+  const html = await fetchAspPage(aspBase, aspCookies, path);
+  if (!html) {
+    return ok(`filetrac_dump_html: fetch returned null for ${path} (login redirect or too short).`);
+  }
+
+  if (args.search) {
+    const ctx = args.context_chars ?? 1500;
+    const max = args.max_matches ?? 10;
+    const matches: string[] = [];
+    const lcHtml = html.toLowerCase();
+    const lcSearch = args.search.toLowerCase();
+    let idx = lcHtml.indexOf(lcSearch);
+    let n = 0;
+    while (idx !== -1 && n < max) {
+      const start = Math.max(0, idx - Math.floor(ctx / 2));
+      const end = Math.min(html.length, idx + args.search.length + Math.floor(ctx / 2));
+      matches.push(`--- Match #${n + 1} at offset ${idx} ---\n${html.substring(start, end)}`);
+      idx = lcHtml.indexOf(lcSearch, idx + 1);
+      n++;
+    }
+    if (matches.length === 0) {
+      return ok(`filetrac_dump_html: "${args.search}" not found in ${html.length}c HTML at ${aspBase}${path}`);
+    }
+    return ok(
+      `${aspBase}${path} — ${html.length}c, ${matches.length} match(es) for "${args.search}":\n\n` +
+      matches.join("\n\n")
+    );
+  }
+
+  return ok(
+    `${aspBase}${path} — full HTML, ${html.length}c (showing first 15000):\n\n` +
+    html.substring(0, 15000)
+  );
+}
+
+/**
  * HTTP fast-path note submit — bypasses Playwright by GETting the form,
  * harvesting hidden inputs, then POSTing with cached cookies. Used when
  * Chromium is unreliable (e.g., on Railway).
