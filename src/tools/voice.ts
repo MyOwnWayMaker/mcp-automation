@@ -46,7 +46,8 @@ function loadVoiceSession(): VoiceSession {
   // instead of letting JSON.parse blow up on backslashes.
   const fromEnv = process.env.VOICE_SESSION_JSON;
   if (fromEnv) {
-    const trimmed = fromEnv.trim();
+    // Strip BOM that PowerShell pipelines sometimes prepend, then trim.
+    const trimmed = fromEnv.replace(/^﻿/, "").trim();
     if (trimmed.startsWith("{")) {
       return JSON.parse(trimmed);
     }
