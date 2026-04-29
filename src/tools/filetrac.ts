@@ -144,8 +144,8 @@ async function postFiletracNoteForm(
   aspBase: string,
   aspCookies: string,
   fileNumber: string,
-  args: { note: string; category?: string; visible_to_client?: boolean }
-): Promise<{ ok: boolean; status: number; bodyPreview: string; finalUrl?: string; formDump?: string; error?: string; categoryResolvedTo?: string }> {
+  args: { note: string; category?: string; visible_to_client?: boolean; dry_run?: boolean }
+): Promise<{ ok: boolean; status: number; bodyPreview: string; finalUrl?: string; formDump?: string; error?: string; categoryResolvedTo?: string; sentBody?: string; dryRun?: boolean; categoryOptions?: Array<{ value: string; label: string }> }> {
   const formPath = `/system/quickNotes.asp?claimFID=${fileNumber}`;
   const ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36";
 
@@ -216,24 +216,42 @@ async function postFiletracNoteForm(
   formData["claimFileID"] = fileNumber;
   formData["msgText"] = args.note;
 
+  // Always extract msgCatID options (for dry-run report + label matching)
+  const catSelInner = formBlock.match(/<select\b[^>]*\bname=["']?msgCatID["']?[^>]*>([\s\S]*?)<\/select>/i)?.[1] ?? "";
+  const categoryOptions = [...catSelInner.matchAll(/<option\b[^>]*\bvalue=["']([^"']*)["'][^>]*>([\s\S]*?)<\/option>/gi)]
+    .map(o => ({
+      value: o[1],
+      label: o[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim(),
+    }));
+
   // Resolve category by label → option value
   let categoryResolvedTo: string | undefined;
   if (args.category) {
-    const catSel = formBlock.match(/<select\b[^>]*\bname=["']?msgCatID["']?[^>]*>([\s\S]*?)<\/select>/i)?.[1];
-    if (catSel) {
-      const target = args.category.toLowerCase();
-      const opts = [...catSel.matchAll(/<option\b[^>]*\bvalue=["']([^"']*)["'][^>]*>([\s\S]*?)<\/option>/gi)];
-      const exact = opts.find(o => o[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim().toLowerCase() === target);
-      const partial = exact ?? opts.find(o => o[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim().toLowerCase().includes(target));
-      if (partial) {
-        formData["msgCatID"] = partial[1];
-        categoryResolvedTo = `${partial[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim()} (value=${partial[1]})`;
-      }
+    const target = args.category.toLowerCase();
+    const exact = categoryOptions.find(o => o.label.toLowerCase() === target);
+    const partial = exact ?? categoryOptions.find(o => o.label.toLowerCase().includes(target));
+    if (partial) {
+      formData["msgCatID"] = partial.value;
+      categoryResolvedTo = `${partial.label} (value=${partial.value})`;
     }
   }
 
   // Visible to client
   if (args.visible_to_client) formData["msgCustomerView"] = "1";
+
+  // Dry-run: don't actually POST — return form structure + what we'd send
+  if (args.dry_run) {
+    return {
+      ok: true,
+      status: 0,
+      bodyPreview: "",
+      dryRun: true,
+      categoryResolvedTo,
+      categoryOptions,
+      sentBody: new URLSearchParams(formData).toString().substring(0, 2000),
+      formDump: formBlock.substring(0, 5000),
+    };
+  }
 
   // 6. POST
   const body = new URLSearchParams(formData).toString();
@@ -250,12 +268,17 @@ async function postFiletracNoteForm(
     redirect: "follow",
   });
   const postBody = await postRes.text();
+  const success = postRes.ok && postRes.status >= 200 && postRes.status < 400;
   return {
-    ok: postRes.ok,
+    ok: success,
     status: postRes.status,
     bodyPreview: postBody.substring(0, 1500),
     finalUrl: postRes.url,
     categoryResolvedTo,
+    // Always include form dump + sent body on failure for debugging
+    formDump: success ? undefined : formBlock.substring(0, 5000),
+    error: success ? undefined : `POST returned ${postRes.status}`,
+    sentBody: success ? undefined : body.substring(0, 2000),
   };
 }
 
@@ -650,6 +673,7 @@ export async function filetracAddNote(args: {
   category?: string;
   visible_to_client?: boolean;
   company_index?: number;
+  dry_run?: boolean;
 }): Promise<CallToolResult> {
   if (!args.file_number && !args.claim_id) {
     return ok("filetrac_add_note requires either file_number or claim_id.");
@@ -701,8 +725,22 @@ export async function filetracAddNote(args: {
         note: args.note,
         category: args.category,
         visible_to_client: args.visible_to_client,
+        dry_run: args.dry_run,
       });
       const noteSnippet = args.note.substring(0, 120) + (args.note.length > 120 ? "..." : "");
+      if (result.dryRun) {
+        const optList = (result.categoryOptions ?? [])
+          .map(o => `  ${o.value.padEnd(8)} ${o.label}`).join("\n") || "  (no options found)";
+        return ok(
+          `🔍 DRY RUN — would POST to File #${fileNumber} (no submit performed)\n\n` +
+          `Category requested: "${args.category ?? "(none)"}" → ${result.categoryResolvedTo ?? "(no match)"}\n` +
+          `Visible to client: ${args.visible_to_client ? "yes" : "no"}\n` +
+          `Note: "${noteSnippet}"\n\n` +
+          `--- Available msgCatID options ---\n${optList}\n\n` +
+          `--- Sent body that WOULD be submitted ---\n${result.sentBody ?? "(none)"}\n\n` +
+          `--- Form HTML (first 5000 chars) ---\n${result.formDump ?? "(none)"}`
+        );
+      }
       if (result.ok && result.status >= 200 && result.status < 400) {
         return ok(
           `✅ Note submitted via HTTP fast-path — File #${fileNumber}\n` +
@@ -721,7 +759,8 @@ export async function filetracAddNote(args: {
         `Status: ${result.status} | Error: ${result.error ?? "(see body)"}\n` +
         `Final URL: ${result.finalUrl ?? "(none)"}\n` +
         `Category attempted: ${args.category ?? "(none)"} → resolved: ${result.categoryResolvedTo ?? "(no match)"}\n\n` +
-        `--- Form HTML dump (first 3000 chars) ---\n${result.formDump ?? "(no form dump)"}\n\n` +
+        `--- Sent POST body (first 2000 chars) ---\n${result.sentBody ?? "(no sent body)"}\n\n` +
+        `--- Form HTML dump (first 5000 chars) ---\n${result.formDump ?? "(no form dump)"}\n\n` +
         `--- POST response body preview ---\n${result.bodyPreview}`
       );
     }
