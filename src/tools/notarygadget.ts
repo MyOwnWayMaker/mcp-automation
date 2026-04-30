@@ -818,52 +818,60 @@ export async function notarygadgetGetPayments(args: {
     // Scrape payments. Try several row patterns — NotaryGadget's DOM
     // for signings uses tr[id^="trSigning"], so payment rows are most
     // likely tr[id^="trPayment"] or tr[id^="trSPmt"].
+    // Payment rows live at tr[onclick*="EditPayment("] inside #divSigningPayments,
+    // with three td.tdWhiteWithLines cells: date, check #, amount (+ trash icon).
+    // The "New Payment" button is a separate div with EditPayment('New') — we
+    // exclude it by requiring an existing payment id in the onclick (any digit).
     const result = await page.evaluate(() => {
-      const tryPatterns = [
-        'tr[id^="trPayment"]',
-        'tr[id^="trSPmt"]',
-        'tr[id^="trSigningPayment"]',
-        'div[onclick*="EditPayment"]',
-        'tr[onclick*="EditPayment"]',
-      ];
-      for (const sel of tryPatterns) {
-        const rows = Array.from(document.querySelectorAll(sel));
-        if (rows.length > 0) {
-          return {
-            matched: sel,
-            rows: rows.map(r => ({
-              id: (r as HTMLElement).id || "",
-              text: (r as HTMLElement).innerText
-                .trim()
-                .replace(/\t+/g, " | ")
-                .replace(/\n+/g, " | ")
-                .replace(/\s{2,}/g, " "),
-              onclick: (r as HTMLElement).getAttribute("onclick") || "",
-            })),
-          };
-        }
-      }
-      // No matching pattern — return body text snippet so caller can iterate
+      const allRows = Array.from(document.querySelectorAll('tr[onclick*="EditPayment"]'));
+      const paymentRows = allRows.filter(r => {
+        const oc = r.getAttribute("onclick") || "";
+        // Exclude EditPayment('New') and similar non-numeric ids
+        return /EditPayment\(\s*['"]?\d/.test(oc);
+      });
+
+      const parsed = paymentRows.map(r => {
+        const cells = Array.from(r.querySelectorAll("td.tdWhiteWithLines"));
+        const cellText = cells.map(c => (c as HTMLElement).innerText.trim());
+        // Pull payment id out of the onclick: EditPayment('12345')
+        const oc = r.getAttribute("onclick") || "";
+        const idMatch = oc.match(/EditPayment\(\s*['"]?(\d+)/);
+        return {
+          payment_id: idMatch ? idMatch[1] : "",
+          date: cellText[0] || "",
+          check_number: cellText[1] || "",
+          amount: cellText[2] || "",
+          raw: (r as HTMLElement).innerText
+            .trim()
+            .replace(/\s+/g, " "),
+        };
+      });
+
       return {
-        matched: null as string | null,
-        rows: [] as { id: string; text: string; onclick: string }[],
-        fallbackText: document.body.innerText
-          .replace(/\s+/g, " ")
-          .substring(0, 1500),
+        all_match_count: allRows.length,
+        payment_count: parsed.length,
+        rows: parsed,
+        fallbackText: parsed.length === 0
+          ? document.body.innerText.replace(/\s+/g, " ").substring(0, 1500)
+          : "",
       };
     });
 
-    if (!result.matched || result.rows.length === 0) {
+    if (result.payment_count === 0) {
       return ok(
-        `No payments found via known selectors for signing ${args.signing_id}.\n` +
-        `(Either no payments exist, or DOM has changed — re-run with dump_html: true to inspect.)\n\n` +
-        `Page text snippet:\n${(result as any).fallbackText ?? ""}`
+        `No payments found for signing ${args.signing_id}.\n` +
+        `(${result.all_match_count} EditPayment row(s) total — likely just the "New Payment" button, meaning no payments have been logged.)\n\n` +
+        `If you expected payments here, re-run with dump_html: true.\n` +
+        `Page snippet:\n${result.fallbackText}`
       );
     }
 
+    const lines = result.rows.map(r =>
+      `  • ${r.date}  |  $${r.amount}${r.check_number ? `  |  Check #${r.check_number}` : ""}  (payment_id ${r.payment_id})`
+    );
     return ok(
-      `Payments for signing ${args.signing_id} (matched ${result.matched}, ${result.rows.length} row${result.rows.length === 1 ? "" : "s"}):\n\n` +
-      result.rows.map(r => `[${r.id}] ${r.text}`).join("\n")
+      `Payments for signing ${args.signing_id} — ${result.payment_count} found:\n\n` +
+      lines.join("\n")
     );
   } finally {
     await browser.close();
