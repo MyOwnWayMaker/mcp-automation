@@ -32,7 +32,7 @@ import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, n
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime, gmailNotaryFindEmail, gmailNotaryGetEmail, gmailNotaryReplyToEmail, gmailNotaryArchiveEmail } from "./tools/notary.js";
-import { notarygadgetCreateSigning, notarygadgetUpdateSigning, notarygadgetCompleteSigning, notarygadgetEnterMileage, notarygadgetRecordPayment, notarygadgetGetSignings, notarygadgetSendInvoice, notarygadgetDeleteSigning } from "./tools/notarygadget.js";
+import { notarygadgetCreateSigning, notarygadgetUpdateSigning, notarygadgetCompleteSigning, notarygadgetEnterMileage, notarygadgetRecordPayment, notarygadgetGetSignings, notarygadgetGetPayments, notarygadgetSendInvoice, notarygadgetDeleteSigning } from "./tools/notarygadget.js";
 import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense, filetracGetNotes, filetracBulkGetClaims, filetracBulkAddNote, filetracListDocuments, filetracDownloadReport, filetracRefreshSession, filetracDumpHtml } from "./tools/filetrac.js";
 import { agentRollUpLogs } from "./tools/local.js";
 import { xactListAssignments, xactGetAssignment, xactUpdateDates, xactUpdateWorkflowStatus, xactAddNote, xactGetNotes, xactFindAssignmentByClaim, xactFindAssignmentByName } from "./tools/xactanalysis.js";
@@ -181,6 +181,7 @@ const TOOLS: Tool[] = [
   { name: "notarygadget_enter_mileage", description: "Record mileage for a signing (defaults to no mileage if miles not specified)", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (leave blank for most recent)" }, miles: { type: "number", description: "Miles driven (omit or set to 0 to record 'no mileage')" } }, required: [] } },
   { name: "notarygadget_record_payment", description: "Record a payment received for a signing in NotaryGadget", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (leave blank for most recent)" }, amount: { type: "number", description: "Payment amount" }, payment_date: { type: "string", description: "YYYY-MM-DD (defaults to today)" }, check_number: { type: "string", description: "Check number (optional)" } }, required: ["amount"] } },
   { name: "notarygadget_get_signings", description: "Get recent signing orders from NotaryGadget", inputSchema: { type: "object", properties: { max_results: { type: "number" }, status: { type: "string", enum: ["pending", "completed", "all"] } }, required: [] } },
+  { name: "notarygadget_get_payments", description: "Read all payments logged for a NotaryGadget signing — returns date, amount, and check number for each payment so you can diagnose duplicate-payment alerts and reconcile AR. Set dump_html: true if scraping returns nothing, to inspect the DOM.", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (required)" }, dump_html: { type: "boolean", description: "Diagnostic: dump payment-panel HTML instead of parsed rows" } }, required: ["signing_id"] } },
   { name: "notarygadget_send_invoice", description: "Email the invoice for a NotaryGadget signing to the customer", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (leave blank for most recent)" }, to_email: { type: "string", description: "Override recipient email (optional — uses customer email on file by default)" }, subject: { type: "string", description: "Override email subject (optional)" }, body: { type: "string", description: "Override email body (optional)" } }, required: [] } },
   { name: "notarygadget_delete_signing", description: "Permanently delete a signing from NotaryGadget", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID to delete (required)" } }, required: ["signing_id"] } },
 
@@ -329,6 +330,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notarygadget_enter_mileage": return notarygadgetEnterMileage(args as any);
     case "notarygadget_record_payment": return notarygadgetRecordPayment(args as any);
     case "notarygadget_get_signings": return notarygadgetGetSignings(args as any);
+    case "notarygadget_get_payments": return notarygadgetGetPayments(args as any);
     case "notarygadget_send_invoice": return notarygadgetSendInvoice(args as any);
     case "notarygadget_delete_signing": return notarygadgetDeleteSigning(args as any);
     case "qb_find_customer": return qbFindCustomer(args as any);

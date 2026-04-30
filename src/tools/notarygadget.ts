@@ -766,6 +766,110 @@ export async function notarygadgetSendInvoice(args: {
   }
 }
 
+export async function notarygadgetGetPayments(args: {
+  signing_id: string;
+  dump_html?: boolean;
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+
+  try {
+    await goToSignings(page);
+
+    const row = page.locator(`#trSigning${args.signing_id}`);
+    if (await row.count() === 0) {
+      return ok(`Signing ID ${args.signing_id} not found.`);
+    }
+    await row.click();
+    await page.waitForTimeout(2000);
+
+    // Open the payments panel (same call record_payment uses)
+    await page.evaluate(() => (window as any).ShowSigningPayments());
+    await page.waitForTimeout(2500);
+
+    if (args.dump_html) {
+      const dump = await page.evaluate(() => {
+        const candidates = [
+          'div[id*="ayment" i]',
+          'table[id*="ayment" i]',
+          '[id*="SigningPayments"]',
+        ];
+        const found: { selector: string; html: string }[] = [];
+        for (const s of candidates) {
+          for (const el of Array.from(document.querySelectorAll(s))) {
+            found.push({
+              selector: s,
+              html: (el as HTMLElement).outerHTML.substring(0, 4000),
+            });
+          }
+        }
+        return {
+          panels: found,
+          bodyTextSnippet: document.body.innerText.substring(0, 3000),
+        };
+      });
+      return ok(
+        `HTML dump for signing ${args.signing_id}:\n` +
+        `Panels found: ${dump.panels.length}\n\n` +
+        dump.panels.map((p, i) => `[${i}] selector=${p.selector}\n${p.html}\n`).join("\n---\n") +
+        `\n\nBody snippet:\n${dump.bodyTextSnippet}`
+      );
+    }
+
+    // Scrape payments. Try several row patterns — NotaryGadget's DOM
+    // for signings uses tr[id^="trSigning"], so payment rows are most
+    // likely tr[id^="trPayment"] or tr[id^="trSPmt"].
+    const result = await page.evaluate(() => {
+      const tryPatterns = [
+        'tr[id^="trPayment"]',
+        'tr[id^="trSPmt"]',
+        'tr[id^="trSigningPayment"]',
+        'div[onclick*="EditPayment"]',
+        'tr[onclick*="EditPayment"]',
+      ];
+      for (const sel of tryPatterns) {
+        const rows = Array.from(document.querySelectorAll(sel));
+        if (rows.length > 0) {
+          return {
+            matched: sel,
+            rows: rows.map(r => ({
+              id: (r as HTMLElement).id || "",
+              text: (r as HTMLElement).innerText
+                .trim()
+                .replace(/\t+/g, " | ")
+                .replace(/\n+/g, " | ")
+                .replace(/\s{2,}/g, " "),
+              onclick: (r as HTMLElement).getAttribute("onclick") || "",
+            })),
+          };
+        }
+      }
+      // No matching pattern — return body text snippet so caller can iterate
+      return {
+        matched: null as string | null,
+        rows: [] as { id: string; text: string; onclick: string }[],
+        fallbackText: document.body.innerText
+          .replace(/\s+/g, " ")
+          .substring(0, 1500),
+      };
+    });
+
+    if (!result.matched || result.rows.length === 0) {
+      return ok(
+        `No payments found via known selectors for signing ${args.signing_id}.\n` +
+        `(Either no payments exist, or DOM has changed — re-run with dump_html: true to inspect.)\n\n` +
+        `Page text snippet:\n${(result as any).fallbackText ?? ""}`
+      );
+    }
+
+    return ok(
+      `Payments for signing ${args.signing_id} (matched ${result.matched}, ${result.rows.length} row${result.rows.length === 1 ? "" : "s"}):\n\n` +
+      result.rows.map(r => `[${r.id}] ${r.text}`).join("\n")
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
 export async function notarygadgetDeleteSigning(args: {
   signing_id: string;
 }): Promise<CallToolResult> {
