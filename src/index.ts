@@ -21,7 +21,7 @@ import express from "express";
 // Tool implementations
 import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
-import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
+import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
 import { imessageSend, imessageGetRecentChats } from "./tools/imessage.js";
 import { httpRequest } from "./tools/http.js";
@@ -32,7 +32,7 @@ import { notionListDatabases, notionFindPage, notionGetPage, notionCreatePage, n
 import { hubspotFindContact, hubspotCreateContact, hubspotUpdateContact, hubspotCreateDeal, hubspotFindDeal, hubspotUpdateDeal, hubspotCreateCompany, hubspotFindCompany, hubspotCreateNote } from "./tools/hubspot.js";
 import { geminiSendPrompt, geminiChat, geminiAnalyzeText } from "./tools/gemini.js";
 import { notaryGetNewEmails, notarySendEmail, notaryMarkEmailRead, notaryCheckAvailability, notaryGetTravelTime, gmailNotaryFindEmail, gmailNotaryGetEmail, gmailNotaryReplyToEmail, gmailNotaryArchiveEmail } from "./tools/notary.js";
-import { notarygadgetCreateSigning, notarygadgetUpdateSigning, notarygadgetCompleteSigning, notarygadgetEnterMileage, notarygadgetRecordPayment, notarygadgetGetSignings, notarygadgetGetPayments, notarygadgetSendInvoice, notarygadgetDeleteSigning } from "./tools/notarygadget.js";
+import { notarygadgetCreateSigning, notarygadgetUpdateSigning, notarygadgetCompleteSigning, notarygadgetEnterMileage, notarygadgetRecordPayment, notarygadgetUpdatePayment, notarygadgetDeletePayment, notarygadgetGetSignings, notarygadgetGetPayments, notarygadgetSendInvoice, notarygadgetDeleteSigning } from "./tools/notarygadget.js";
 import { filetracListCompanies, filetracListClaims, filetracGetClaim, filetracUpdateClaimDates, filetracAddNote, filetracSubmitTimeExpense, filetracGetNotes, filetracBulkGetClaims, filetracBulkAddNote, filetracListDocuments, filetracDownloadReport, filetracRefreshSession, filetracDumpHtml } from "./tools/filetrac.js";
 import { agentRollUpLogs } from "./tools/local.js";
 import { xactListAssignments, xactGetAssignment, xactUpdateDates, xactUpdateWorkflowStatus, xactAddNote, xactGetNotes, xactFindAssignmentByClaim, xactFindAssignmentByName } from "./tools/xactanalysis.js";
@@ -64,6 +64,7 @@ const TOOLS: Tool[] = [
   { name: "drive_delete_file", description: "Delete a file from Google Drive", inputSchema: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] } },
   { name: "drive_move_file", description: "Move a file to a different folder. Fetches current parents first, then calls files.update with addParents+removeParents so Drive sees it as a true move. Works for files at root or in a subfolder. Returns no-op if file is already in the target folder.", inputSchema: { type: "object", properties: { file_id: { type: "string" }, new_folder_id: { type: "string" } }, required: ["file_id", "new_folder_id"] } },
   { name: "drive_create_folder", description: "Create a folder in Google Drive", inputSchema: { type: "object", properties: { name: { type: "string" }, parent_id: { type: "string" } }, required: ["name"] } },
+  { name: "drive_copy_file", description: "Copy a Google Drive file to a new location and/or with a new name. Workaround for the Anthropic Drive connector's broken copy_file tool. Optional new_name renames the copy; optional destination_folder_id places it in a target folder (defaults to same parents as source).", inputSchema: { type: "object", properties: { file_id: { type: "string", description: "Source file ID" }, new_name: { type: "string", description: "Name for the copy (optional — defaults to 'Copy of <original>')" }, destination_folder_id: { type: "string", description: "Folder ID to place the copy in (optional)" } }, required: ["file_id"] } },
   { name: "drive_upload_file", description: "Upload a file to Google Drive. PREFERRED: pass file_bytes_b64 (base64-encoded file content) + name — works from any caller including when the MCP server runs on Railway (remote host). DEPRECATED: local_path only works when the server has access to the same filesystem as the caller.", inputSchema: { type: "object", properties: { file_bytes_b64: { type: "string", description: "Base64-encoded file content (preferred — works regardless of where the server runs)" }, local_path: { type: "string", description: "Deprecated: absolute path on the server's local filesystem (does NOT work on Railway)" }, folder_id: { type: "string", description: "Drive folder ID to upload into (optional)" }, name: { type: "string", description: "Filename on Drive — required when using file_bytes_b64, defaults to basename when using local_path" }, mime_type: { type: "string", description: "Override MIME type (optional, auto-detected from file extension)" } }, required: [] } },
 
   // Sheets
@@ -182,6 +183,8 @@ const TOOLS: Tool[] = [
   { name: "notarygadget_record_payment", description: "Record a payment received for a signing in NotaryGadget", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (leave blank for most recent)" }, amount: { type: "number", description: "Payment amount" }, payment_date: { type: "string", description: "YYYY-MM-DD (defaults to today)" }, check_number: { type: "string", description: "Check number (optional)" } }, required: ["amount"] } },
   { name: "notarygadget_get_signings", description: "Get recent signing orders from NotaryGadget", inputSchema: { type: "object", properties: { max_results: { type: "number" }, status: { type: "string", enum: ["pending", "completed", "all"] } }, required: [] } },
   { name: "notarygadget_get_payments", description: "Read all payments logged for a NotaryGadget signing — returns date, amount, and check number for each payment so you can diagnose duplicate-payment alerts and reconcile AR. Set dump_html: true if scraping returns nothing, to inspect the DOM.", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (required)" }, dump_html: { type: "boolean", description: "Diagnostic: dump payment-panel HTML instead of parsed rows" } }, required: ["signing_id"] } },
+  { name: "notarygadget_update_payment", description: "Edit an existing payment on a NotaryGadget signing. Partial-update — pass only the fields you want to change. Read-write-read sandwich: snapshots the row before and re-reads after to verify the change landed. Does NOT support re-routing a payment to a different signing — for that, delete and re-record.", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID the payment belongs to (required)" }, payment_id: { type: "string", description: "Payment ID to edit (from get_payments output) (required)" }, date: { type: "string", description: "New payment date — YYYY-MM-DD or MM/DD/YYYY (optional)" }, amount: { type: "number", description: "New payment amount (optional)" }, check_number: { type: "string", description: "New check number — pass empty string to clear (optional)" } }, required: ["signing_id", "payment_id"] } },
+  { name: "notarygadget_delete_payment", description: "Permanently delete a payment from a NotaryGadget signing. Captures the row's prior values for audit, then verifies via re-read that the row is gone. Use when a payment was applied to the wrong signing or recorded in error.", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID the payment belongs to (required)" }, payment_id: { type: "string", description: "Payment ID to delete (required)" } }, required: ["signing_id", "payment_id"] } },
   { name: "notarygadget_send_invoice", description: "Email the invoice for a NotaryGadget signing to the customer", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID (leave blank for most recent)" }, to_email: { type: "string", description: "Override recipient email (optional — uses customer email on file by default)" }, subject: { type: "string", description: "Override email subject (optional)" }, body: { type: "string", description: "Override email body (optional)" } }, required: [] } },
   { name: "notarygadget_delete_signing", description: "Permanently delete a signing from NotaryGadget", inputSchema: { type: "object", properties: { signing_id: { type: "string", description: "Signing ID to delete (required)" } }, required: ["signing_id"] } },
 
@@ -235,6 +238,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "drive_delete_file": return driveDeleteFile(args as any);
     case "drive_move_file": return driveMoveFile(args as any);
     case "drive_create_folder": return driveCreateFolder(args as any);
+    case "drive_copy_file": return driveCopyFile(args as any);
     case "drive_upload_file": return driveUploadFile(args as any);
     case "sheets_get_rows": return sheetsGetRows(args as any);
     case "sheets_append_row": return sheetsAppendRow(args as any);
@@ -331,6 +335,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "notarygadget_record_payment": return notarygadgetRecordPayment(args as any);
     case "notarygadget_get_signings": return notarygadgetGetSignings(args as any);
     case "notarygadget_get_payments": return notarygadgetGetPayments(args as any);
+    case "notarygadget_update_payment": return notarygadgetUpdatePayment(args as any);
+    case "notarygadget_delete_payment": return notarygadgetDeletePayment(args as any);
     case "notarygadget_send_invoice": return notarygadgetSendInvoice(args as any);
     case "notarygadget_delete_signing": return notarygadgetDeleteSigning(args as any);
     case "qb_find_customer": return qbFindCustomer(args as any);

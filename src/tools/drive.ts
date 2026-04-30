@@ -208,6 +208,36 @@ export async function driveUploadFile(args: {
   return ok(`File uploaded: ${res.data.name}\nID: ${res.data.id}\nSize: ${sizeKb}\nLink: ${res.data.webViewLink}`);
 }
 
+export async function driveCopyFile(args: {
+  file_id: string;
+  new_name?: string;
+  destination_folder_id?: string;
+}): Promise<CallToolResult> {
+  const drive = await getDrive();
+
+  const requestBody: { name?: string; parents?: string[] } = {};
+  if (args.new_name) requestBody.name = args.new_name;
+  if (args.destination_folder_id) requestBody.parents = [args.destination_folder_id];
+
+  const res = await drive.files.copy({
+    fileId: args.file_id,
+    requestBody,
+    fields: "id, name, mimeType, size, parents, webViewLink",
+    supportsAllDrives: true,
+  });
+
+  const f = res.data;
+  const sizeKb = f.size ? `${(Number(f.size) / 1024).toFixed(1)} KB` : "unknown";
+  return ok(
+    `File copied.\n` +
+    `New ID: ${f.id}\n` +
+    `Name: ${f.name}\n` +
+    `Size: ${sizeKb}\n` +
+    `Parents: ${JSON.stringify(f.parents ?? [])}\n` +
+    `Link: ${f.webViewLink ?? "N/A"}`
+  );
+}
+
 export async function driveCreateFolder(args: {
   name: string;
   parent_id?: string;

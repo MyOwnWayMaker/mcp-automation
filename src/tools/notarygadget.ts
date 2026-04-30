@@ -884,6 +884,270 @@ export async function notarygadgetGetPayments(args: {
   }
 }
 
+// Helper: open a signing's payments panel and scrape the payment rows.
+// Used by update_payment / delete_payment for before/after snapshots.
+async function readPaymentsPanel(page: Page): Promise<{
+  payment_id: string;
+  date: string;
+  check_number: string;
+  amount: string;
+}[]> {
+  return page.evaluate(() => {
+    const allRows = Array.from(document.querySelectorAll('tr[onclick*="EditPayment"]'));
+    return allRows
+      .filter(r => /EditPayment\(\s*['"]?\d/.test(r.getAttribute("onclick") || ""))
+      .map(r => {
+        const cells = Array.from(r.querySelectorAll("td.tdWhiteWithLines"));
+        const c = cells.map(x => (x as HTMLElement).innerText.trim());
+        const oc = r.getAttribute("onclick") || "";
+        const idMatch = oc.match(/EditPayment\(\s*['"]?(\d+)/);
+        const rawCheck = c[1] || "";
+        const check = /^[—\-–]+$/.test(rawCheck) ? "" : rawCheck;
+        const amount = (c[2] || "").replace(/^\$/, "");
+        return {
+          payment_id: idMatch ? idMatch[1] : "",
+          date: c[0] || "",
+          check_number: check,
+          amount,
+        };
+      });
+  });
+}
+
+function formatDateMMDDYYYY(input: string): string {
+  // Accept YYYY-MM-DD or MM/DD/YYYY; emit MM/DD/YYYY for NotaryGadget's form.
+  const parts = input.split("-");
+  return parts.length === 3 ? `${parts[1]}/${parts[2]}/${parts[0]}` : input;
+}
+
+export async function notarygadgetUpdatePayment(args: {
+  signing_id: string;
+  payment_id: string;
+  date?: string;
+  amount?: number;
+  check_number?: string;
+}): Promise<CallToolResult> {
+  const log: string[] = [];
+  const t0 = Date.now();
+  const ms = () => `+${Date.now() - t0}ms`;
+
+  const { browser, page } = await getPage();
+
+  try {
+    page.setDefaultTimeout(10000);
+
+    log.push(`${ms()} goToSignings`);
+    await goToSignings(page);
+
+    log.push(`${ms()} locating #trSigning${args.signing_id}`);
+    const row = page.locator(`#trSigning${args.signing_id}`);
+    if (await row.count() === 0) {
+      return ok(`Signing ${args.signing_id} not found.\nLog: ${log.join(" | ")}`);
+    }
+    await row.click().catch(() => {});
+    await page.waitForTimeout(1500);
+
+    log.push(`${ms()} ShowSigningPayments`);
+    await page.evaluate(() => (window as any).ShowSigningPayments());
+    await page.waitForTimeout(2000);
+
+    // Snapshot the row before editing, so we can return a clean before/after diff.
+    const before = (await readPaymentsPanel(page)).find(p => p.payment_id === args.payment_id);
+    if (!before) {
+      return ok(
+        `Payment ${args.payment_id} not found on signing ${args.signing_id}.\n` +
+        `Log: ${log.join(" | ")}`
+      );
+    }
+    log.push(`${ms()} before snapshot: date=${before.date} amount=${before.amount} check=${before.check_number || "-"}`);
+
+    log.push(`${ms()} EditPayment(${args.payment_id})`);
+    await page.evaluate((id: string) => (window as any).EditPayment(id), args.payment_id);
+
+    // Wait for the form to populate — txtSPmtAmt holds the amount.
+    const formReady = await page.waitForFunction(() => {
+      const el = document.getElementById("txtSPmtAmt") as HTMLInputElement | null;
+      return !!(el && el.value && el.value.trim().length > 0);
+    }, { timeout: 8000 }).then(() => true).catch(() => false);
+    log.push(`${ms()} formReady=${formReady}`);
+
+    if (!formReady) {
+      return ok(`⏱ Payment edit form did not load.\nLog: ${log.join(" | ")}`);
+    }
+
+    const updated: string[] = [];
+
+    if (args.date) {
+      const formatted = formatDateMMDDYYYY(args.date);
+      await page.fill('#txtSPmtDate', formatted).catch(() => {});
+      updated.push(`Date: ${before.date} → ${formatted}`);
+    }
+    if (args.amount !== undefined) {
+      await page.fill('#txtSPmtAmt', String(args.amount)).catch(() => {});
+      updated.push(`Amount: $${before.amount} → $${args.amount}`);
+    }
+    if (args.check_number !== undefined) {
+      await page.fill('#txtSPmtChkNo', args.check_number).catch(() => {});
+      updated.push(`Check #: ${before.check_number || "(none)"} → ${args.check_number || "(none)"}`);
+    }
+
+    if (updated.length === 0) {
+      return ok(
+        `No fields provided to update — payment ${args.payment_id} unchanged.\n` +
+        `Current: date=${before.date} amount=$${before.amount} check=${before.check_number || "(none)"}\n` +
+        `Log: ${log.join(" | ")}`
+      );
+    }
+
+    log.push(`${ms()} SavePayment(${args.payment_id})`);
+    await page.evaluate((id: string) => (window as any).SavePayment(id), args.payment_id);
+    await page.waitForTimeout(3500);
+
+    // Re-read to verify the change landed
+    const after = (await readPaymentsPanel(page)).find(p => p.payment_id === args.payment_id);
+    log.push(`${ms()} after snapshot: ${after ? `date=${after.date} amount=${after.amount} check=${after.check_number || "-"}` : "NOT FOUND"}`);
+
+    if (!after) {
+      return ok(
+        `⚠️ Save called but payment ${args.payment_id} no longer visible on the signing.\n` +
+        `Manual check recommended.\nLog: ${log.join(" | ")}`
+      );
+    }
+
+    // Verify the requested changes actually took.
+    const mismatches: string[] = [];
+    if (args.date) {
+      const expected = formatDateMMDDYYYY(args.date);
+      if (after.date !== expected) mismatches.push(`date expected=${expected} got=${after.date}`);
+    }
+    if (args.amount !== undefined && parseFloat(after.amount) !== args.amount) {
+      mismatches.push(`amount expected=${args.amount} got=${after.amount}`);
+    }
+    if (args.check_number !== undefined && after.check_number !== args.check_number) {
+      mismatches.push(`check expected="${args.check_number}" got="${after.check_number}"`);
+    }
+
+    if (mismatches.length > 0) {
+      return ok(
+        `⚠️ Payment ${args.payment_id} saved but post-write verification failed:\n` +
+        mismatches.map(m => `  • ${m}`).join("\n") +
+        `\n\nApplied: ${updated.join("; ")}\nLog: ${log.join(" | ")}`
+      );
+    }
+
+    return ok(
+      `✅ Payment ${args.payment_id} updated on signing ${args.signing_id}:\n` +
+      updated.map(u => `  • ${u}`).join("\n") +
+      `\n\nAfter: ${after.date}  |  $${after.amount}${after.check_number ? `  |  Check #${after.check_number}` : ""}`
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+export async function notarygadgetDeletePayment(args: {
+  signing_id: string;
+  payment_id: string;
+}): Promise<CallToolResult> {
+  const log: string[] = [];
+  const t0 = Date.now();
+  const ms = () => `+${Date.now() - t0}ms`;
+
+  const { browser, page } = await getPage();
+
+  try {
+    page.setDefaultTimeout(10000);
+
+    log.push(`${ms()} goToSignings`);
+    await goToSignings(page);
+
+    const row = page.locator(`#trSigning${args.signing_id}`);
+    if (await row.count() === 0) {
+      return ok(`Signing ${args.signing_id} not found.\nLog: ${log.join(" | ")}`);
+    }
+    await row.click().catch(() => {});
+    await page.waitForTimeout(1500);
+
+    log.push(`${ms()} ShowSigningPayments`);
+    await page.evaluate(() => (window as any).ShowSigningPayments());
+    await page.waitForTimeout(2000);
+
+    const before = (await readPaymentsPanel(page)).find(p => p.payment_id === args.payment_id);
+    if (!before) {
+      return ok(
+        `Payment ${args.payment_id} not found on signing ${args.signing_id} (already deleted?).\n` +
+        `Log: ${log.join(" | ")}`
+      );
+    }
+    log.push(`${ms()} before: date=${before.date} amount=${before.amount} check=${before.check_number || "-"}`);
+
+    // Open the delete-confirm modal.
+    log.push(`${ms()} ShowConfirmDeletePayment(${args.payment_id})`);
+    await page.evaluate((id: string) => (window as any).ShowConfirmDeletePayment(id), args.payment_id);
+    await page.waitForTimeout(1500);
+
+    // Try the most likely confirm functions in order. NotaryGadget's pattern
+    // (see ChangeSigningStatus('Deleted') in delete_signing) suggests one of these.
+    const confirmAttempts: string[] = [];
+    const tryConfirm = async (label: string, fn: () => unknown) => {
+      try {
+        await page.evaluate(fn);
+        confirmAttempts.push(`${label}: ok`);
+        return true;
+      } catch (e: unknown) {
+        confirmAttempts.push(`${label}: ${(e as Error).message.substring(0, 60)}`);
+        return false;
+      }
+    };
+
+    let confirmed = false;
+    // Most common pattern observed in NotaryGadget: status-change function.
+    if (!confirmed) confirmed = await tryConfirm("DeletePayment", () => (window as any).DeletePayment(args.payment_id));
+    if (!confirmed) confirmed = await tryConfirm("ConfirmDeletePayment", () => (window as any).ConfirmDeletePayment(args.payment_id));
+    if (!confirmed) confirmed = await tryConfirm("ChangePaymentStatus", () => (window as any).ChangePaymentStatus("Deleted"));
+    // Fallback: click any visible "Delete" button in the modal.
+    if (!confirmed) {
+      const btn = page.locator('button:has-text("Delete"), input[value="Delete"], a:has-text("Delete")').last();
+      if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
+        await btn.click();
+        confirmAttempts.push("modal-delete-button: clicked");
+        confirmed = true;
+      }
+    }
+
+    log.push(`${ms()} confirm attempts: ${confirmAttempts.join(" | ")}`);
+    if (!confirmed) {
+      return ok(
+        `❌ Could not confirm deletion of payment ${args.payment_id}.\n` +
+        `Tried: ${confirmAttempts.join(" | ")}\n` +
+        `Log: ${log.join(" | ")}`
+      );
+    }
+
+    await page.waitForTimeout(3000);
+
+    // Re-read the panel to verify the row is gone.
+    const after = await readPaymentsPanel(page);
+    const stillThere = after.find(p => p.payment_id === args.payment_id);
+    log.push(`${ms()} after: ${after.length} payment(s), target ${stillThere ? "STILL PRESENT" : "gone"}`);
+
+    if (stillThere) {
+      return ok(
+        `⚠️ Delete called but payment ${args.payment_id} still appears on the signing.\n` +
+        `Manual check recommended.\nLog: ${log.join(" | ")}`
+      );
+    }
+
+    return ok(
+      `✅ Payment ${args.payment_id} deleted from signing ${args.signing_id}.\n` +
+      `Was: ${before.date}  |  $${before.amount}${before.check_number ? `  |  Check #${before.check_number}` : ""}\n` +
+      `Remaining payments on signing: ${after.length}`
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
 export async function notarygadgetDeleteSigning(args: {
   signing_id: string;
 }): Promise<CallToolResult> {
