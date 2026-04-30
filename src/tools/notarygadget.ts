@@ -836,11 +836,17 @@ export async function notarygadgetGetPayments(args: {
         // Pull payment id out of the onclick: EditPayment('12345')
         const oc = r.getAttribute("onclick") || "";
         const idMatch = oc.match(/EditPayment\(\s*['"]?(\d+)/);
+        // NotaryGadget renders empty check numbers as an em-dash placeholder
+        const rawCheck = cellText[1] || "";
+        const check = /^[—\-–]+$/.test(rawCheck) ? "" : rawCheck;
+        // Amount cell already contains the $ — strip it so we don't double up
+        const rawAmount = cellText[2] || "";
+        const amount = rawAmount.replace(/^\$/, "");
         return {
           payment_id: idMatch ? idMatch[1] : "",
           date: cellText[0] || "",
-          check_number: cellText[1] || "",
-          amount: cellText[2] || "",
+          check_number: check,
+          amount,
           raw: (r as HTMLElement).innerText
             .trim()
             .replace(/\s+/g, " "),
