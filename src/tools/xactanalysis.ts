@@ -189,30 +189,44 @@ type Address = {
 };
 
 function parseAddress(block: string): Address {
-  // Tries to parse "<street>\n<street2?>\n<city>, <state> <zip>" or single-line variants.
-  const cleaned = block.split("\n").map(l => l.trim()).filter(Boolean);
-  if (cleaned.length === 0) {
+  if (!block) return { street: null, street2: null, city: null, state: null, zip: null };
+  const lines = block.split("\n").map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) {
     return { street: null, street2: null, city: null, state: null, zip: null };
   }
-  // Find the line with "City, ST ZIP" — usually last
-  let cszIdx = -1;
-  let csz: { city: string; state: string; zip: string } | null = null;
-  for (let i = cleaned.length - 1; i >= 0; i--) {
-    const m = cleaned[i].match(/^(.+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*$/);
+
+  // Multi-line variant: street(s) on first line(s), "city, ST zip [country]" last
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/^(.+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*([A-Z]{2,3})?\s*$/);
     if (m) {
-      cszIdx = i;
-      csz = { city: m[1].trim(), state: m[2], zip: m[3] };
-      break;
+      const streetLines = lines.slice(0, i);
+      return {
+        street: streetLines[0] ?? null,
+        street2: streetLines[1] ?? null,
+        city: m[1].trim(),
+        state: m[2],
+        zip: m[3],
+      };
     }
   }
-  const streetLines = cszIdx >= 0 ? cleaned.slice(0, cszIdx) : cleaned;
-  return {
-    street: streetLines[0] ?? null,
-    street2: streetLines[1] ?? null,
-    city: csz?.city ?? null,
-    state: csz?.state ?? null,
-    zip: csz?.zip ?? null,
-  };
+
+  // Single-line variant: "<street>, <city>, <state> <zip> [country]" (XA emits this for
+  // some carriers). Lazy quantifiers + backtracking handle apt-comma-in-street cases.
+  const single = lines.join(" ").match(
+    /^(.+?),\s*(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*([A-Z]{2,3})?\s*$/
+  );
+  if (single) {
+    return {
+      street: single[1].trim(),
+      street2: null,
+      city: single[2].trim(),
+      state: single[3],
+      zip: single[4],
+    };
+  }
+
+  // Unparseable — keep first line as street so caller still has something.
+  return { street: lines[0], street2: lines[1] ?? null, city: null, state: null, zip: null };
 }
 
 // Match a label appearing alone on its own line ("Address", "Address:") OR
@@ -275,12 +289,68 @@ function findBlockUnderLabel(text: string, labels: string | string[], lineCount 
   return null;
 }
 
+type CoverageRow = {
+  name: string | null;
+  type: string | null;
+  policy_limit: number | null;
+  deductible: number | null;
+  apply_to: string | null;
+  itv: number | null;
+  reserve: number | null;
+};
+
+function parseCoverage(rawText: string): CoverageRow[] {
+  const lines = rawText.split("\n");
+  // Header row signals start of the coverage table. XA renders cells separated by
+  // tabs or 2+ spaces depending on the browser — match either.
+  const headerIdx = lines.findIndex(l =>
+    /Coverage[\t ]+Type[\t ]+Policy[\t ]+Limit/i.test(l) ||
+    /^\s*Coverage\s*$/i.test(l)
+  );
+  if (headerIdx < 0) return [];
+
+  const money = (s: string | undefined): number | null => {
+    if (!s) return null;
+    const m = s.replace(/[$,]/g, "").match(/-?\d+(\.\d+)?/);
+    return m ? parseFloat(m[0]) : null;
+  };
+  const percent = (s: string | undefined): number | null => {
+    if (!s) return null;
+    const m = s.replace(/%/g, "").match(/-?\d+(\.\d+)?/);
+    return m ? parseFloat(m[0]) : null;
+  };
+
+  const rows: CoverageRow[] = [];
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) {
+      if (rows.length > 0) break;
+      continue;
+    }
+    const cells = line.split(/\t+|\s{2,}/).map(c => c.trim()).filter(Boolean);
+    if (cells.length < 3) {
+      if (rows.length > 0) break;
+      continue;
+    }
+    rows.push({
+      name: cells[0] ?? null,
+      type: cells[1] ?? null,
+      policy_limit: money(cells[2]),
+      deductible: money(cells[3]),
+      apply_to: cells[4] ?? null,
+      itv: percent(cells[5]),
+      reserve: money(cells[6]),
+    });
+  }
+  return rows;
+}
+
 function parseClientPolicy(rawText: string): {
   loss_address: Address;
   mailing_address: Address;
   insured: { name: string | null; phone: string | null; email: string | null };
   policy: { number: string | null; effective_date: string | null; expiration_date: string | null };
-  coverage: { code: string | null; limit: number | null; deductible: number | null }[];
+  coverage: CoverageRow[];
 } {
   // Loss address — XA labels it "Risk Location"
   const lossBlock = findBlockUnderLabel(rawText, ["Risk Location", "Loss Address", "Risk Address", "Loss Location"], 4) ?? "";
@@ -299,17 +369,7 @@ function parseClientPolicy(rawText: string): {
   const effDate = findValueAfterLabel(rawText, ["Effective Date", "Policy Effective Date", "Policy Effective"]);
   const expDate = findValueAfterLabel(rawText, ["Expiration Date", "Policy Expiration Date", "Policy Expiration"]);
 
-  // Coverage — patterns like "Coverage A $250,000" or "A $250,000 / $1,000"
-  const coverage: { code: string | null; limit: number | null; deductible: number | null }[] = [];
-  const covRe = /Coverage\s+([A-F])\s*[:\$]?\s*\$?([\d,]+)(?:\s*\/\s*\$?([\d,]+))?/gi;
-  let cm: RegExpExecArray | null;
-  while ((cm = covRe.exec(rawText)) !== null) {
-    coverage.push({
-      code: cm[1],
-      limit: cm[2] ? parseInt(cm[2].replace(/,/g, ""), 10) : null,
-      deductible: cm[3] ? parseInt(cm[3].replace(/,/g, ""), 10) : null,
-    });
-  }
+  const coverage = parseCoverage(rawText);
 
   return {
     loss_address: parseAddress(lossBlock),
@@ -912,55 +972,72 @@ export async function xactSetPlannedInspectionDate(args: {
       }, null, 2));
     }
 
-    // Locate the row containing the label. Prefer <tr>/<li>; fall back to closest matching ancestor.
-    selectorsTried.push("tr/li:has-text('Planned Inspection Date')");
-    let rowLocator = page.locator('tr', { hasText: /planned\s+inspection\s+date/i }).first();
-    if ((await rowLocator.count()) === 0) {
-      rowLocator = page.locator('li', { hasText: /planned\s+inspection\s+date/i }).first();
-    }
-    if ((await rowLocator.count()) === 0) {
-      selectorsTried.push("text=...→ ancestor-or-self::tr|div|td|li[1]");
-      rowLocator = page.locator(`text=/planned\\s+inspection\\s+date/i`)
-        .locator(`xpath=ancestor-or-self::*[self::tr or self::div or self::td or self::li][1]`)
-        .first();
-    }
+    // Find the editable row — XA has multiple rows mentioning "Planned Inspection Date"
+    // (one in the upstream Status timeline, another in Workflow Status with the actual
+    // edit affordance). Strategy: find rows whose FIRST cell text equals exactly
+    // "Planned Inspection Date" and pick the one that contains an edit affordance.
+    selectorsTried.push("tr where children[0].innerText === 'Planned Inspection Date' AND has edit affordance");
+    const rowFind = await page.evaluate(() => {
+      const editSelector = '.material-icons, [class*="edit" i], a[onclick*="dit"], button[onclick*="dit"], [aria-label*="dit" i], [title*="dit" i], i.fa-edit, i.fa-pencil, .icon-edit, .pencil';
+      const labelRe = /^\s*planned\s+inspection\s+date\s*:?\s*$/i;
+      const allTrs = Array.from(document.querySelectorAll("tr"));
+      const candidates = allTrs.filter(tr => {
+        const first = tr.children[0] as HTMLElement | undefined;
+        if (!first) return false;
+        const txt = (first.innerText || "").trim();
+        return labelRe.test(txt);
+      });
 
-    if ((await rowLocator.count()) === 0) {
+      // Prefer rows that actually have an edit affordance
+      for (const tr of candidates) {
+        const editEls = Array.from(tr.querySelectorAll(editSelector));
+        const editEl = editEls.find(e => {
+          if (e.classList.contains("material-icons")) {
+            const t = (e as HTMLElement).innerText.trim().toLowerCase();
+            return ["edit", "mode_edit", "create"].includes(t);
+          }
+          // Skip elements that are themselves a textfield class match — we want clickable triggers
+          return true;
+        }) as HTMLElement | undefined;
+        if (!editEl) continue;
+        tr.setAttribute("data-mcp-pid-row", "1");
+        editEl.setAttribute("data-mcp-pid-edit", "1");
+        return {
+          found: true,
+          candidate_count: candidates.length,
+          row_html: (tr as HTMLElement).outerHTML.substring(0, 2500),
+          edit_html: editEl.outerHTML.substring(0, 500),
+        };
+      }
+
+      return {
+        found: false,
+        candidate_count: candidates.length,
+        candidate_htmls: candidates.slice(0, 4).map(tr => (tr as HTMLElement).outerHTML.substring(0, 800)),
+      };
+    });
+
+    if (!rowFind.found) {
       return ok(JSON.stringify({
         ok: false,
-        error: "Row containing 'Planned Inspection Date' not found on assignment detail tab",
-        debug_snapshot: { selectors_tried: selectorsTried, row_html: "", popover_html: "", input_outer_html: "" },
+        error: rowFind.candidate_count === 0
+          ? "No <tr> found whose first cell text equals 'Planned Inspection Date'"
+          : `Found ${rowFind.candidate_count} candidate row(s) but none contain an edit affordance`,
+        debug_snapshot: {
+          selectors_tried: selectorsTried,
+          candidate_count: rowFind.candidate_count,
+          candidate_htmls: (rowFind as any).candidate_htmls ?? [],
+          row_html: "",
+          popover_html: "",
+          input_outer_html: "",
+        },
       }, null, 2));
     }
-    rowHtml = await rowLocator.evaluate(el => (el as HTMLElement).outerHTML.substring(0, 2500));
+    rowHtml = rowFind.row_html ?? "";
 
-    // Click an edit affordance inside the row.
-    // Material Icons render their name as text content (e.g. <i class="material-icons">edit</i>),
-    // so we filter material-icons by exact text "edit".
-    const editSelector = '.material-icons, [class*="edit" i], a[onclick*="dit"], button[onclick*="dit"], [aria-label*="dit" i], [title*="dit" i], i.fa-edit, i.fa-pencil, .icon-edit, .pencil';
-    selectorsTried.push(`row → ${editSelector}`);
-    const editCandidates = rowLocator.locator(editSelector);
-    const editCount = await editCandidates.count();
-
-    let clicked = false;
-    for (let k = 0; k < editCount && !clicked; k++) {
-      const cand = editCandidates.nth(k);
-      const cls = (await cand.getAttribute("class").catch(() => "")) || "";
-      if (cls.includes("material-icons")) {
-        const t = (await cand.innerText().catch(() => "")).trim().toLowerCase();
-        if (t !== "edit" && t !== "mode_edit" && t !== "create") continue;
-      }
-      const visible = await cand.isVisible().catch(() => false);
-      if (!visible) continue;
-      await cand.click({ timeout: 4000 }).catch(() => {});
-      clicked = true;
-    }
-
-    if (!clicked) {
-      // Last resort: click the row itself; some XA fields toggle inline edit on row click.
-      await rowLocator.click({ timeout: 3000 }).catch(() => {});
-    }
-
+    // Click the marked edit affordance
+    selectorsTried.push("[data-mcp-pid-edit='1']");
+    await page.locator('[data-mcp-pid-edit="1"]').first().click({ timeout: 4000 }).catch(() => {});
     await page.waitForTimeout(1500);
 
     // Capture any popover/modal that appeared
