@@ -31,7 +31,10 @@ if (fs.existsSync(ENV_PATH)) dotenv.config({ path: ENV_PATH });
 const STATE_PATH = path.resolve(REPO_ROOT, "claim_monitor_state.json");
 const LOG_PATH = path.resolve(REPO_ROOT, "claim_monitor.log");
 const POLL_INTERVAL_MS = 60_000; // 60 seconds
-const ALERT_RECIPIENT = process.env.CLAIM_MONITOR_PHONE || "+14244663685";
+const NTFY_TOPIC = process.env.CLAIM_MONITOR_NTFY_TOPIC || "Dino-claims-alerts-fpx";
+const NTFY_SERVER = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+// iMessage fallback (only used if CLAIM_MONITOR_IMESSAGE_PHONE is set AND we're on macOS)
+const IMESSAGE_PHONE = process.env.CLAIM_MONITOR_IMESSAGE_PHONE || "";
 const ALERTED_TTL_MS = 7 * 24 * 60 * 60 * 1000; // prune alerts older than 7 days
 
 // ── Filter rules (derived from 2026-04-30 inbox scan) ────────────────────────
@@ -136,26 +139,63 @@ function buildGmailClient() {
   return google.gmail({ version: "v1", auth });
 }
 
-// ── iMessage send ────────────────────────────────────────────────────────────
+// ── ntfy.sh push notification ────────────────────────────────────────────────
+
+// HTTP headers must be ASCII. Strip emoji and other non-ASCII from anything
+// going into a header (Title, Tags) — they go fine in the message body.
+function asciiSafe(s) {
+  return (s || "").replace(/[^\x00-\x7F]/g, "").trim();
+}
+
+async function sendNtfy({ title, message, priority = 3, tags = [] }) {
+  const url = `${NTFY_SERVER}/${encodeURIComponent(NTFY_TOPIC)}`;
+  // Move any emoji from the title into the message body so the title is ASCII-clean.
+  const safeTitle = asciiSafe(title) || "Alert";
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Title": safeTitle,
+        "Priority": String(priority),
+        "Tags": tags.map(asciiSafe).filter(Boolean).join(","),
+        "Content-Type": "text/plain; charset=utf-8",
+      },
+      body: `${title}\n\n${message}`, // include the original (possibly emoji-laden) title in the body
+    });
+    if (!res.ok) {
+      log(`ntfy POST failed: HTTP ${res.status}`);
+    } else {
+      log(`ntfy sent: ${safeTitle}`);
+    }
+  } catch (e) {
+    log(`ntfy POST error: ${e.message}`);
+  }
+}
+
+// ── iMessage send (optional, macOS only) ─────────────────────────────────────
 
 function sendIMessage(text, recipient) {
-  if (os.platform() !== "darwin") {
-    log(`[SKIP iMessage on ${os.platform()}] would have sent to ${recipient}: ${text.substring(0, 100)}...`);
-    return;
-  }
-  // Escape for AppleScript: backslashes, double quotes, newlines
+  if (os.platform() !== "darwin") return; // silent skip
   const escaped = text
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n");
   const script = `tell application "Messages" to send "${escaped}" to participant "${recipient}"`;
-  // Use single quotes around the script, escape any single quotes in the script
   const shellSafe = script.replace(/'/g, "'\\''");
   try {
     execSync(`osascript -e '${shellSafe}'`, { timeout: 10_000 });
     log(`iMessage sent to ${recipient}`);
   } catch (e) {
     log(`iMessage send failed: ${e.message}`);
+  }
+}
+
+async function sendAlert({ title, message, priority, tags }) {
+  // Primary: ntfy
+  await sendNtfy({ title, message, priority, tags });
+  // Optional secondary: iMessage if user has phone configured AND we're on macOS
+  if (IMESSAGE_PHONE && os.platform() === "darwin") {
+    sendIMessage(`${title}\n${message}`, IMESSAGE_PHONE);
   }
 }
 
@@ -220,11 +260,16 @@ async function pollOnce(gmail, state) {
     // Match — build the alert
     const body = extractBody(full.data.payload);
     const snippet = snippetFromBody(body, 220);
-    const prefix = tier === "HIGH" ? "🚨 NEW ASSIGNMENT" : "📋 STATUS UPDATE";
-    const text = `${prefix}\nFrom: ${fromHeader}\nSubject: ${subject}\n\n${snippet}\n\n[id: ${m.id}]`;
+    const isHigh = tier === "HIGH";
+    const title = isHigh
+      ? `🚨 NEW ASSIGNMENT — ${subject}`
+      : `📋 Status update — ${subject}`;
+    const message = `From: ${fromHeader}\n\n${snippet}\n\n[id: ${m.id}]`;
+    const priority = isHigh ? 5 : 3; // ntfy: 5=urgent, 3=default
+    const tags = isHigh ? ["rotating_light"] : ["clipboard"];
 
     log(`[${tier}] ${fromHeader} — ${subject}`);
-    sendIMessage(text, ALERT_RECIPIENT);
+    await sendAlert({ title, message, priority, tags });
     state.alerted[m.id] = Date.now();
     alerted++;
   }
@@ -234,8 +279,9 @@ async function pollOnce(gmail, state) {
 
 async function main() {
   log("=== Claim monitor starting ===");
-  log(`Polling every ${POLL_INTERVAL_MS / 1000}s, alerting to ${ALERT_RECIPIENT}`);
-  log(`Platform: ${os.platform()} (iMessage will ${os.platform() === "darwin" ? "fire" : "be skipped"})`);
+  log(`Polling every ${POLL_INTERVAL_MS / 1000}s`);
+  log(`ntfy: ${NTFY_SERVER}/${NTFY_TOPIC}`);
+  log(`iMessage fallback: ${IMESSAGE_PHONE && os.platform() === "darwin" ? `enabled to ${IMESSAGE_PHONE}` : "disabled"}`);
 
   const state = loadState();
   log(`State: ${Object.keys(state.alerted).length} previously-alerted IDs, started_at=${new Date(state.started_at).toISOString()}`);
@@ -250,7 +296,12 @@ async function main() {
   }
 
   // Send a startup ping so you know the monitor came up cleanly.
-  sendIMessage("🟢 Claim monitor started — watching inbox every 60s.", ALERT_RECIPIENT);
+  await sendAlert({
+    title: "🟢 Claim monitor started",
+    message: "Watching the inbox every 60s. You'll get an alert when a new assignment lands.",
+    priority: 3,
+    tags: ["white_check_mark"],
+  });
 
   while (true) {
     try {
