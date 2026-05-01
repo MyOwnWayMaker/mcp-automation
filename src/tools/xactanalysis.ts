@@ -487,8 +487,9 @@ async function updateWorkflowStatus(
   statusCode: number,
   date: string,       // YYYY-MM-DD
   time = "09:00:00",
-  note = ""
-): Promise<string> {
+  note = "",
+  dryRun = false,     // when true, dismiss dialog without submit and return debug
+): Promise<{ ok: boolean; submitted: boolean; message: string; debug?: any }> {
   await page.goto(`${BASE}/cxa/detail.jsp?mfn=${mfn}&src=ip`);
   await page.waitForLoadState("domcontentloaded");
   await page.waitForTimeout(5000);
@@ -671,24 +672,65 @@ async function updateWorkflowStatus(
     }
   }
 
-  // GATE: only submit if date stuck. Otherwise navigate away (no save fires).
-  if (r.date !== date) {
+  // Capture the FULL form state right before submit/dismiss decision. The previous
+  // iteration showed update_error: null (gate passed) but the row still got
+  // corrupted with "now" — meaning a hidden field or picker-state holds the
+  // canonical value the form actually posts. This dumps every form field so we
+  // can identify the real culprit.
+  const formState = await dlgFrame.evaluate(() => {
+    const forms = Array.from(document.querySelectorAll("form"));
+    if (forms.length === 0) {
+      // No <form>: still dump every input/textarea/select on the page
+      const all = Array.from(document.querySelectorAll("input, textarea, select")).map(el => {
+        const e = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+        return { id: e.id, name: e.name, type: (e as HTMLInputElement).type ?? e.tagName, value: (e as HTMLInputElement).value };
+      });
+      return { has_form: false, all_inputs: all, form_data_entries: [] as { key: string; value: string }[] };
+    }
+    const form = forms[0] as HTMLFormElement;
+    const fd = new FormData(form);
+    const form_data_entries: { key: string; value: string }[] = [];
+    fd.forEach((v, k) => form_data_entries.push({ key: k, value: typeof v === "string" ? v : "(file)" }));
+    const all_inputs = Array.from(form.querySelectorAll("input, textarea, select")).map(el => {
+      const e = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      return { id: e.id, name: e.name, type: (e as HTMLInputElement).type ?? e.tagName, value: (e as HTMLInputElement).value };
+    });
+    return {
+      has_form: true,
+      form_action: form.action,
+      form_method: form.method,
+      form_data_entries,   // what new FormData(form) would actually post
+      all_inputs,          // every input including hidden, in DOM order
+    };
+  });
+
+  const debug = {
+    target_date: date,
+    target_time: time,
+    status_code: statusCode,
+    discovered_date_field: dateField,
+    discovered_time_field: timeField ?? null,
+    discovered_notes_field: notesField ?? null,
+    attempts: results,
+    form_state_before_submit: formState,
+  };
+
+  // GATE: only submit if date stuck AND we're not in dry_run mode.
+  const dateStuck = r.date === date;
+  if (!dateStuck || dryRun) {
     await page.goto(`${BASE}/cxa/detail.jsp?mfn=${mfn}&src=ip`).catch(() => {});
     await page.waitForTimeout(1500);
-    const err: any = new Error(`updateStatus(${statusCode}): date input rejected override (${date}). All three write strategies failed.`);
-    err.debug = {
-      target_date: date,
-      target_time: time,
-      status_code: statusCode,
-      discovered_date_field: dateField,
-      discovered_time_field: timeField ?? null,
-      attempts: results,
-      reason: "date input value did not stick; dialog dismissed without save",
+    return {
+      ok: dateStuck,   // ok=true if value stuck, even when not submitted
+      submitted: false,
+      message: dryRun
+        ? `Dry run for status ${statusCode}: form state captured, dialog dismissed without submit.`
+        : `updateStatus(${statusCode}): date input rejected override (${date}). All three write strategies failed.`,
+      debug,
     };
-    throw err;
   }
 
-  // Date stuck — safe to submit. Look for the submit button by likely ids/labels.
+  // Date stuck and not dry_run — safe to submit. Discover the submit button.
   const submitButton = discovery.inputs.find(i =>
     /update.*status|^updatestatus|update_button/i.test(i.id) ||
     /update.*status|^updatestatus|update_button/i.test(i.name)
@@ -697,12 +739,16 @@ async function updateWorkflowStatus(
     const sel = submitButton.id ? `#${submitButton.id}` : `[name="${submitButton.name}"]`;
     await dlgFrame.locator(sel).click().catch(() => {});
   } else {
-    // Fall back to text-matched button
     await dlgFrame.locator('button:has-text("Update"), input[value*="Update" i], button:has-text("Save"), input[value*="Save" i]').first().click().catch(() => {});
   }
   await page.waitForTimeout(4000);
 
-  return `Status ${statusCode} updated to ${date}`;
+  return {
+    ok: true,
+    submitted: true,
+    message: `Status ${statusCode} updated to ${date}`,
+    debug,
+  };
 }
 
 export async function xactUpdateDates(args: {
@@ -1160,17 +1206,12 @@ async function readPlannedDate(page: Page, mfn: string): Promise<string> {
 export async function xactSetPlannedInspectionDate(args: {
   mfn: string;
   date: string; // YYYY-MM-DD or M/D/YYYY
+  dry_run?: boolean;  // when true, capture form state + dismiss without submit (no XA writes)
 }): Promise<CallToolResult> {
   const dateIso = fmt(args.date);
   const { browser, context, page } = await getPage();
 
   try {
-    // The Planned Inspection Date row's edit affordance is a button whose onclick
-    // calls window.updateStatus(N). N is the workflow status code (68 in the
-    // shipped XA build, but we extract it dynamically in case it ever changes).
-    // Calling updateStatus(N) directly opens the same iframe dialog as every
-    // other workflow status update, which is what updateWorkflowStatus already
-    // knows how to fill + submit.
     await navigateToTab(page, args.mfn, "d_assignment");
     const found = await page.evaluate(() => {
       const labelRe = /^\s*planned\s+inspection\s+date\s*:?\s*$/i;
@@ -1198,38 +1239,36 @@ export async function xactSetPlannedInspectionDate(args: {
       }, null, 2));
     }
 
+    let result: { ok: boolean; submitted: boolean; message: string; debug?: any };
     let updateError: string | null = null;
-    let updateDebug: any = null;
     try {
-      await updateWorkflowStatus(context, page, args.mfn, found.code, dateIso, "09:00:00", "");
+      result = await updateWorkflowStatus(
+        context, page, args.mfn, found.code, dateIso, "09:00:00", "",
+        args.dry_run === true
+      );
     } catch (e: any) {
       updateError = String(e?.message || e);
-      updateDebug = e?.debug ?? null;
+      result = { ok: false, submitted: false, message: updateError, debug: e?.debug ?? null };
     }
 
-    const verified = await readPlannedDate(page, args.mfn);
-    const success = !updateError && dateMatchesAny(verified, dateIso);
-
-    if (success) {
-      return ok(JSON.stringify({
-        ok: true,
-        value: verified,
-        method: `updateStatus(${found.code}) iframe dialog`,
-      }, null, 2));
-    }
+    const verified = result.submitted ? await readPlannedDate(page, args.mfn) : "(not submitted)";
+    const success = result.ok && result.submitted && dateMatchesAny(verified, dateIso);
 
     return ok(JSON.stringify({
-      ok: false,
-      value_read: verified || "(empty)",
+      ok: success,
+      submitted: result.submitted,
+      value_read: verified,
       target_iso: dateIso,
       extracted_workflow_code: found.code,
       update_error: updateError,
-      // When the helper aborts because the input rejected the override, debug
-      // contains the input fingerprint + per-strategy readback so we can see
-      // which write paths were tried and what the input ended up at.
+      message: result.message,
+      // form_state_before_submit dumps every form field (including hidden) so we
+      // can see what the form would actually post — vs what the visible input shows.
+      // Most likely culprit on prior failures: a hidden picker-state field that
+      // holds the canonical "now" value while the visible text input shows our override.
       debug_snapshot: {
         row_html: found.row_html,
-        update_debug: updateDebug,
+        update_debug: result.debug,
       },
     }, null, 2));
   } finally {
