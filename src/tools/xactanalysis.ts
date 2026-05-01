@@ -503,57 +503,120 @@ async function updateWorkflowStatus(
   }
   await dlgFrame.waitForLoadState("domcontentloaded");
 
-  // Fingerprint #dateupdated BEFORE writing — needed for diagnostics if the
-  // override doesn't stick (Vue/MDL/datepicker overlays may ignore writes).
-  const fingerprint = await dlgFrame.evaluate(() => {
-    const el = document.getElementById("dateupdated") as HTMLInputElement | null;
-    if (!el) return null;
-    const w = window as any;
+  // Discover all form fields in the dialog frame. id="dateupdated" came back null
+  // last iteration — the input is identified by name= or has been renamed entirely.
+  // Dump everything so we can map id→name→type fingerprints reliably.
+  type Discovered = {
+    inputs: { id: string; name: string; type: string; value: string; placeholder: string; className: string; outer_html: string }[];
+    textareas: { id: string; name: string; value: string }[];
+    selects: { id: string; name: string; value: string }[];
+    nested_iframes: { src: string; id: string; name: string }[];
+    body_html_preview: string;
+    frame_url: string;
+  };
+  const discovery: Discovered = await dlgFrame.evaluate(() => {
+    const inputs = Array.from(document.querySelectorAll("input")).map(el => {
+      const i = el as HTMLInputElement;
+      return {
+        id: i.id, name: i.name, type: i.type, value: i.value,
+        placeholder: i.placeholder, className: i.className,
+        outer_html: i.outerHTML.substring(0, 400),
+      };
+    });
+    const textareas = Array.from(document.querySelectorAll("textarea")).map(el => {
+      const t = el as HTMLTextAreaElement;
+      return { id: t.id, name: t.name, value: t.value };
+    });
+    const selects = Array.from(document.querySelectorAll("select")).map(el => {
+      const s = el as HTMLSelectElement;
+      return { id: s.id, name: s.name, value: s.value };
+    });
+    const nested_iframes = Array.from(document.querySelectorAll("iframe")).map(el => {
+      const f = el as HTMLIFrameElement;
+      return { src: f.src, id: f.id, name: f.name };
+    });
     return {
-      id: el.id,
-      name: el.name,
-      type: el.type,
-      tagName: el.tagName,
-      className: el.className,
-      readonly: el.readOnly,
-      autocomplete: el.autocomplete,
-      prefilled_value: el.value,
-      outer_html: el.outerHTML.substring(0, 600),
-      framework_markers: {
-        has_vue_app: !!(el as any).__vue_app__,
-        has_vue_parent: !!(el as any).__vueParentComponent,
-        has_vue_global: typeof w.Vue !== "undefined",
-        has_react_props: !!(el as any).__reactProps$,
-        is_mdl: el.classList.toString().includes("mdl"),
-      },
-      sibling_overlay_html: (() => {
-        // Datepicker libraries often render a sibling element (calendar overlay,
-        // hidden field with the canonical value, etc.) — capture the parent's HTML
-        // so we can see what's actually in play.
-        const parent = el.parentElement;
-        return parent ? parent.outerHTML.substring(0, 1000) : "";
-      })(),
+      inputs, textareas, selects, nested_iframes,
+      body_html_preview: document.body.innerHTML.substring(0, 4000),
+      frame_url: location.href,
     };
   });
 
-  // Three write strategies, with a readback gate after each. We only proceed to
-  // submit if dateupdated actually equals our target — otherwise the dialog
-  // commits its prefilled "now" value, which corrupts XA. If all strategies
-  // fail, navigate away to safely close the dialog without saving.
+  // Pick the date / time / notes elements by id, name, type, or substring.
+  const findInput = (...keys: string[]) => {
+    for (const key of keys) {
+      const lower = key.toLowerCase();
+      const exact = discovery.inputs.find(i => i.id === key || i.name === key);
+      if (exact) return exact;
+      const partial = discovery.inputs.find(i =>
+        i.id.toLowerCase().includes(lower) || i.name.toLowerCase().includes(lower)
+      );
+      if (partial) return partial;
+    }
+    return undefined;
+  };
+  const dateField = findInput("dateupdated", "date") ?? discovery.inputs.find(i => i.type === "date");
+  const timeField = findInput("timeupdated", "time") ?? discovery.inputs.find(i => i.type === "time");
+  const notesField = discovery.textareas.find(t => /note|comment/i.test(t.id) || /note|comment/i.test(t.name))
+    ?? (discovery.textareas[0]);
+
+  if (!dateField) {
+    // Dialog opened but no date input is anywhere we can see. Dump everything
+    // and bail without saving.
+    await page.goto(`${BASE}/cxa/detail.jsp?mfn=${mfn}&src=ip`).catch(() => {});
+    await page.waitForTimeout(1500);
+
+    const all_frames_info = page.frames().map(f => ({
+      url: f.url(), name: f.name(),
+      parent_url: f.parentFrame()?.url() ?? null,
+    }));
+    const err: any = new Error(`updateStatus(${statusCode}): no date input found in dialog frame.`);
+    err.debug = {
+      target_date: date,
+      target_time: time,
+      status_code: statusCode,
+      dlg_frame_url: dlgFrame.url(),
+      all_frames: all_frames_info,
+      discovery,
+      reason: "no input element matched id/name/type='date*'; dialog dismissed without save",
+    };
+    throw err;
+  }
+
+  // Build the locator key for the discovered date input. Prefer id, fall back to name.
+  const dateKey = dateField.id || dateField.name;
+  const dateByIdOrName = dateField.id ? "id" : "name";
+  const timeKey = timeField ? (timeField.id || timeField.name) : null;
+  const timeByIdOrName = timeField ? (timeField.id ? "id" : "name") : null;
+  const notesKey = notesField ? (notesField.id || notesField.name) : null;
+  const notesByIdOrName = notesField ? (notesField.id ? "id" : "name") : null;
+
+  // Selector strings for Playwright locators (used in fill/focus/pressSequentially)
+  const dateSel = dateByIdOrName === "id" ? `#${dateKey}` : `[name="${dateKey}"]`;
+  const timeSel = timeKey ? (timeByIdOrName === "id" ? `#${timeKey}` : `[name="${timeKey}"]`) : null;
+
+  // Three write strategies, with a readback gate. Only submit if the date
+  // input actually equals our target — otherwise dismiss without saving.
   type WriteResult = { strategy: string; date_after: string | null; time_after: string | null };
   const results: WriteResult[] = [];
 
   const readback = async (): Promise<{ date: string | null; time: string | null }> =>
-    await dlgFrame.evaluate(() => {
-      const d = document.getElementById("dateupdated") as HTMLInputElement | null;
-      const t = document.getElementById("timeupdated") as HTMLInputElement | null;
+    await dlgFrame.evaluate((args: { dKey: string; dBy: string; tKey: string | null; tBy: string | null }) => {
+      const get = (key: string, by: string) =>
+        by === "id" ? document.getElementById(key) : document.querySelector(`[name="${key}"]`);
+      const d = get(args.dKey, args.dBy) as HTMLInputElement | null;
+      const t = args.tKey && args.tBy ? get(args.tKey, args.tBy) as HTMLInputElement | null : null;
       return { date: d?.value ?? null, time: t?.value ?? null };
-    });
+    }, { dKey: dateKey, dBy: dateByIdOrName, tKey: timeKey, tBy: timeByIdOrName });
 
-  // Strategy A: native setter on HTMLInputElement.prototype + input/change/blur
-  await dlgFrame.evaluate((params: { date: string; time: string; note: string }) => {
-    const setVal = (id: string, value: string) => {
-      const el = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+  // Strategy A: native setter + input/change/blur events
+  await dlgFrame.evaluate((args: {
+    dKey: string; dBy: string; tKey: string | null; tBy: string | null; nKey: string | null; nBy: string | null;
+    date: string; time: string; note: string;
+  }) => {
+    const get = (key: string, by: string) =>
+      by === "id" ? document.getElementById(key) : document.querySelector(`[name="${key}"]`);
+    const setVal = (el: Element | null, value: string) => {
       if (!el) return;
       const proto = Object.getPrototypeOf(el);
       const desc = Object.getOwnPropertyDescriptor(proto, "value");
@@ -563,18 +626,23 @@ async function updateWorkflowStatus(
       el.dispatchEvent(new Event("change", { bubbles: true }));
       el.dispatchEvent(new Event("blur", { bubbles: true }));
     };
-    setVal("dateupdated", params.date);
-    setVal("timeupdated", params.time);
-    if (params.note) setVal("notes", params.note);
-  }, { date, time, note });
+    setVal(get(args.dKey, args.dBy), args.date);
+    if (args.tKey && args.tBy) setVal(get(args.tKey, args.tBy), args.time);
+    if (args.note && args.nKey && args.nBy) setVal(get(args.nKey, args.nBy), args.note);
+  }, {
+    dKey: dateKey, dBy: dateByIdOrName,
+    tKey: timeKey, tBy: timeByIdOrName,
+    nKey: notesKey, nBy: notesByIdOrName,
+    date, time, note,
+  });
   let r = await readback();
   results.push({ strategy: "native_setter+events", date_after: r.date, time_after: r.time });
 
-  // Strategy B: Playwright fill (real keyboard events, more realistic)
+  // Strategy B: Playwright fill on the discovered selector
   if (r.date !== date) {
     try {
-      await dlgFrame.locator("#dateupdated").fill(date);
-      await dlgFrame.locator("#timeupdated").fill(time).catch(() => {});
+      await dlgFrame.locator(dateSel).fill(date);
+      if (timeSel) await dlgFrame.locator(timeSel).fill(time).catch(() => {});
       r = await readback();
       results.push({ strategy: "playwright_fill", date_after: r.date, time_after: r.time });
     } catch (e: any) {
@@ -582,20 +650,20 @@ async function updateWorkflowStatus(
     }
   }
 
-  // Strategy C: focus → clear → type character-by-character
+  // Strategy C: focus → clear → pressSequentially
   if (r.date !== date) {
     try {
-      await dlgFrame.focus("#dateupdated");
-      await dlgFrame.evaluate(() => {
-        const el = document.getElementById("dateupdated") as HTMLInputElement | null;
+      await dlgFrame.locator(dateSel).focus();
+      await dlgFrame.evaluate((args: { key: string; by: string }) => {
+        const el = (args.by === "id" ? document.getElementById(args.key) : document.querySelector(`[name="${args.key}"]`)) as HTMLInputElement | null;
         if (!el) return;
         const proto = Object.getPrototypeOf(el);
         const desc = Object.getOwnPropertyDescriptor(proto, "value");
         if (desc && desc.set) desc.set.call(el, "");
         else el.value = "";
         el.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-      await dlgFrame.locator("#dateupdated").pressSequentially(date, { delay: 30 });
+      }, { key: dateKey, by: dateByIdOrName });
+      await dlgFrame.locator(dateSel).pressSequentially(date, { delay: 30 });
       r = await readback();
       results.push({ strategy: "focus+clear+pressSequentially", date_after: r.date, time_after: r.time });
     } catch (e: any) {
@@ -603,27 +671,35 @@ async function updateWorkflowStatus(
     }
   }
 
-  // GATE: only submit if date stuck. Otherwise navigate away to dismiss the
-  // dialog cleanly (no save fires) and throw with the diagnostic snapshot.
+  // GATE: only submit if date stuck. Otherwise navigate away (no save fires).
   if (r.date !== date) {
     await page.goto(`${BASE}/cxa/detail.jsp?mfn=${mfn}&src=ip`).catch(() => {});
     await page.waitForTimeout(1500);
-
-    const debug = {
+    const err: any = new Error(`updateStatus(${statusCode}): date input rejected override (${date}). All three write strategies failed.`);
+    err.debug = {
       target_date: date,
       target_time: time,
       status_code: statusCode,
-      input_fingerprint: fingerprint,
+      discovered_date_field: dateField,
+      discovered_time_field: timeField ?? null,
       attempts: results,
-      reason: "dateupdated input value did not stick after three write strategies; dialog dismissed without save to prevent corruption",
+      reason: "date input value did not stick; dialog dismissed without save",
     };
-    const err: any = new Error(`updateStatus(${statusCode}): date input rejected override (${date}). All three write strategies failed.`);
-    err.debug = debug;
     throw err;
   }
 
-  // Date stuck — safe to submit
-  await dlgFrame.click("#updatestatus_button");
+  // Date stuck — safe to submit. Look for the submit button by likely ids/labels.
+  const submitButton = discovery.inputs.find(i =>
+    /update.*status|^updatestatus|update_button/i.test(i.id) ||
+    /update.*status|^updatestatus|update_button/i.test(i.name)
+  );
+  if (submitButton) {
+    const sel = submitButton.id ? `#${submitButton.id}` : `[name="${submitButton.name}"]`;
+    await dlgFrame.locator(sel).click().catch(() => {});
+  } else {
+    // Fall back to text-matched button
+    await dlgFrame.locator('button:has-text("Update"), input[value*="Update" i], button:has-text("Save"), input[value*="Save" i]').first().click().catch(() => {});
+  }
   await page.waitForTimeout(4000);
 
   return `Status ${statusCode} updated to ${date}`;
