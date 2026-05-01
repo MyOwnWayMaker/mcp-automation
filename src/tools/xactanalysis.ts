@@ -215,29 +215,64 @@ function parseAddress(block: string): Address {
   };
 }
 
-function findValueAfterLabel(text: string, label: string | RegExp, maxChars = 200): string | null {
-  const re = label instanceof RegExp
-    ? label
-    : new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[:\\n]\\s*([^\\n]+)`, "i");
-  const m = text.match(re);
-  if (!m) return null;
-  const v = (m[1] || "").trim().substring(0, maxChars);
-  return v.length > 0 ? v : null;
+// Match a label appearing alone on its own line ("Address", "Address:") OR
+// inline with a colon ("Address: 4470 Main"). Returns the value on the same
+// line (after the colon) or the next non-empty line. Accepts a list of label
+// variants — first match wins.
+function findValueAfterLabel(text: string, labels: string | string[], maxChars = 200): string | null {
+  const labelArr = Array.isArray(labels) ? labels : [labels];
+  const lines = text.split("\n").map(l => l.trim());
+
+  for (const label of labelArr) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const standaloneRe = new RegExp(`^${escaped}\\s*:?\\s*$`, "i");
+    const inlineRe = new RegExp(`^${escaped}\\s*:\\s*(.+)$`, "i");
+
+    for (let i = 0; i < lines.length; i++) {
+      const inline = lines[i].match(inlineRe);
+      if (inline && inline[1].trim()) {
+        return inline[1].trim().substring(0, maxChars);
+      }
+      if (standaloneRe.test(lines[i])) {
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j]) return lines[j].substring(0, maxChars);
+        }
+      }
+    }
+  }
+  return null;
 }
 
-function findBlockUnderLabel(text: string, label: string, lineCount = 3): string | null {
-  // Find the label as a line by itself, then take the next `lineCount` non-empty lines.
+// Same flexible matching but collects multi-line blocks (addresses).
+function findBlockUnderLabel(text: string, labels: string | string[], lineCount = 4): string | null {
+  const labelArr = Array.isArray(labels) ? labels : [labels];
   const lines = text.split("\n").map(l => l.trim());
-  const idx = lines.findIndex(l => l.toLowerCase() === label.toLowerCase());
-  if (idx < 0) return null;
-  const block: string[] = [];
-  for (let i = idx + 1; i < lines.length && block.length < lineCount; i++) {
-    if (!lines[i]) continue;
-    // Stop if we hit another label-like line (Title Case ending in : or known section header)
-    if (/^[A-Z][a-zA-Z ]{2,30}$/.test(lines[i]) && i > idx + 1) break;
-    block.push(lines[i]);
+  const labelLineRe = /^[A-Z][a-zA-Z #/]{2,30}\s*:?$/;
+
+  for (const label of labelArr) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const standaloneRe = new RegExp(`^${escaped}\\s*:?\\s*$`, "i");
+    const inlineRe = new RegExp(`^${escaped}\\s*:\\s*(.+)$`, "i");
+
+    for (let i = 0; i < lines.length; i++) {
+      const block: string[] = [];
+      const inline = lines[i].match(inlineRe);
+      if (inline && inline[1].trim()) {
+        block.push(inline[1].trim());
+      } else if (!standaloneRe.test(lines[i])) {
+        continue;
+      }
+
+      for (let j = i + 1; j < lines.length && block.length < lineCount; j++) {
+        if (!lines[j]) continue;
+        if (block.length > 0 && labelLineRe.test(lines[j])) break;
+        block.push(lines[j]);
+      }
+
+      if (block.length > 0) return block.join("\n");
+    }
   }
-  return block.length > 0 ? block.join("\n") : null;
+  return null;
 }
 
 function parseClientPolicy(rawText: string): {
@@ -247,22 +282,22 @@ function parseClientPolicy(rawText: string): {
   policy: { number: string | null; effective_date: string | null; expiration_date: string | null };
   coverage: { code: string | null; limit: number | null; deductible: number | null }[];
 } {
-  // Loss + Mailing addresses — XA renders "Loss Address" then the address block on next lines
-  const lossBlock = findBlockUnderLabel(rawText, "Loss Address", 4)
-    ?? findBlockUnderLabel(rawText, "Risk Address", 4)
-    ?? "";
-  const mailBlock = findBlockUnderLabel(rawText, "Mailing Address", 4) ?? "";
+  // Loss address — XA labels it "Risk Location"
+  const lossBlock = findBlockUnderLabel(rawText, ["Risk Location", "Loss Address", "Risk Address", "Loss Location"], 4) ?? "";
+  // Mailing — "Mailing Address" if present, else plain "Address" (insured's address)
+  const mailBlock = findBlockUnderLabel(rawText, ["Mailing Address", "Address"], 4) ?? "";
 
   // Insured contact
-  const insuredName = findValueAfterLabel(rawText, /Insured(?:\s+Name)?/i)
-    ?? findValueAfterLabel(rawText, /Policyholder/i);
-  const phone = findValueAfterLabel(rawText, /(?:Insured\s+)?Phone(?:\s+Number)?/i);
-  const email = findValueAfterLabel(rawText, /(?:Insured\s+)?Email/i);
+  const insuredName = findValueAfterLabel(rawText, ["Insured Name", "Policyholder Name", "Policyholder", "Insured"]);
+  const phoneRaw = findValueAfterLabel(rawText, ["Mobile Phone", "Phone Number", "Home Phone", "Work Phone", "Insured Phone", "Phone"]);
+  // Strip XA's " - Primary" / " - Mobile" suffix on phone display
+  const phone = phoneRaw ? phoneRaw.replace(/\s*-\s*(Primary|Mobile|Home|Work|Cell)\b.*$/i, "").trim() || phoneRaw : null;
+  const email = findValueAfterLabel(rawText, ["Email Address", "Insured Email", "Email"]);
 
   // Policy
-  const policyNum = findValueAfterLabel(rawText, /Policy(?:\s+Number|\s+#|#)/i);
-  const effDate = findValueAfterLabel(rawText, /Effective\s+Date/i);
-  const expDate = findValueAfterLabel(rawText, /Expiration\s+Date/i);
+  const policyNum = findValueAfterLabel(rawText, ["Policy Number", "Policy #", "Policy No"]);
+  const effDate = findValueAfterLabel(rawText, ["Effective Date", "Policy Effective Date", "Policy Effective"]);
+  const expDate = findValueAfterLabel(rawText, ["Expiration Date", "Policy Expiration Date", "Policy Expiration"]);
 
   // Coverage — patterns like "Coverage A $250,000" or "A $250,000 / $1,000"
   const coverage: { code: string | null; limit: number | null; deductible: number | null }[] = [];
@@ -802,99 +837,277 @@ export async function xactDeleteNote(args: {
 }
 
 // ── xact_set_planned_inspection_date ─────────────────────────────────────────
-// Best-effort: locate the Planned Inspection Date field and set it.
-// Field has its own UI element separate from updateStatus().
+// XA's Planned Inspection Date field is gated by an edit affordance — the
+// static row shows the value but you can't write to it. Clicking the edit
+// icon (Material Icons "edit" or class~="edit") opens a popover with the real
+// input. We then fire native + framework-friendly events and verify by
+// re-reading the assignment.
+
+function dateMatchesAny(rendered: string, isoDate: string): boolean {
+  if (!rendered) return false;
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const candidates = [
+    `${m}/${d}/${y}`,
+    `${m.toString().padStart(2, "0")}/${d.toString().padStart(2, "0")}/${y}`,
+    isoDate,
+    `${m}/${d}/${y.toString().slice(-2)}`,
+    `${m.toString().padStart(2, "0")}/${d.toString().padStart(2, "0")}/${y.toString().slice(-2)}`,
+  ];
+  return candidates.some(c => rendered.includes(c));
+}
+
+async function readPlannedDate(page: Page, mfn: string): Promise<string> {
+  await navigateToTab(page, mfn, "d_assignment");
+  return await page.evaluate(() => {
+    const text = ((document.body as HTMLElement).innerText || "").replace(/ /g, " ");
+    const lines = text.split("\n").map(l => l.trim());
+    const idx = lines.findIndex(l => /planned\s+inspection\s+date/i.test(l));
+    if (idx < 0) return "";
+    const inline = lines[idx].replace(/.*planned\s+inspection\s+date\s*:?\s*/i, "").trim();
+    if (inline) return inline;
+    for (let j = idx + 1; j < Math.min(lines.length, idx + 5); j++) {
+      if (lines[j]) return lines[j];
+    }
+    return "";
+  });
+}
+
 export async function xactSetPlannedInspectionDate(args: {
   mfn: string;
   date: string; // YYYY-MM-DD or M/D/YYYY
 }): Promise<CallToolResult> {
+  const dateIso = fmt(args.date);
+  const [yyyy, mm, dd] = dateIso.split("-");
+  const dateUs = `${parseInt(mm, 10)}/${parseInt(dd, 10)}/${yyyy}`;
+
   const { browser, page } = await getPage();
-  const date = fmt(args.date);
+  const selectorsTried: string[] = [];
+  let rowHtml = "";
+  let popoverHtml = "";
+  let inputHtml = "";
 
   try {
     await navigateToTab(page, args.mfn, "d_assignment");
 
-    // Try a JS API first (XA often exposes setX functions)
+    // Strategy 0: window-scope JS API (cheapest if exposed)
+    selectorsTried.push("JS API: setPlannedInspectionDate / updatePlannedInspection");
     const direct = await page.evaluate(({ d }: { d: string }) => {
       const w = window as any;
       if (typeof w.setPlannedInspectionDate === "function") { w.setPlannedInspectionDate(d); return "setPlannedInspectionDate"; }
       if (typeof w.updatePlannedInspection === "function") { w.updatePlannedInspection(d); return "updatePlannedInspection"; }
       return null;
-    }, { d: date }).catch(() => null);
+    }, { d: dateIso }).catch(() => null);
 
     if (direct) {
       await page.waitForTimeout(3000);
-      return ok(`✅ Planned Inspection Date set to ${date} on ${args.mfn} via ${direct}()`);
+      const verified = await readPlannedDate(page, args.mfn);
+      const okFlag = dateMatchesAny(verified, dateIso);
+      return ok(JSON.stringify({
+        ok: okFlag,
+        value: verified,
+        method: `JS API: ${direct}()`,
+        ...(okFlag ? {} : {
+          debug_snapshot: { selectors_tried: selectorsTried, row_html: "", popover_html: "", input_outer_html: "" },
+        }),
+      }, null, 2));
     }
 
-    // Find the field by label proximity. XA forms typically have a <label>/<td>
-    // with "Planned Inspection Date" text and a sibling input.
-    const fieldInfo = await page.evaluate(() => {
-      const labels = Array.from(document.querySelectorAll("label, td, th, span, div"))
-        .filter(el => /planned\s+inspection\s+date/i.test((el as HTMLElement).innerText || ""));
-      if (labels.length === 0) return { found: false, candidates: 0, hint: "" };
+    // Locate the row containing the label. Prefer <tr>/<li>; fall back to closest matching ancestor.
+    selectorsTried.push("tr/li:has-text('Planned Inspection Date')");
+    let rowLocator = page.locator('tr', { hasText: /planned\s+inspection\s+date/i }).first();
+    if ((await rowLocator.count()) === 0) {
+      rowLocator = page.locator('li', { hasText: /planned\s+inspection\s+date/i }).first();
+    }
+    if ((await rowLocator.count()) === 0) {
+      selectorsTried.push("text=...→ ancestor-or-self::tr|div|td|li[1]");
+      rowLocator = page.locator(`text=/planned\\s+inspection\\s+date/i`)
+        .locator(`xpath=ancestor-or-self::*[self::tr or self::div or self::td or self::li][1]`)
+        .first();
+    }
 
-      // Look for the closest input/date field
-      for (const lbl of labels) {
-        const parent = lbl.closest("tr, div, td") || lbl.parentElement;
-        if (!parent) continue;
-        const input = parent.querySelector(
-          "input[type='date'], input[type='text'], input[name*='date' i], input[id*='date' i]"
-        ) as HTMLInputElement | null;
-        if (input) {
-          return {
-            found: true,
-            id: input.id || "",
-            name: input.name || "",
-            current_value: input.value || "",
-            candidates: labels.length,
-            hint: "",
-          };
-        }
+    if ((await rowLocator.count()) === 0) {
+      return ok(JSON.stringify({
+        ok: false,
+        error: "Row containing 'Planned Inspection Date' not found on assignment detail tab",
+        debug_snapshot: { selectors_tried: selectorsTried, row_html: "", popover_html: "", input_outer_html: "" },
+      }, null, 2));
+    }
+    rowHtml = await rowLocator.evaluate(el => (el as HTMLElement).outerHTML.substring(0, 2500));
+
+    // Click an edit affordance inside the row.
+    // Material Icons render their name as text content (e.g. <i class="material-icons">edit</i>),
+    // so we filter material-icons by exact text "edit".
+    const editSelector = '.material-icons, [class*="edit" i], a[onclick*="dit"], button[onclick*="dit"], [aria-label*="dit" i], [title*="dit" i], i.fa-edit, i.fa-pencil, .icon-edit, .pencil';
+    selectorsTried.push(`row → ${editSelector}`);
+    const editCandidates = rowLocator.locator(editSelector);
+    const editCount = await editCandidates.count();
+
+    let clicked = false;
+    for (let k = 0; k < editCount && !clicked; k++) {
+      const cand = editCandidates.nth(k);
+      const cls = (await cand.getAttribute("class").catch(() => "")) || "";
+      if (cls.includes("material-icons")) {
+        const t = (await cand.innerText().catch(() => "")).trim().toLowerCase();
+        if (t !== "edit" && t !== "mode_edit" && t !== "create") continue;
       }
-      return { found: false, candidates: labels.length, hint: "label exists but no input nearby" };
+      const visible = await cand.isVisible().catch(() => false);
+      if (!visible) continue;
+      await cand.click({ timeout: 4000 }).catch(() => {});
+      clicked = true;
+    }
+
+    if (!clicked) {
+      // Last resort: click the row itself; some XA fields toggle inline edit on row click.
+      await rowLocator.click({ timeout: 3000 }).catch(() => {});
+    }
+
+    await page.waitForTimeout(1500);
+
+    // Capture any popover/modal that appeared
+    const modalLocator = page.locator(
+      '.mdl-dialog, dialog, [role="dialog"], .modal, .popover, [class*="dialog"], [class*="popup"], [class*="overlay"]'
+    ).first();
+    if ((await modalLocator.count()) > 0 && (await modalLocator.isVisible().catch(() => false))) {
+      popoverHtml = await modalLocator.evaluate(el => (el as HTMLElement).outerHTML.substring(0, 3500));
+    }
+
+    // Find a visible date-ish input. Prefer one inside a visible modal/popover.
+    const inputInfo = await page.evaluate(() => {
+      const isVisible = (el: Element) => {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const inputs = Array.from(document.querySelectorAll("input")).filter(input => {
+        if (!isVisible(input)) return false;
+        const i = input as HTMLInputElement;
+        const t = (i.type || "").toLowerCase();
+        const n = (i.name || "").toLowerCase();
+        const id = (i.id || "").toLowerCase();
+        const ph = (i.placeholder || "").toLowerCase();
+        const cls = (i.className || "").toLowerCase();
+        if (t === "hidden" || t === "checkbox" || t === "radio" || t === "submit" || t === "button") return false;
+        return (
+          t === "date" ||
+          /date|inspect|planned/.test(n) ||
+          /date|inspect|planned/.test(id) ||
+          /date|m\/d|mm\/dd|\d\d\/\d\d/.test(ph) ||
+          /date|datepicker/.test(cls)
+        );
+      });
+      return inputs.slice(0, 5).map(i => {
+        const inp = i as HTMLInputElement;
+        return {
+          id: inp.id || "",
+          name: inp.name || "",
+          type: inp.type || "",
+          value: inp.value || "",
+          placeholder: inp.placeholder || "",
+          outerHTML: inp.outerHTML.substring(0, 800),
+        };
+      });
     });
 
-    if (!fieldInfo.found) {
-      return ok(
-        `Could not locate Planned Inspection Date input on ${args.mfn}.\n` +
-        `Found ${fieldInfo.candidates} label match(es). Hint: ${fieldInfo.hint}\n` +
-        `May need to navigate to a different tab — try the Workflow or Schedule view if XA exposes one.`
-      );
+    if (inputInfo.length === 0) {
+      return ok(JSON.stringify({
+        ok: false,
+        error: "No visible date input found after clicking edit affordance",
+        debug_snapshot: {
+          selectors_tried: selectorsTried,
+          row_html: rowHtml,
+          popover_html: popoverHtml,
+          input_outer_html: "",
+        },
+      }, null, 2));
     }
 
-    // Fill via the located input. Use both id and name fallbacks.
-    const setValue = await page.evaluate(({ id, name, value }: { id?: string; name?: string; value: string }) => {
-      const input = (id ? document.getElementById(id) :
-                    name ? document.querySelector(`[name="${name}"]`) :
-                    null) as HTMLInputElement | null;
-      if (!input) return { ok: false, before: null, after: null };
-      const before = input.value;
-      input.value = value;
+    const target = inputInfo[0];
+    inputHtml = target.outerHTML;
+
+    // Strategy A: native value setter + all the events Vue/React/MDL listen for.
+    // Object.getOwnPropertyDescriptor on the prototype bypasses any framework-installed setters.
+    const setA = await page.evaluate(({ id, name, value }: { id: string; name: string; value: string }) => {
+      const input = (id ? document.getElementById(id) : null) as HTMLInputElement | null
+        ?? (name ? document.querySelector(`input[name="${CSS.escape(name)}"]`) : null) as HTMLInputElement | null;
+      if (!input) return { ok: false, after: "" };
+      const proto = Object.getPrototypeOf(input);
+      const desc = Object.getOwnPropertyDescriptor(proto, "value");
+      if (desc && desc.set) desc.set.call(input, value); else input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
       input.dispatchEvent(new Event("blur", { bubbles: true }));
-      return { ok: true, before, after: input.value };
-    }, { id: fieldInfo.id, name: fieldInfo.name, value: date });
+      input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+      return { ok: true, after: input.value };
+    }, { id: target.id, name: target.name, value: dateIso });
 
-    if (!setValue.ok) {
-      return ok(`Found field but could not set value on ${args.mfn}.`);
+    // Strategy B: if the ISO format was rejected (some pickers want M/D/YYYY), try US format.
+    if (setA.ok && setA.after !== dateIso && setA.after !== dateUs) {
+      await page.evaluate(({ id, name, value }: { id: string; name: string; value: string }) => {
+        const input = (id ? document.getElementById(id) : null) as HTMLInputElement | null
+          ?? (name ? document.querySelector(`input[name="${CSS.escape(name)}"]`) : null) as HTMLInputElement | null;
+        if (!input) return;
+        const proto = Object.getPrototypeOf(input);
+        const desc = Object.getOwnPropertyDescriptor(proto, "value");
+        if (desc && desc.set) desc.set.call(input, value); else input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        input.dispatchEvent(new Event("blur", { bubbles: true }));
+      }, { id: target.id, name: target.name, value: dateUs });
     }
 
-    // Look for a save/submit button on the same form
-    await page.waitForTimeout(1000);
-    const saveBtn = page.locator(
-      'input[value*="Save" i], button:has-text("Save"), input[value*="Submit" i], button:has-text("Submit"), input[value*="Update" i]'
+    // Strategy C: Playwright fill+Tab — generates more realistic events than evaluate-based dispatch.
+    const inputSel = target.id
+      ? `#${CSS.escape(target.id)}`
+      : (target.name ? `input[name="${target.name}"]` : "");
+    if (inputSel) {
+      await page.locator(inputSel).first().fill(dateUs).catch(() => {});
+      await page.locator(inputSel).first().press("Tab").catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
+    // Click any visible Save / Apply / OK / Update button.
+    const saveLocator = page.locator(
+      'button:visible:has-text("Save"), button:visible:has-text("Apply"), button:visible:has-text("OK"), ' +
+      'button:visible:has-text("Update"), input[type="submit"]:visible, ' +
+      '.mdl-button:visible:has-text("OK"), .mdl-button:visible:has-text("Apply"), .mdl-button:visible:has-text("Save")'
     ).first();
-    if (await saveBtn.count() > 0) {
-      await saveBtn.click().catch(() => {});
+    const saveCount = await saveLocator.count();
+    if (saveCount > 0) {
+      await saveLocator.click().catch(() => {});
       await page.waitForTimeout(3000);
+    } else {
+      // Some pickers commit on Enter
+      await page.keyboard.press("Enter").catch(() => {});
+      await page.waitForTimeout(2000);
     }
 
-    return ok(
-      `✅ Planned Inspection Date set on ${args.mfn}: ${setValue.before || "(empty)"} → ${date}\n` +
-      `Field: id=${fieldInfo.id} name=${fieldInfo.name}\n` +
-      `${(await saveBtn.count()) > 0 ? "Save button clicked." : "⚠️  No save button found — change may not have persisted. Verify in XA."}`
-    );
+    // Verify by re-reading the assignment detail row
+    const verified = await readPlannedDate(page, args.mfn);
+    const success = dateMatchesAny(verified, dateIso);
+
+    if (success) {
+      return ok(JSON.stringify({
+        ok: true,
+        value: verified,
+        method: "edit-popover + value-set + save",
+        save_clicked: saveCount > 0,
+      }, null, 2));
+    }
+
+    return ok(JSON.stringify({
+      ok: false,
+      value_read: verified || "(empty)",
+      target_iso: dateIso,
+      target_us: dateUs,
+      save_clicked: saveCount > 0,
+      strategy_a_after: setA.after,
+      debug_snapshot: {
+        selectors_tried: selectorsTried,
+        row_html: rowHtml,
+        popover_html: popoverHtml,
+        input_outer_html: inputHtml,
+        debug_html_after: rowHtml,
+      },
+    }, null, 2));
   } finally {
     await browser.close();
   }
