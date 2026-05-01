@@ -1,9 +1,22 @@
 import { chromium, type Browser, type Page, type BrowserContext } from "playwright";
 import fs from "fs";
+import path from "path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-const SESSION_PATH = process.env.XACTANALYSIS_SESSION_PATH || "/Users/hakielmcqueen/mcp-automation/xactanalysis_session.json";
+const SESSION_PATH = process.env.XACTANALYSIS_SESSION_PATH
+  ?? path.resolve(process.cwd(), "xactanalysis_session.json");
 const BASE = "https://www.xactanalysis.com/apps";
+
+// Tab name → XA's internal d_<tabid> identifier
+const TAB_IDS: Record<string, string> = {
+  details:       "d_assignment",     // assignment summary (current default)
+  client_policy: "d_clientpolicy",
+  notes:         "d_notes",
+  documents:     "d_documents",
+  map:           "d_map",
+  action_items:  "d_actionitems",
+  history:       "d_history",
+};
 
 // Workflow status codes
 const STATUS_CODES: Record<string, number> = {
@@ -38,7 +51,7 @@ function loadSession(): { cookies: unknown[]; localStorage: Record<string, strin
   }
   throw new Error(
     "XactAnalysis session not found. Set XACTANALYSIS_SESSION_JSON env var or run: " +
-    "node /Users/hakielmcqueen/mcp-automation/scripts/auth-xactanalysis.mjs"
+    "node scripts/auth-xactanalysis.mjs"
   );
 }
 
@@ -147,21 +160,185 @@ export async function xactListAssignments(args: {
   }
 }
 
+// ── Tab navigation helper ────────────────────────────────────────────────────
+// Lands on the assignment detail page and switches to the requested tab via
+// XA's gotoDetailTab() JS API. Returns the page so caller can scrape further.
+async function navigateToTab(page: Page, mfn: string, tabId: string): Promise<void> {
+  await page.goto(`${BASE}/cxa/detail.jsp?mfn=${mfn}&src=ip`);
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForTimeout(4000);
+  if (tabId !== "d_assignment") {
+    await page.evaluate(
+      ({ tab, mfn }: { tab: string; mfn: string }) =>
+        (window as any).gotoDetailTab(tab, mfn, "ip", false, 0),
+      { tab: tabId, mfn }
+    );
+    await page.waitForTimeout(4000);
+  }
+}
+
+// ── CLIENT/POLICY parser ─────────────────────────────────────────────────────
+// Defensive label-anchored extraction. Returns null for missing fields.
+// Always includes raw_html + raw_text so callers can iterate the parser.
+type Address = {
+  street: string | null;
+  street2: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+};
+
+function parseAddress(block: string): Address {
+  // Tries to parse "<street>\n<street2?>\n<city>, <state> <zip>" or single-line variants.
+  const cleaned = block.split("\n").map(l => l.trim()).filter(Boolean);
+  if (cleaned.length === 0) {
+    return { street: null, street2: null, city: null, state: null, zip: null };
+  }
+  // Find the line with "City, ST ZIP" — usually last
+  let cszIdx = -1;
+  let csz: { city: string; state: string; zip: string } | null = null;
+  for (let i = cleaned.length - 1; i >= 0; i--) {
+    const m = cleaned[i].match(/^(.+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*$/);
+    if (m) {
+      cszIdx = i;
+      csz = { city: m[1].trim(), state: m[2], zip: m[3] };
+      break;
+    }
+  }
+  const streetLines = cszIdx >= 0 ? cleaned.slice(0, cszIdx) : cleaned;
+  return {
+    street: streetLines[0] ?? null,
+    street2: streetLines[1] ?? null,
+    city: csz?.city ?? null,
+    state: csz?.state ?? null,
+    zip: csz?.zip ?? null,
+  };
+}
+
+function findValueAfterLabel(text: string, label: string | RegExp, maxChars = 200): string | null {
+  const re = label instanceof RegExp
+    ? label
+    : new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[:\\n]\\s*([^\\n]+)`, "i");
+  const m = text.match(re);
+  if (!m) return null;
+  const v = (m[1] || "").trim().substring(0, maxChars);
+  return v.length > 0 ? v : null;
+}
+
+function findBlockUnderLabel(text: string, label: string, lineCount = 3): string | null {
+  // Find the label as a line by itself, then take the next `lineCount` non-empty lines.
+  const lines = text.split("\n").map(l => l.trim());
+  const idx = lines.findIndex(l => l.toLowerCase() === label.toLowerCase());
+  if (idx < 0) return null;
+  const block: string[] = [];
+  for (let i = idx + 1; i < lines.length && block.length < lineCount; i++) {
+    if (!lines[i]) continue;
+    // Stop if we hit another label-like line (Title Case ending in : or known section header)
+    if (/^[A-Z][a-zA-Z ]{2,30}$/.test(lines[i]) && i > idx + 1) break;
+    block.push(lines[i]);
+  }
+  return block.length > 0 ? block.join("\n") : null;
+}
+
+function parseClientPolicy(rawText: string): {
+  loss_address: Address;
+  mailing_address: Address;
+  insured: { name: string | null; phone: string | null; email: string | null };
+  policy: { number: string | null; effective_date: string | null; expiration_date: string | null };
+  coverage: { code: string | null; limit: number | null; deductible: number | null }[];
+} {
+  // Loss + Mailing addresses — XA renders "Loss Address" then the address block on next lines
+  const lossBlock = findBlockUnderLabel(rawText, "Loss Address", 4)
+    ?? findBlockUnderLabel(rawText, "Risk Address", 4)
+    ?? "";
+  const mailBlock = findBlockUnderLabel(rawText, "Mailing Address", 4) ?? "";
+
+  // Insured contact
+  const insuredName = findValueAfterLabel(rawText, /Insured(?:\s+Name)?/i)
+    ?? findValueAfterLabel(rawText, /Policyholder/i);
+  const phone = findValueAfterLabel(rawText, /(?:Insured\s+)?Phone(?:\s+Number)?/i);
+  const email = findValueAfterLabel(rawText, /(?:Insured\s+)?Email/i);
+
+  // Policy
+  const policyNum = findValueAfterLabel(rawText, /Policy(?:\s+Number|\s+#|#)/i);
+  const effDate = findValueAfterLabel(rawText, /Effective\s+Date/i);
+  const expDate = findValueAfterLabel(rawText, /Expiration\s+Date/i);
+
+  // Coverage — patterns like "Coverage A $250,000" or "A $250,000 / $1,000"
+  const coverage: { code: string | null; limit: number | null; deductible: number | null }[] = [];
+  const covRe = /Coverage\s+([A-F])\s*[:\$]?\s*\$?([\d,]+)(?:\s*\/\s*\$?([\d,]+))?/gi;
+  let cm: RegExpExecArray | null;
+  while ((cm = covRe.exec(rawText)) !== null) {
+    coverage.push({
+      code: cm[1],
+      limit: cm[2] ? parseInt(cm[2].replace(/,/g, ""), 10) : null,
+      deductible: cm[3] ? parseInt(cm[3].replace(/,/g, ""), 10) : null,
+    });
+  }
+
+  return {
+    loss_address: parseAddress(lossBlock),
+    mailing_address: parseAddress(mailBlock),
+    insured: {
+      name: insuredName,
+      phone,
+      email,
+    },
+    policy: {
+      number: policyNum,
+      effective_date: effDate,
+      expiration_date: expDate,
+    },
+    coverage,
+  };
+}
+
+// ── xact_get_assignment (now tab-aware) ──────────────────────────────────────
+
 export async function xactGetAssignment(args: {
   mfn: string;
+  tab?: "details" | "client_policy" | "notes" | "documents" | "map" | "action_items" | "history";
 }): Promise<CallToolResult> {
+  const tabName = args.tab ?? "details";
+  const tabId = TAB_IDS[tabName];
+  if (!tabId) {
+    return ok(`Unknown tab: ${tabName}. Valid: ${Object.keys(TAB_IDS).join(", ")}`);
+  }
+
   const { browser, page } = await getPage();
 
   try {
-    await page.goto(`${BASE}/cxa/detail.jsp?mfn=${args.mfn}&src=ip`);
-    await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(5000);
+    await navigateToTab(page, args.mfn, tabId);
 
-    const bodyText = (await page.locator("body").innerText().catch(() => ""))
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
+    const tabContainerId = tabId; // XA convention: container has id matching the tab id
 
-    return ok(`Assignment Detail (MFN: ${args.mfn}):\n\n${bodyText.substring(0, 4000)}`);
+    // Pull both rendered text and HTML of the tab's container (fall back to body)
+    const { rawText, rawHtml } = await page.evaluate((containerId: string) => {
+      const el = document.getElementById(containerId) || document.body;
+      return {
+        rawText: (el as HTMLElement).innerText.replace(/\n{3,}/g, "\n\n").trim(),
+        rawHtml: el.innerHTML,
+      };
+    }, tabContainerId);
+
+    // Special handling for client_policy: parse into structured JSON
+    if (tabName === "client_policy") {
+      const parsed = parseClientPolicy(rawText);
+      const result = {
+        mfn: args.mfn,
+        tab: "client_policy",
+        ...parsed,
+        raw_text: rawText.substring(0, 4000),
+        raw_html: rawHtml.substring(0, 8000),
+      };
+      return ok(JSON.stringify(result, null, 2));
+    }
+
+    // All other tabs: return rendered text (default behavior preserved for `details`)
+    return ok(
+      `Assignment Detail (MFN: ${args.mfn}, tab: ${tabName}):\n\n` +
+      rawText.substring(0, 4000)
+    );
   } finally {
     await browser.close();
   }
@@ -538,6 +715,186 @@ export async function xactGetNotes(args: {
     const notesIdx = bodyText.indexOf("Add a Note");
     const notesSection = notesIdx >= 0 ? bodyText.slice(notesIdx) : bodyText;
     return ok(`Notes for assignment ${args.mfn}:\n\n${notesSection.substring(0, 3000)}`);
+  } finally {
+    await browser.close();
+  }
+}
+
+// ── xact_delete_note ─────────────────────────────────────────────────────────
+// Best-effort: tries multiple strategies to identify and remove a note.
+// Pass either note_id (XA's internal note ID) or note_text_match (substring of
+// the note body — first matching note will be deleted).
+export async function xactDeleteNote(args: {
+  mfn: string;
+  note_id?: string;
+  note_text_match?: string;
+}): Promise<CallToolResult> {
+  if (!args.note_id && !args.note_text_match) {
+    return ok("Provide either note_id or note_text_match.");
+  }
+
+  const { browser, page } = await getPage();
+
+  try {
+    await navigateToTab(page, args.mfn, "d_notes");
+
+    // Try direct JS function first (XA pattern: deleteNote, removeNote, etc.)
+    if (args.note_id) {
+      const direct = await page.evaluate((id: string) => {
+        const w = window as any;
+        if (typeof w.deleteNote === "function") { w.deleteNote(id); return "deleteNote"; }
+        if (typeof w.DeleteNote === "function") { w.DeleteNote(id); return "DeleteNote"; }
+        if (typeof w.removeNote === "function") { w.removeNote(id); return "removeNote"; }
+        return null;
+      }, args.note_id).catch(() => null);
+
+      if (direct) {
+        await page.waitForTimeout(2000);
+        // Confirm any modal that appeared
+        await page.locator('button:has-text("OK"), button:has-text("Yes"), button:has-text("Delete"), input[value="OK"], input[value="Yes"], input[value="Delete"]').first().click({ timeout: 2000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+        return ok(`✅ Note ${args.note_id} deleted via ${direct}() on ${args.mfn}`);
+      }
+    }
+
+    // Find note rows and identify the target one
+    const noteSnapshot = await page.evaluate(({ id, match }: { id?: string; match?: string }) => {
+      const container = document.getElementById("d_notes") || document.body;
+      const rows = Array.from(container.querySelectorAll("tr, li, div"))
+        .filter(el => {
+          const txt = (el as HTMLElement).innerText || "";
+          if (txt.length < 20 || txt.length > 2000) return false;
+          if (id && el.outerHTML.includes(id)) return true;
+          if (match && txt.toLowerCase().includes(match.toLowerCase())) return true;
+          return false;
+        });
+      return rows.slice(0, 5).map(r => ({
+        tag: r.tagName,
+        text: (r as HTMLElement).innerText.substring(0, 200),
+        html: r.outerHTML.substring(0, 800),
+      }));
+    }, { id: args.note_id, match: args.note_text_match });
+
+    if (noteSnapshot.length === 0) {
+      return ok(`Note not found on ${args.mfn} (no row matched id=${args.note_id} or text="${args.note_text_match}").`);
+    }
+
+    // Click any delete control inside the matched row
+    const deleteBtn = page.locator(
+      `#d_notes tr:has-text("${args.note_text_match || args.note_id}") :is(a, button, [onclick*="elete"]):is(:has-text("Delete"), [title*="Delete"], [aria-label*="Delete"], [onclick*="elete"])`
+    ).first();
+
+    if (await deleteBtn.count() > 0) {
+      await deleteBtn.click();
+      await page.waitForTimeout(2000);
+      await page.locator('button:has-text("OK"), button:has-text("Yes"), button:has-text("Delete"), input[value="OK"], input[value="Yes"]').first().click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+      return ok(`✅ Note deleted from ${args.mfn} (matched: "${(args.note_text_match || args.note_id || "").substring(0, 60)}")`);
+    }
+
+    return ok(
+      `Could not delete note on ${args.mfn} — found ${noteSnapshot.length} matching row(s) but no delete control inside. Debug:\n\n` +
+      noteSnapshot.map((r, i) => `[${i}] ${r.tag}: ${r.text}\nHTML: ${r.html}`).join("\n\n---\n\n")
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+// ── xact_set_planned_inspection_date ─────────────────────────────────────────
+// Best-effort: locate the Planned Inspection Date field and set it.
+// Field has its own UI element separate from updateStatus().
+export async function xactSetPlannedInspectionDate(args: {
+  mfn: string;
+  date: string; // YYYY-MM-DD or M/D/YYYY
+}): Promise<CallToolResult> {
+  const { browser, page } = await getPage();
+  const date = fmt(args.date);
+
+  try {
+    await navigateToTab(page, args.mfn, "d_assignment");
+
+    // Try a JS API first (XA often exposes setX functions)
+    const direct = await page.evaluate(({ d }: { d: string }) => {
+      const w = window as any;
+      if (typeof w.setPlannedInspectionDate === "function") { w.setPlannedInspectionDate(d); return "setPlannedInspectionDate"; }
+      if (typeof w.updatePlannedInspection === "function") { w.updatePlannedInspection(d); return "updatePlannedInspection"; }
+      return null;
+    }, { d: date }).catch(() => null);
+
+    if (direct) {
+      await page.waitForTimeout(3000);
+      return ok(`✅ Planned Inspection Date set to ${date} on ${args.mfn} via ${direct}()`);
+    }
+
+    // Find the field by label proximity. XA forms typically have a <label>/<td>
+    // with "Planned Inspection Date" text and a sibling input.
+    const fieldInfo = await page.evaluate(() => {
+      const labels = Array.from(document.querySelectorAll("label, td, th, span, div"))
+        .filter(el => /planned\s+inspection\s+date/i.test((el as HTMLElement).innerText || ""));
+      if (labels.length === 0) return { found: false, candidates: 0, hint: "" };
+
+      // Look for the closest input/date field
+      for (const lbl of labels) {
+        const parent = lbl.closest("tr, div, td") || lbl.parentElement;
+        if (!parent) continue;
+        const input = parent.querySelector(
+          "input[type='date'], input[type='text'], input[name*='date' i], input[id*='date' i]"
+        ) as HTMLInputElement | null;
+        if (input) {
+          return {
+            found: true,
+            id: input.id || "",
+            name: input.name || "",
+            current_value: input.value || "",
+            candidates: labels.length,
+            hint: "",
+          };
+        }
+      }
+      return { found: false, candidates: labels.length, hint: "label exists but no input nearby" };
+    });
+
+    if (!fieldInfo.found) {
+      return ok(
+        `Could not locate Planned Inspection Date input on ${args.mfn}.\n` +
+        `Found ${fieldInfo.candidates} label match(es). Hint: ${fieldInfo.hint}\n` +
+        `May need to navigate to a different tab — try the Workflow or Schedule view if XA exposes one.`
+      );
+    }
+
+    // Fill via the located input. Use both id and name fallbacks.
+    const setValue = await page.evaluate(({ id, name, value }: { id?: string; name?: string; value: string }) => {
+      const input = (id ? document.getElementById(id) :
+                    name ? document.querySelector(`[name="${name}"]`) :
+                    null) as HTMLInputElement | null;
+      if (!input) return { ok: false, before: null, after: null };
+      const before = input.value;
+      input.value = value;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true }));
+      return { ok: true, before, after: input.value };
+    }, { id: fieldInfo.id, name: fieldInfo.name, value: date });
+
+    if (!setValue.ok) {
+      return ok(`Found field but could not set value on ${args.mfn}.`);
+    }
+
+    // Look for a save/submit button on the same form
+    await page.waitForTimeout(1000);
+    const saveBtn = page.locator(
+      'input[value*="Save" i], button:has-text("Save"), input[value*="Submit" i], button:has-text("Submit"), input[value*="Update" i]'
+    ).first();
+    if (await saveBtn.count() > 0) {
+      await saveBtn.click().catch(() => {});
+      await page.waitForTimeout(3000);
+    }
+
+    return ok(
+      `✅ Planned Inspection Date set on ${args.mfn}: ${setValue.before || "(empty)"} → ${date}\n` +
+      `Field: id=${fieldInfo.id} name=${fieldInfo.name}\n` +
+      `${(await saveBtn.count()) > 0 ? "Save button clicked." : "⚠️  No save button found — change may not have persisted. Verify in XA."}`
+    );
   } finally {
     await browser.close();
   }
