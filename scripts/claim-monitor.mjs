@@ -249,6 +249,9 @@ async function main() {
     process.exit(1);
   }
 
+  // Send a startup ping so you know the monitor came up cleanly.
+  sendIMessage("🟢 Claim monitor started — watching inbox every 60s.", ALERT_RECIPIENT);
+
   while (true) {
     try {
       const { scanned, alerted } = await pollOnce(gmail, state);
