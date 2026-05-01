@@ -510,14 +510,25 @@ async function updateWorkflowStatus(
 
   await dlgFrame.waitForLoadState("domcontentloaded");
 
-  // Fill date, time, and optional note
+  // Fill date/time/notes. Bare `el.value = x` doesn't trigger framework reactivity
+  // (Vue/MDL bindings ignore it), so the form submits with whatever was prefilled
+  // ("now"). Use the native setter on HTMLInputElement.prototype + dispatch the
+  // events those frameworks listen for.
   await dlgFrame.evaluate((params: { date: string; time: string; note: string }) => {
-    const dateEl = document.getElementById("dateupdated") as HTMLInputElement;
-    if (dateEl) dateEl.value = params.date;
-    const timeEl = document.getElementById("timeupdated") as HTMLInputElement;
-    if (timeEl) timeEl.value = params.time;
-    const notesEl = document.getElementById("notes") as HTMLTextAreaElement;
-    if (notesEl && params.note) notesEl.value = params.note;
+    const setVal = (id: string, value: string) => {
+      const el = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+      if (!el) return;
+      const proto = Object.getPrototypeOf(el);
+      const desc = Object.getOwnPropertyDescriptor(proto, "value");
+      if (desc && desc.set) desc.set.call(el, value);
+      else (el as any).value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("blur", { bubbles: true }));
+    };
+    setVal("dateupdated", params.date);
+    setVal("timeupdated", params.time);
+    if (params.note) setVal("notes", params.note);
   }, { date, time, note });
 
   // Click UPDATE STATUS
@@ -960,14 +971,20 @@ function dateMatchesAny(rendered: string, isoDate: string): boolean {
 async function readPlannedDate(page: Page, mfn: string): Promise<string> {
   await navigateToTab(page, mfn, "d_assignment");
   return await page.evaluate(() => {
-    const text = ((document.body as HTMLElement).innerText || "").replace(/ /g, " ");
-    const lines = text.split("\n").map(l => l.trim());
-    const idx = lines.findIndex(l => /planned\s+inspection\s+date/i.test(l));
-    if (idx < 0) return "";
-    const inline = lines[idx].replace(/.*planned\s+inspection\s+date\s*:?\s*/i, "").trim();
-    if (inline) return inline;
-    for (let j = idx + 1; j < Math.min(lines.length, idx + 5); j++) {
-      if (lines[j]) return lines[j];
+    // Read from the editable workflow row only — body text also contains the
+    // status-timeline entry which records the moment of update ("May 1, 2026
+    // 10:35:53 AM"), so reading from there gave us the submission timestamp,
+    // not the planned date persisted in the row's value cell.
+    const labelRe = /^\s*planned\s+inspection\s+date\s*:?\s*$/i;
+    const trs = Array.from(document.querySelectorAll("tr"));
+    for (const tr of trs) {
+      const first = tr.children[0] as HTMLElement | undefined;
+      if (!first || !labelRe.test((first.innerText || "").trim())) continue;
+      for (let i = 1; i < tr.children.length; i++) {
+        const txt = ((tr.children[i] as HTMLElement).innerText || "").trim();
+        if (txt) return txt;
+      }
+      return "";
     }
     return "";
   });
