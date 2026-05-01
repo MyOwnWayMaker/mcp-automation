@@ -610,15 +610,30 @@ async function updateWorkflowStatus(
       return { date: d?.value ?? null, time: t?.value ?? null };
     }, { dKey: dateKey, dBy: dateByIdOrName, tKey: timeKey, tBy: timeByIdOrName });
 
-  // Strategy A: native setter + input/change/blur events
+  // Strategy A: drive flatpickr if present (keeps visible+hidden inputs in
+  // lockstep), else native setter + input/change/blur. Dispatch's discovery
+  // confirmed the date field is class="flatpickr-input" with type="hidden",
+  // and an unnamed visible <input type="text"> exists alongside — flatpickr
+  // resyncs the hidden from the visible at submit time, so we MUST drive its
+  // API rather than poking the inputs directly.
   await dlgFrame.evaluate((args: {
     dKey: string; dBy: string; tKey: string | null; tBy: string | null; nKey: string | null; nBy: string | null;
     date: string; time: string; note: string;
   }) => {
-    const get = (key: string, by: string) =>
-      by === "id" ? document.getElementById(key) : document.querySelector(`[name="${key}"]`);
-    const setVal = (el: Element | null, value: string) => {
+    const get = (key: string, by: string): HTMLElement | null =>
+      (by === "id" ? document.getElementById(key) : document.querySelector(`[name="${key}"]`)) as HTMLElement | null;
+
+    const setVal = (el: HTMLElement | null, value: string) => {
       if (!el) return;
+      // Flatpickr-first: el._flatpickr.setDate(value, true) updates the visible
+      // text input AND the hidden form field together and fires the proper
+      // change events. Without this, our write to the hidden field gets
+      // overwritten by flatpickr's internal resync from the visible input.
+      const fp = (el as any)._flatpickr;
+      if (fp && typeof fp.setDate === "function") {
+        try { fp.setDate(value, true); return; } catch {}
+      }
+      // Native setter fallback for plain inputs
       const proto = Object.getPrototypeOf(el);
       const desc = Object.getOwnPropertyDescriptor(proto, "value");
       if (desc && desc.set) desc.set.call(el, value);
@@ -627,6 +642,7 @@ async function updateWorkflowStatus(
       el.dispatchEvent(new Event("change", { bubbles: true }));
       el.dispatchEvent(new Event("blur", { bubbles: true }));
     };
+
     setVal(get(args.dKey, args.dBy), args.date);
     if (args.tKey && args.tBy) setVal(get(args.tKey, args.tBy), args.time);
     if (args.note && args.nKey && args.nBy) setVal(get(args.nKey, args.nBy), args.note);
