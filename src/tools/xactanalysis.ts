@@ -195,37 +195,40 @@ function parseAddress(block: string): Address {
     return { street: null, street2: null, city: null, state: null, zip: null };
   }
 
-  // Multi-line variant: street(s) on first line(s), "city, ST zip [country]" last
+  // Single-line full: "<street>, <city>, <state> <zip> [country]". Two commas required.
+  // city captured as [^,]+ so the regex can't merge street+city when both are present.
+  const fullSingle = (line: string) =>
+    line.match(/^(.+),\s*([^,]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)(?:\s+[A-Z]{2,3})?\s*$/);
+  // CSZ-only: "<city>, <state> <zip> [country]". One comma.
+  const cszOnly = (line: string) =>
+    line.match(/^([^,]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)(?:\s+[A-Z]{2,3})?\s*$/);
+
+  if (lines.length === 1) {
+    const m = fullSingle(lines[0]);
+    if (m) return { street: m[1].trim(), street2: null, city: m[2].trim(), state: m[3], zip: m[4] };
+    const c = cszOnly(lines[0]);
+    if (c) return { street: null, street2: null, city: c[1].trim(), state: c[2], zip: c[3] };
+    return { street: lines[0], street2: null, city: null, state: null, zip: null };
+  }
+
+  // Multi-line: scan from the bottom for the CSZ line.
   for (let i = lines.length - 1; i >= 0; i--) {
-    const m = lines[i].match(/^(.+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*([A-Z]{2,3})?\s*$/);
-    if (m) {
-      const streetLines = lines.slice(0, i);
+    const c = cszOnly(lines[i]);
+    if (c) {
       return {
-        street: streetLines[0] ?? null,
-        street2: streetLines[1] ?? null,
-        city: m[1].trim(),
-        state: m[2],
-        zip: m[3],
+        street: lines[0] ?? null,
+        street2: i > 1 ? lines[1] : null,
+        city: c[1].trim(),
+        state: c[2],
+        zip: c[3],
       };
     }
   }
 
-  // Single-line variant: "<street>, <city>, <state> <zip> [country]" (XA emits this for
-  // some carriers). Lazy quantifiers + backtracking handle apt-comma-in-street cases.
-  const single = lines.join(" ").match(
-    /^(.+?),\s*(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*([A-Z]{2,3})?\s*$/
-  );
-  if (single) {
-    return {
-      street: single[1].trim(),
-      street2: null,
-      city: single[2].trim(),
-      state: single[3],
-      zip: single[4],
-    };
-  }
+  // Last resort: collapse to one line and try the full single-line pattern.
+  const m = fullSingle(lines.join(" "));
+  if (m) return { street: m[1].trim(), street2: null, city: m[2].trim(), state: m[3], zip: m[4] };
 
-  // Unparseable — keep first line as street so caller still has something.
   return { street: lines[0], street2: lines[1] ?? null, city: null, state: null, zip: null };
 }
 
@@ -299,50 +302,16 @@ type CoverageRow = {
   reserve: number | null;
 };
 
-function parseCoverage(rawText: string): CoverageRow[] {
-  const lines = rawText.split("\n");
-  // Header row signals start of the coverage table. XA renders cells separated by
-  // tabs or 2+ spaces depending on the browser — match either.
-  const headerIdx = lines.findIndex(l =>
-    /Coverage[\t ]+Type[\t ]+Policy[\t ]+Limit/i.test(l) ||
-    /^\s*Coverage\s*$/i.test(l)
-  );
-  if (headerIdx < 0) return [];
+function parseMoney(s: string | null | undefined): number | null {
+  if (!s) return null;
+  const m = s.replace(/[$,]/g, "").match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
 
-  const money = (s: string | undefined): number | null => {
-    if (!s) return null;
-    const m = s.replace(/[$,]/g, "").match(/-?\d+(\.\d+)?/);
-    return m ? parseFloat(m[0]) : null;
-  };
-  const percent = (s: string | undefined): number | null => {
-    if (!s) return null;
-    const m = s.replace(/%/g, "").match(/-?\d+(\.\d+)?/);
-    return m ? parseFloat(m[0]) : null;
-  };
-
-  const rows: CoverageRow[] = [];
-  for (let i = headerIdx + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) {
-      if (rows.length > 0) break;
-      continue;
-    }
-    const cells = line.split(/\t+|\s{2,}/).map(c => c.trim()).filter(Boolean);
-    if (cells.length < 3) {
-      if (rows.length > 0) break;
-      continue;
-    }
-    rows.push({
-      name: cells[0] ?? null,
-      type: cells[1] ?? null,
-      policy_limit: money(cells[2]),
-      deductible: money(cells[3]),
-      apply_to: cells[4] ?? null,
-      itv: percent(cells[5]),
-      reserve: money(cells[6]),
-    });
-  }
-  return rows;
+function parsePercent(s: string | null | undefined): number | null {
+  if (!s) return null;
+  const m = s.replace(/%/g, "").match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
 }
 
 function parseClientPolicy(rawText: string): {
@@ -350,7 +319,6 @@ function parseClientPolicy(rawText: string): {
   mailing_address: Address;
   insured: { name: string | null; phone: string | null; email: string | null };
   policy: { number: string | null; effective_date: string | null; expiration_date: string | null };
-  coverage: CoverageRow[];
 } {
   // Loss address — XA labels it "Risk Location"
   const lossBlock = findBlockUnderLabel(rawText, ["Risk Location", "Loss Address", "Risk Address", "Loss Location"], 4) ?? "";
@@ -369,8 +337,6 @@ function parseClientPolicy(rawText: string): {
   const effDate = findValueAfterLabel(rawText, ["Effective Date", "Policy Effective Date", "Policy Effective"]);
   const expDate = findValueAfterLabel(rawText, ["Expiration Date", "Policy Expiration Date", "Policy Expiration"]);
 
-  const coverage = parseCoverage(rawText);
-
   return {
     loss_address: parseAddress(lossBlock),
     mailing_address: parseAddress(mailBlock),
@@ -384,7 +350,6 @@ function parseClientPolicy(rawText: string): {
       effective_date: effDate,
       expiration_date: expDate,
     },
-    coverage,
   };
 }
 
@@ -407,22 +372,98 @@ export async function xactGetAssignment(args: {
 
     const tabContainerId = tabId; // XA convention: container has id matching the tab id
 
-    // Pull both rendered text and HTML of the tab's container (fall back to body)
-    const { rawText, rawHtml } = await page.evaluate((containerId: string) => {
+    // Pull text + HTML, and (when present) extract the coverage table from the DOM
+    // so we don't lose column alignment in innerText.
+    const { rawText, rawHtml, coverageRaw } = await page.evaluate((containerId: string) => {
       const el = document.getElementById(containerId) || document.body;
-      return {
-        rawText: (el as HTMLElement).innerText.replace(/\n{3,}/g, "\n\n").trim(),
-        rawHtml: el.innerHTML,
+      const rawText = (el as HTMLElement).innerText.replace(/\n{3,}/g, "\n\n").trim();
+      const rawHtml = el.innerHTML;
+
+      type Row = {
+        name: string | null; type: string | null; policy_limit: string | null;
+        deductible: string | null; apply_to: string | null; itv: string | null; reserve: string | null;
       };
+      let coverageRaw: Row[] = [];
+
+      const tables = Array.from(el.querySelectorAll("table"));
+      for (const tbl of tables) {
+        let headers: string[] = [];
+        const theadCells = Array.from(tbl.querySelectorAll("thead th, thead td"));
+        if (theadCells.length > 0) {
+          headers = theadCells.map(h => (h as HTMLElement).innerText.trim().toLowerCase());
+        } else {
+          const allRows = Array.from(tbl.querySelectorAll("tr"));
+          const thRow = allRows.find(tr => tr.querySelector("th"));
+          if (thRow) {
+            headers = Array.from(thRow.querySelectorAll("th"))
+              .map(h => (h as HTMLElement).innerText.trim().toLowerCase());
+          } else if (allRows[0]) {
+            headers = Array.from(allRows[0].querySelectorAll("td"))
+              .map(h => (h as HTMLElement).innerText.trim().toLowerCase());
+          }
+        }
+        if (!headers.includes("coverage")) continue;
+        if (!headers.some(h => /policy.*limit|^limit$/.test(h))) continue;
+
+        const findIdx = (...keys: string[]) => {
+          for (const k of keys) {
+            const idx = headers.findIndex(h => h === k || h.includes(k));
+            if (idx >= 0) return idx;
+          }
+          return -1;
+        };
+        const colName = findIdx("coverage");
+        const colType = findIdx("type");
+        const colLimit = findIdx("policy limit", "limit");
+        const colDed = findIdx("deductible");
+        const colApply = findIdx("apply to", "apply");
+        const colITV = findIdx("itv");
+        const colReserve = findIdx("reserve");
+
+        const allRows = Array.from(tbl.querySelectorAll("tr"));
+        const rows: Row[] = [];
+        for (const tr of allRows) {
+          if (tr.querySelector("th")) continue;     // skip header rows
+          const cells = Array.from(tr.querySelectorAll("td"));
+          if (cells.length < 2) continue;
+          const v = (idx: number): string | null =>
+            (idx >= 0 && idx < cells.length) ? (cells[idx] as HTMLElement).innerText.trim() : null;
+          rows.push({
+            name: v(colName),
+            type: v(colType),
+            policy_limit: v(colLimit),
+            deductible: v(colDed),
+            apply_to: v(colApply),
+            itv: v(colITV),
+            reserve: v(colReserve),
+          });
+        }
+        if (rows.length > 0) {
+          coverageRaw = rows;
+          break;
+        }
+      }
+
+      return { rawText, rawHtml, coverageRaw };
     }, tabContainerId);
 
     // Special handling for client_policy: parse into structured JSON
     if (tabName === "client_policy") {
       const parsed = parseClientPolicy(rawText);
+      const coverage: CoverageRow[] = coverageRaw.map(c => ({
+        name: c.name || null,
+        type: c.type || null,
+        policy_limit: parseMoney(c.policy_limit),
+        deductible: parseMoney(c.deductible),
+        apply_to: c.apply_to || null,
+        itv: parsePercent(c.itv),
+        reserve: parseMoney(c.reserve),
+      }));
       const result = {
         mfn: args.mfn,
         tab: "client_policy",
         ...parsed,
+        coverage,
         raw_text: rawText.substring(0, 4000),
         raw_html: rawHtml.substring(0, 8000),
       };
@@ -937,227 +978,49 @@ export async function xactSetPlannedInspectionDate(args: {
   date: string; // YYYY-MM-DD or M/D/YYYY
 }): Promise<CallToolResult> {
   const dateIso = fmt(args.date);
-  const [yyyy, mm, dd] = dateIso.split("-");
-  const dateUs = `${parseInt(mm, 10)}/${parseInt(dd, 10)}/${yyyy}`;
-
-  const { browser, page } = await getPage();
-  const selectorsTried: string[] = [];
-  let rowHtml = "";
-  let popoverHtml = "";
-  let inputHtml = "";
+  const { browser, context, page } = await getPage();
 
   try {
+    // The Planned Inspection Date row's edit affordance is a button whose onclick
+    // calls window.updateStatus(N). N is the workflow status code (68 in the
+    // shipped XA build, but we extract it dynamically in case it ever changes).
+    // Calling updateStatus(N) directly opens the same iframe dialog as every
+    // other workflow status update, which is what updateWorkflowStatus already
+    // knows how to fill + submit.
     await navigateToTab(page, args.mfn, "d_assignment");
-
-    // Strategy 0: window-scope JS API (cheapest if exposed)
-    selectorsTried.push("JS API: setPlannedInspectionDate / updatePlannedInspection");
-    const direct = await page.evaluate(({ d }: { d: string }) => {
-      const w = window as any;
-      if (typeof w.setPlannedInspectionDate === "function") { w.setPlannedInspectionDate(d); return "setPlannedInspectionDate"; }
-      if (typeof w.updatePlannedInspection === "function") { w.updatePlannedInspection(d); return "updatePlannedInspection"; }
-      return null;
-    }, { d: dateIso }).catch(() => null);
-
-    if (direct) {
-      await page.waitForTimeout(3000);
-      const verified = await readPlannedDate(page, args.mfn);
-      const okFlag = dateMatchesAny(verified, dateIso);
-      return ok(JSON.stringify({
-        ok: okFlag,
-        value: verified,
-        method: `JS API: ${direct}()`,
-        ...(okFlag ? {} : {
-          debug_snapshot: { selectors_tried: selectorsTried, row_html: "", popover_html: "", input_outer_html: "" },
-        }),
-      }, null, 2));
-    }
-
-    // Find the editable row — XA has multiple rows mentioning "Planned Inspection Date"
-    // (one in the upstream Status timeline, another in Workflow Status with the actual
-    // edit affordance). Strategy: find rows whose FIRST cell text equals exactly
-    // "Planned Inspection Date" and pick the one that contains an edit affordance.
-    selectorsTried.push("tr where children[0].innerText === 'Planned Inspection Date' AND has edit affordance");
-    const rowFind = await page.evaluate(() => {
-      const editSelector = '.material-icons, [class*="edit" i], a[onclick*="dit"], button[onclick*="dit"], [aria-label*="dit" i], [title*="dit" i], i.fa-edit, i.fa-pencil, .icon-edit, .pencil';
+    const found = await page.evaluate(() => {
       const labelRe = /^\s*planned\s+inspection\s+date\s*:?\s*$/i;
-      const allTrs = Array.from(document.querySelectorAll("tr"));
-      const candidates = allTrs.filter(tr => {
+      const trs = Array.from(document.querySelectorAll("tr"));
+      for (const tr of trs) {
         const first = tr.children[0] as HTMLElement | undefined;
-        if (!first) return false;
-        const txt = (first.innerText || "").trim();
-        return labelRe.test(txt);
-      });
-
-      // Prefer rows that actually have an edit affordance
-      for (const tr of candidates) {
-        const editEls = Array.from(tr.querySelectorAll(editSelector));
-        const editEl = editEls.find(e => {
-          if (e.classList.contains("material-icons")) {
-            const t = (e as HTMLElement).innerText.trim().toLowerCase();
-            return ["edit", "mode_edit", "create"].includes(t);
-          }
-          // Skip elements that are themselves a textfield class match — we want clickable triggers
-          return true;
-        }) as HTMLElement | undefined;
-        if (!editEl) continue;
-        tr.setAttribute("data-mcp-pid-row", "1");
-        editEl.setAttribute("data-mcp-pid-edit", "1");
-        return {
-          found: true,
-          candidate_count: candidates.length,
-          row_html: (tr as HTMLElement).outerHTML.substring(0, 2500),
-          edit_html: editEl.outerHTML.substring(0, 500),
-        };
+        if (!first || !labelRe.test((first.innerText || "").trim())) continue;
+        const btn = tr.querySelector('button[onclick*="updateStatus"], a[onclick*="updateStatus"]');
+        if (!btn) continue;
+        const m = (btn.getAttribute("onclick") || "").match(/updateStatus\s*\(\s*(\d+)/);
+        if (m) {
+          return {
+            code: parseInt(m[1], 10),
+            row_html: (tr as HTMLElement).outerHTML.substring(0, 2000),
+          };
+        }
       }
-
-      return {
-        found: false,
-        candidate_count: candidates.length,
-        candidate_htmls: candidates.slice(0, 4).map(tr => (tr as HTMLElement).outerHTML.substring(0, 800)),
-      };
+      return null;
     });
 
-    if (!rowFind.found) {
+    if (!found) {
       return ok(JSON.stringify({
         ok: false,
-        error: rowFind.candidate_count === 0
-          ? "No <tr> found whose first cell text equals 'Planned Inspection Date'"
-          : `Found ${rowFind.candidate_count} candidate row(s) but none contain an edit affordance`,
-        debug_snapshot: {
-          selectors_tried: selectorsTried,
-          candidate_count: rowFind.candidate_count,
-          candidate_htmls: (rowFind as any).candidate_htmls ?? [],
-          row_html: "",
-          popover_html: "",
-          input_outer_html: "",
-        },
-      }, null, 2));
-    }
-    rowHtml = rowFind.row_html ?? "";
-
-    // Click the marked edit affordance
-    selectorsTried.push("[data-mcp-pid-edit='1']");
-    await page.locator('[data-mcp-pid-edit="1"]').first().click({ timeout: 4000 }).catch(() => {});
-    await page.waitForTimeout(1500);
-
-    // Capture any popover/modal that appeared
-    const modalLocator = page.locator(
-      '.mdl-dialog, dialog, [role="dialog"], .modal, .popover, [class*="dialog"], [class*="popup"], [class*="overlay"]'
-    ).first();
-    if ((await modalLocator.count()) > 0 && (await modalLocator.isVisible().catch(() => false))) {
-      popoverHtml = await modalLocator.evaluate(el => (el as HTMLElement).outerHTML.substring(0, 3500));
-    }
-
-    // Find a visible date-ish input. Prefer one inside a visible modal/popover.
-    const inputInfo = await page.evaluate(() => {
-      const isVisible = (el: Element) => {
-        const rect = (el as HTMLElement).getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      };
-      const inputs = Array.from(document.querySelectorAll("input")).filter(input => {
-        if (!isVisible(input)) return false;
-        const i = input as HTMLInputElement;
-        const t = (i.type || "").toLowerCase();
-        const n = (i.name || "").toLowerCase();
-        const id = (i.id || "").toLowerCase();
-        const ph = (i.placeholder || "").toLowerCase();
-        const cls = (i.className || "").toLowerCase();
-        if (t === "hidden" || t === "checkbox" || t === "radio" || t === "submit" || t === "button") return false;
-        return (
-          t === "date" ||
-          /date|inspect|planned/.test(n) ||
-          /date|inspect|planned/.test(id) ||
-          /date|m\/d|mm\/dd|\d\d\/\d\d/.test(ph) ||
-          /date|datepicker/.test(cls)
-        );
-      });
-      return inputs.slice(0, 5).map(i => {
-        const inp = i as HTMLInputElement;
-        return {
-          id: inp.id || "",
-          name: inp.name || "",
-          type: inp.type || "",
-          value: inp.value || "",
-          placeholder: inp.placeholder || "",
-          outerHTML: inp.outerHTML.substring(0, 800),
-        };
-      });
-    });
-
-    if (inputInfo.length === 0) {
-      return ok(JSON.stringify({
-        ok: false,
-        error: "No visible date input found after clicking edit affordance",
-        debug_snapshot: {
-          selectors_tried: selectorsTried,
-          row_html: rowHtml,
-          popover_html: popoverHtml,
-          input_outer_html: "",
-        },
+        error: "Could not locate the Planned Inspection Date row with an updateStatus(N) button",
       }, null, 2));
     }
 
-    const target = inputInfo[0];
-    inputHtml = target.outerHTML;
-
-    // Strategy A: native value setter + all the events Vue/React/MDL listen for.
-    // Object.getOwnPropertyDescriptor on the prototype bypasses any framework-installed setters.
-    const setA = await page.evaluate(({ id, name, value }: { id: string; name: string; value: string }) => {
-      const input = (id ? document.getElementById(id) : null) as HTMLInputElement | null
-        ?? (name ? document.querySelector(`input[name="${CSS.escape(name)}"]`) : null) as HTMLInputElement | null;
-      if (!input) return { ok: false, after: "" };
-      const proto = Object.getPrototypeOf(input);
-      const desc = Object.getOwnPropertyDescriptor(proto, "value");
-      if (desc && desc.set) desc.set.call(input, value); else input.value = value;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new Event("blur", { bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
-      return { ok: true, after: input.value };
-    }, { id: target.id, name: target.name, value: dateIso });
-
-    // Strategy B: if the ISO format was rejected (some pickers want M/D/YYYY), try US format.
-    if (setA.ok && setA.after !== dateIso && setA.after !== dateUs) {
-      await page.evaluate(({ id, name, value }: { id: string; name: string; value: string }) => {
-        const input = (id ? document.getElementById(id) : null) as HTMLInputElement | null
-          ?? (name ? document.querySelector(`input[name="${CSS.escape(name)}"]`) : null) as HTMLInputElement | null;
-        if (!input) return;
-        const proto = Object.getPrototypeOf(input);
-        const desc = Object.getOwnPropertyDescriptor(proto, "value");
-        if (desc && desc.set) desc.set.call(input, value); else input.value = value;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-        input.dispatchEvent(new Event("blur", { bubbles: true }));
-      }, { id: target.id, name: target.name, value: dateUs });
+    let updateError: string | null = null;
+    try {
+      await updateWorkflowStatus(context, page, args.mfn, found.code, dateIso, "09:00:00", "");
+    } catch (e: any) {
+      updateError = String(e?.message || e);
     }
 
-    // Strategy C: Playwright fill+Tab — generates more realistic events than evaluate-based dispatch.
-    const inputSel = target.id
-      ? `#${CSS.escape(target.id)}`
-      : (target.name ? `input[name="${target.name}"]` : "");
-    if (inputSel) {
-      await page.locator(inputSel).first().fill(dateUs).catch(() => {});
-      await page.locator(inputSel).first().press("Tab").catch(() => {});
-      await page.waitForTimeout(500);
-    }
-
-    // Click any visible Save / Apply / OK / Update button.
-    const saveLocator = page.locator(
-      'button:visible:has-text("Save"), button:visible:has-text("Apply"), button:visible:has-text("OK"), ' +
-      'button:visible:has-text("Update"), input[type="submit"]:visible, ' +
-      '.mdl-button:visible:has-text("OK"), .mdl-button:visible:has-text("Apply"), .mdl-button:visible:has-text("Save")'
-    ).first();
-    const saveCount = await saveLocator.count();
-    if (saveCount > 0) {
-      await saveLocator.click().catch(() => {});
-      await page.waitForTimeout(3000);
-    } else {
-      // Some pickers commit on Enter
-      await page.keyboard.press("Enter").catch(() => {});
-      await page.waitForTimeout(2000);
-    }
-
-    // Verify by re-reading the assignment detail row
     const verified = await readPlannedDate(page, args.mfn);
     const success = dateMatchesAny(verified, dateIso);
 
@@ -1165,8 +1028,7 @@ export async function xactSetPlannedInspectionDate(args: {
       return ok(JSON.stringify({
         ok: true,
         value: verified,
-        method: "edit-popover + value-set + save",
-        save_clicked: saveCount > 0,
+        method: `updateStatus(${found.code}) iframe dialog`,
       }, null, 2));
     }
 
@@ -1174,16 +1036,9 @@ export async function xactSetPlannedInspectionDate(args: {
       ok: false,
       value_read: verified || "(empty)",
       target_iso: dateIso,
-      target_us: dateUs,
-      save_clicked: saveCount > 0,
-      strategy_a_after: setA.after,
-      debug_snapshot: {
-        selectors_tried: selectorsTried,
-        row_html: rowHtml,
-        popover_html: popoverHtml,
-        input_outer_html: inputHtml,
-        debug_html_after: rowHtml,
-      },
+      extracted_workflow_code: found.code,
+      update_error: updateError,
+      debug_snapshot: { row_html: found.row_html },
     }, null, 2));
   } finally {
     await browser.close();
