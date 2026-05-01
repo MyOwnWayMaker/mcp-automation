@@ -12,3 +12,5 @@ voice_session.compact.json
 *_session.json
 .DS_Store
 gh
+claim_monitor.log
+claim_monitor_state.json
