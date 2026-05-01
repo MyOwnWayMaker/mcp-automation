@@ -1187,12 +1187,22 @@ export async function xactDeleteNote(args: {
 function dateMatchesAny(rendered: string, isoDate: string): boolean {
   if (!rendered) return false;
   const [y, m, d] = isoDate.split("-").map(Number);
+  const months = ["January", "February", "March", "April", "May", "June",
+                  "July", "August", "September", "October", "November", "December"];
+  const monthsShort = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const mn = months[m - 1];
+  const ms = monthsShort[m - 1];
   const candidates = [
     `${m}/${d}/${y}`,
     `${m.toString().padStart(2, "0")}/${d.toString().padStart(2, "0")}/${y}`,
     isoDate,
     `${m}/${d}/${y.toString().slice(-2)}`,
     `${m.toString().padStart(2, "0")}/${d.toString().padStart(2, "0")}/${y.toString().slice(-2)}`,
+    `${mn} ${d}, ${y}`,
+    `${mn} ${d.toString().padStart(2, "0")}, ${y}`,
+    `${ms} ${d}, ${y}`,
+    `${ms} ${d.toString().padStart(2, "0")}, ${y}`,
   ];
   return candidates.some(c => rendered.includes(c));
 }
