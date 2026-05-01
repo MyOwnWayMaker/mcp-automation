@@ -489,31 +489,68 @@ async function updateWorkflowStatus(
   time = "09:00:00",
   note = ""
 ): Promise<string> {
-  // Get the CID from the detail page URL
   await page.goto(`${BASE}/cxa/detail.jsp?mfn=${mfn}&src=ip`);
   await page.waitForLoadState("domcontentloaded");
   await page.waitForTimeout(5000);
-
-  // Get the cid from the existing updateStatus call in the page
-  const cidMatch = (await page.content()).match(/cid=(\d+)/);
-  const cid = cidMatch ? cidMatch[1] : "";
 
   // Trigger the updateStatus dialog
   await page.evaluate((code: number) => (window as any).updateStatus(code), statusCode);
   await page.waitForTimeout(3000);
 
-  // Find the dialog iframe
   const dlgFrame = page.frames().find(f => f.url().includes("dlg_updateStatus"));
   if (!dlgFrame) {
     throw new Error(`Status dialog iframe not found for updateStatus(${statusCode})`);
   }
-
   await dlgFrame.waitForLoadState("domcontentloaded");
 
-  // Fill date/time/notes. Bare `el.value = x` doesn't trigger framework reactivity
-  // (Vue/MDL bindings ignore it), so the form submits with whatever was prefilled
-  // ("now"). Use the native setter on HTMLInputElement.prototype + dispatch the
-  // events those frameworks listen for.
+  // Fingerprint #dateupdated BEFORE writing — needed for diagnostics if the
+  // override doesn't stick (Vue/MDL/datepicker overlays may ignore writes).
+  const fingerprint = await dlgFrame.evaluate(() => {
+    const el = document.getElementById("dateupdated") as HTMLInputElement | null;
+    if (!el) return null;
+    const w = window as any;
+    return {
+      id: el.id,
+      name: el.name,
+      type: el.type,
+      tagName: el.tagName,
+      className: el.className,
+      readonly: el.readOnly,
+      autocomplete: el.autocomplete,
+      prefilled_value: el.value,
+      outer_html: el.outerHTML.substring(0, 600),
+      framework_markers: {
+        has_vue_app: !!(el as any).__vue_app__,
+        has_vue_parent: !!(el as any).__vueParentComponent,
+        has_vue_global: typeof w.Vue !== "undefined",
+        has_react_props: !!(el as any).__reactProps$,
+        is_mdl: el.classList.toString().includes("mdl"),
+      },
+      sibling_overlay_html: (() => {
+        // Datepicker libraries often render a sibling element (calendar overlay,
+        // hidden field with the canonical value, etc.) — capture the parent's HTML
+        // so we can see what's actually in play.
+        const parent = el.parentElement;
+        return parent ? parent.outerHTML.substring(0, 1000) : "";
+      })(),
+    };
+  });
+
+  // Three write strategies, with a readback gate after each. We only proceed to
+  // submit if dateupdated actually equals our target — otherwise the dialog
+  // commits its prefilled "now" value, which corrupts XA. If all strategies
+  // fail, navigate away to safely close the dialog without saving.
+  type WriteResult = { strategy: string; date_after: string | null; time_after: string | null };
+  const results: WriteResult[] = [];
+
+  const readback = async (): Promise<{ date: string | null; time: string | null }> =>
+    await dlgFrame.evaluate(() => {
+      const d = document.getElementById("dateupdated") as HTMLInputElement | null;
+      const t = document.getElementById("timeupdated") as HTMLInputElement | null;
+      return { date: d?.value ?? null, time: t?.value ?? null };
+    });
+
+  // Strategy A: native setter on HTMLInputElement.prototype + input/change/blur
   await dlgFrame.evaluate((params: { date: string; time: string; note: string }) => {
     const setVal = (id: string, value: string) => {
       const el = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
@@ -530,8 +567,62 @@ async function updateWorkflowStatus(
     setVal("timeupdated", params.time);
     if (params.note) setVal("notes", params.note);
   }, { date, time, note });
+  let r = await readback();
+  results.push({ strategy: "native_setter+events", date_after: r.date, time_after: r.time });
 
-  // Click UPDATE STATUS
+  // Strategy B: Playwright fill (real keyboard events, more realistic)
+  if (r.date !== date) {
+    try {
+      await dlgFrame.locator("#dateupdated").fill(date);
+      await dlgFrame.locator("#timeupdated").fill(time).catch(() => {});
+      r = await readback();
+      results.push({ strategy: "playwright_fill", date_after: r.date, time_after: r.time });
+    } catch (e: any) {
+      results.push({ strategy: "playwright_fill", date_after: `error: ${e?.message ?? e}`, time_after: null });
+    }
+  }
+
+  // Strategy C: focus → clear → type character-by-character
+  if (r.date !== date) {
+    try {
+      await dlgFrame.focus("#dateupdated");
+      await dlgFrame.evaluate(() => {
+        const el = document.getElementById("dateupdated") as HTMLInputElement | null;
+        if (!el) return;
+        const proto = Object.getPrototypeOf(el);
+        const desc = Object.getOwnPropertyDescriptor(proto, "value");
+        if (desc && desc.set) desc.set.call(el, "");
+        else el.value = "";
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await dlgFrame.locator("#dateupdated").pressSequentially(date, { delay: 30 });
+      r = await readback();
+      results.push({ strategy: "focus+clear+pressSequentially", date_after: r.date, time_after: r.time });
+    } catch (e: any) {
+      results.push({ strategy: "focus+clear+pressSequentially", date_after: `error: ${e?.message ?? e}`, time_after: null });
+    }
+  }
+
+  // GATE: only submit if date stuck. Otherwise navigate away to dismiss the
+  // dialog cleanly (no save fires) and throw with the diagnostic snapshot.
+  if (r.date !== date) {
+    await page.goto(`${BASE}/cxa/detail.jsp?mfn=${mfn}&src=ip`).catch(() => {});
+    await page.waitForTimeout(1500);
+
+    const debug = {
+      target_date: date,
+      target_time: time,
+      status_code: statusCode,
+      input_fingerprint: fingerprint,
+      attempts: results,
+      reason: "dateupdated input value did not stick after three write strategies; dialog dismissed without save to prevent corruption",
+    };
+    const err: any = new Error(`updateStatus(${statusCode}): date input rejected override (${date}). All three write strategies failed.`);
+    err.debug = debug;
+    throw err;
+  }
+
+  // Date stuck — safe to submit
   await dlgFrame.click("#updatestatus_button");
   await page.waitForTimeout(4000);
 
@@ -1032,14 +1123,16 @@ export async function xactSetPlannedInspectionDate(args: {
     }
 
     let updateError: string | null = null;
+    let updateDebug: any = null;
     try {
       await updateWorkflowStatus(context, page, args.mfn, found.code, dateIso, "09:00:00", "");
     } catch (e: any) {
       updateError = String(e?.message || e);
+      updateDebug = e?.debug ?? null;
     }
 
     const verified = await readPlannedDate(page, args.mfn);
-    const success = dateMatchesAny(verified, dateIso);
+    const success = !updateError && dateMatchesAny(verified, dateIso);
 
     if (success) {
       return ok(JSON.stringify({
@@ -1055,7 +1148,13 @@ export async function xactSetPlannedInspectionDate(args: {
       target_iso: dateIso,
       extracted_workflow_code: found.code,
       update_error: updateError,
-      debug_snapshot: { row_html: found.row_html },
+      // When the helper aborts because the input rejected the override, debug
+      // contains the input fingerprint + per-strategy readback so we can see
+      // which write paths were tried and what the input ended up at.
+      debug_snapshot: {
+        row_html: found.row_html,
+        update_debug: updateDebug,
+      },
     }, null, 2));
   } finally {
     await browser.close();
