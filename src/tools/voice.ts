@@ -719,15 +719,21 @@ export async function voiceSendSms(args: {
         .map(m => (m as HTMLElement).innerText.replace(/\s+/g, " ").trim())
     );
 
-    // Find the compose field. Voice has used several patterns; try them in order.
+    // Find the compose field. Voice's compose is typically a contenteditable
+    // div (not a textarea), so fill() doesn't always work — we have to click
+    // to focus, then keyboard.type(). Selectors widen from "must mention
+    // message" to any visible textbox in the thread region.
     const composeSelectors = [
+      'div[contenteditable="true"][aria-label*="message" i]',
+      'div[contenteditable="true"][role="textbox"]',
+      'gv-thread-input [contenteditable="true"]',
+      'gv-message-input [contenteditable="true"]',
       'textarea[aria-label*="message" i]',
-      'textarea[placeholder*="text message" i]',
       'textarea[placeholder*="message" i]',
-      'gv-text-input-control textarea',
-      'gv-thread-details textarea',
+      'input[aria-label*="message" i]',
       '[role="textbox"][aria-label*="message" i]',
-      '[contenteditable="true"][aria-label*="message" i]',
+      'gv-text-input-control textarea',
+      '[contenteditable="true"]',
     ];
     let composeSel: string | null = null;
     for (const sel of composeSelectors) {
@@ -750,6 +756,11 @@ export async function voiceSendSms(args: {
           ariaLabel: t.getAttribute("aria-label"),
           outerHTML: (t as HTMLElement).outerHTML.substring(0, 300),
         })),
+        contenteditables: Array.from(document.querySelectorAll('[contenteditable="true"]')).slice(0, 5).map(t => ({
+          ariaLabel: t.getAttribute("aria-label"),
+          role: t.getAttribute("role"),
+          outerHTML: (t as HTMLElement).outerHTML.substring(0, 300),
+        })),
       }));
       return ok(JSON.stringify({
         ok: false,
@@ -758,22 +769,68 @@ export async function voiceSendSms(args: {
       }, null, 2));
     }
 
-    // Type the message
-    await page.locator(composeSel).first().click();
-    await page.locator(composeSel).first().fill(body);
+    // Click to focus, then type. fill() doesn't reliably work on contenteditable
+    // divs — keyboard.type with a small delay simulates real keypresses, which
+    // any framework binding will respect.
+    const compose = page.locator(composeSel).first();
+    await compose.click();
+    await page.waitForTimeout(400);
+
+    const isContentEditable = await compose.evaluate(el =>
+      (el as HTMLElement).isContentEditable === true
+    ).catch(() => false);
+
+    if (isContentEditable) {
+      await page.keyboard.type(body, { delay: 15 });
+    } else {
+      await compose.fill(body);
+    }
     await page.waitForTimeout(600);
+
+    // Verify the body actually appeared in the compose. If not, dump debug
+    // and bail BEFORE clicking Send (otherwise we'd send an empty message).
+    const composeValue = await compose.evaluate(el => {
+      const tag = el.tagName.toLowerCase();
+      if (tag === "textarea" || tag === "input") return (el as HTMLInputElement).value || "";
+      return (el as HTMLElement).innerText || (el as HTMLElement).textContent || "";
+    });
+    const probeStart = body.substring(0, Math.min(20, body.length));
+    if (!composeValue.includes(probeStart)) {
+      return ok(JSON.stringify({
+        ok: false,
+        error: "Compose did not accept the body — value mismatch after type/fill",
+        debug: {
+          compose_selector: composeSel,
+          compose_is_contenteditable: isContentEditable,
+          compose_value_after_type: composeValue.substring(0, 200),
+          target_body_prefix: probeStart,
+          url: page.url(),
+        },
+      }, null, 2));
+    }
 
     // Find and click Send. Voice disables the button when compose is empty,
     // so :not([disabled]) ensures we only match the active one.
     const sendButton = page.locator(
-      'button[aria-label*="Send" i]:not([disabled]), [role="button"][aria-label*="Send" i]:not([aria-disabled="true"])'
+      'button[aria-label*="Send" i]:not([disabled]):not([aria-disabled="true"]), ' +
+      '[role="button"][aria-label*="Send" i]:not([aria-disabled="true"])'
     ).first();
 
     if ((await sendButton.count()) === 0) {
+      // Capture every "Send"-related element so we can see what's there
+      const sendish = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[aria-label*="Send" i]')).slice(0, 8).map(el => ({
+          tagName: el.tagName,
+          ariaLabel: el.getAttribute("aria-label"),
+          disabled: (el as HTMLButtonElement).disabled || el.getAttribute("aria-disabled") === "true",
+          visible: (el as HTMLElement).getBoundingClientRect().width > 0,
+          outerHTML: (el as HTMLElement).outerHTML.substring(0, 300),
+        }))
+      );
       return ok(JSON.stringify({
         ok: false,
         error: "Compose filled but no enabled Send button found",
-        url: page.url(),
+        debug: { send_candidates: sendish, url: page.url() },
       }, null, 2));
     }
 
