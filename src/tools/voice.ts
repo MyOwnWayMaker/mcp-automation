@@ -632,16 +632,202 @@ export async function voiceGetVoicemails(_args: {
   );
 }
 
-export async function voiceSendSms(_args: {
+export async function voiceSendSms(args: {
   thread_id?: string;
   number?: string;
   body: string;
   force?: boolean;
   skip_verify?: boolean;
 }): Promise<CallToolResult> {
-  return ok(
-    "voice_send_sms: not yet implemented. " +
-    "Will mirror the filetrac_add_note read-write-read sandwich (pre-read thread, send, " +
-    "post-read to verify the message ID landed) once we have a working send path.",
-  );
+  const body = (args.body ?? "").trim();
+  if (!body) {
+    return ok(JSON.stringify({ ok: false, error: "body is required" }, null, 2));
+  }
+  if (!args.thread_id && !args.number) {
+    return ok(JSON.stringify({ ok: false, error: "Provide thread_id or number" }, null, 2));
+  }
+
+  const { browser, page } = await getVoicePage();
+
+  try {
+    // Navigate to thread (existing) or new-conversation page
+    if (args.thread_id) {
+      const itemId = args.thread_id.startsWith("t.") ? args.thread_id : `t.${args.thread_id}`;
+      await page.goto(
+        `https://voice.google.com/messages?itemId=${encodeURIComponent(itemId)}`,
+        { waitUntil: "domcontentloaded", timeout: 30_000 },
+      );
+    } else {
+      await page.goto("https://voice.google.com/messages?action=new", {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
+    }
+    await page.waitForTimeout(2500);
+
+    const auth = await ensureSignedIn(page);
+    if (!auth.ok) {
+      return ok(JSON.stringify({
+        ok: false,
+        error: `unauthenticated: ${auth.reason}`,
+        url: auth.url,
+      }, null, 2));
+    }
+
+    // For new conversations, type the recipient number into the To field and
+    // commit the dropdown selection ("Send to <number>"). Voice doesn't open
+    // the compose pane until a recipient is committed.
+    if (!args.thread_id && args.number) {
+      const recipient = page.locator(
+        'input[aria-label*="To" i], input[aria-label*="recipient" i], input[placeholder*="enter a name" i], input[placeholder*="phone" i]'
+      ).first();
+      if ((await recipient.count()) === 0) {
+        const inputs = await page.evaluate(() =>
+          Array.from(document.querySelectorAll("input")).slice(0, 10).map(i => ({
+            ariaLabel: i.getAttribute("aria-label"),
+            placeholder: i.placeholder,
+            outerHTML: (i as HTMLInputElement).outerHTML.substring(0, 300),
+          }))
+        );
+        return ok(JSON.stringify({
+          ok: false,
+          error: "Could not find recipient input on new-conversation page",
+          debug: { url: page.url(), inputs_seen: inputs },
+        }, null, 2));
+      }
+      await recipient.fill(args.number);
+      await page.waitForTimeout(2000);
+
+      // Voice shows a dropdown — pick the "Send to <number>" option if present,
+      // else commit with Enter.
+      const sendToOption = page.locator(
+        '[role="option"]:has-text("Send to"), [role="menuitem"]:has-text("Send to"), [role="option"]:has-text("' + args.number + '")'
+      ).first();
+      if ((await sendToOption.count()) > 0) {
+        await sendToOption.click().catch(() => {});
+      } else {
+        await page.keyboard.press("Enter");
+      }
+      await page.waitForTimeout(2500);
+    }
+
+    // Pre-read: snapshot the last few message bodies so we can detect ours after send.
+    const skipVerify = args.skip_verify === true;
+    const beforeBodies: string[] = skipVerify ? [] : await page.evaluate(() =>
+      Array.from(document.querySelectorAll("gv-message-item"))
+        .slice(-6)
+        .map(m => (m as HTMLElement).innerText.replace(/\s+/g, " ").trim())
+    );
+
+    // Find the compose field. Voice has used several patterns; try them in order.
+    const composeSelectors = [
+      'textarea[aria-label*="message" i]',
+      'textarea[placeholder*="text message" i]',
+      'textarea[placeholder*="message" i]',
+      'gv-text-input-control textarea',
+      'gv-thread-details textarea',
+      '[role="textbox"][aria-label*="message" i]',
+      '[contenteditable="true"][aria-label*="message" i]',
+    ];
+    let composeSel: string | null = null;
+    for (const sel of composeSelectors) {
+      const loc = page.locator(sel).first();
+      if ((await loc.count()) > 0 && await loc.isVisible().catch(() => false)) {
+        composeSel = sel;
+        break;
+      }
+    }
+
+    if (!composeSel) {
+      const debug = await page.evaluate(() => ({
+        url: location.href,
+        textareas: Array.from(document.querySelectorAll("textarea")).map(t => ({
+          ariaLabel: t.getAttribute("aria-label"),
+          placeholder: t.placeholder,
+          outerHTML: (t as HTMLTextAreaElement).outerHTML.substring(0, 300),
+        })),
+        textboxes: Array.from(document.querySelectorAll('[role="textbox"]')).slice(0, 5).map(t => ({
+          ariaLabel: t.getAttribute("aria-label"),
+          outerHTML: (t as HTMLElement).outerHTML.substring(0, 300),
+        })),
+      }));
+      return ok(JSON.stringify({
+        ok: false,
+        error: "Could not locate compose field",
+        debug,
+      }, null, 2));
+    }
+
+    // Type the message
+    await page.locator(composeSel).first().click();
+    await page.locator(composeSel).first().fill(body);
+    await page.waitForTimeout(600);
+
+    // Find and click Send. Voice disables the button when compose is empty,
+    // so :not([disabled]) ensures we only match the active one.
+    const sendButton = page.locator(
+      'button[aria-label*="Send" i]:not([disabled]), [role="button"][aria-label*="Send" i]:not([aria-disabled="true"])'
+    ).first();
+
+    if ((await sendButton.count()) === 0) {
+      return ok(JSON.stringify({
+        ok: false,
+        error: "Compose filled but no enabled Send button found",
+        url: page.url(),
+      }, null, 2));
+    }
+
+    await sendButton.click();
+    await page.waitForTimeout(2500);
+
+    if (skipVerify) {
+      return ok(JSON.stringify({
+        ok: true,
+        verified: false,
+        message: "Send clicked (verification skipped)",
+        url: page.url(),
+      }, null, 2));
+    }
+
+    // Post-read: poll for up to 12s for a new message bubble whose body
+    // contains the first ~50 chars of what we sent.
+    const probe = body.substring(0, 50);
+    let landed = false;
+    let lastSnapshot: string[] = [];
+    for (let i = 0; i < 24; i++) {
+      const afterBodies: string[] = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("gv-message-item"))
+          .slice(-6)
+          .map(m => (m as HTMLElement).innerText.replace(/\s+/g, " ").trim())
+      );
+      lastSnapshot = afterBodies;
+      const fresh = afterBodies.filter(b => !beforeBodies.includes(b));
+      if (fresh.some(b => b.includes(probe))) {
+        landed = true;
+        break;
+      }
+      await page.waitForTimeout(500);
+    }
+
+    if (!landed) {
+      return ok(JSON.stringify({
+        ok: false,
+        verified: false,
+        error: "Send fired but the new message did not appear in the thread within 12s",
+        before_count: beforeBodies.length,
+        after_count: lastSnapshot.length,
+        last_snapshot: lastSnapshot.slice(-3),  // last 3 visible bubbles for debug
+        url: page.url(),
+      }, null, 2));
+    }
+
+    return ok(JSON.stringify({
+      ok: true,
+      verified: true,
+      message: "Sent and verified in thread",
+      url: page.url(),
+    }, null, 2));
+  } finally {
+    await browser.close();
+  }
 }
