@@ -674,41 +674,103 @@ export async function voiceSendSms(args: {
       }, null, 2));
     }
 
-    // For new conversations, type the recipient number into the To field and
-    // commit the dropdown selection ("Send to <number>"). Voice doesn't open
-    // the compose pane until a recipient is committed.
+    // For new conversations: find the messages-pane "To"/recipient field,
+    // type the number, click the dropdown option Voice surfaces, then wait
+    // for a recipient chip to appear (proof the recipient committed).
+    //
+    // Critical: Voice has separate inputs for messages-recipient, calls-dial,
+    // and search. The placeholder/phone hint matches the dial input, which
+    // would call the number on Enter. Match the messages "To" field SPECIFICALLY
+    // by aria-label, and never press Enter as fallback (Tab is safer).
     if (!args.thread_id && args.number) {
-      const recipient = page.locator(
-        'input[aria-label*="To" i], input[aria-label*="recipient" i], input[placeholder*="enter a name" i], input[placeholder*="phone" i]'
-      ).first();
-      if ((await recipient.count()) === 0) {
-        const inputs = await page.evaluate(() =>
-          Array.from(document.querySelectorAll("input")).slice(0, 10).map(i => ({
+      const recipientSelectors = [
+        '[role="combobox"][aria-label*="To" i]',
+        '[role="combobox"][aria-label*="Send to" i]',
+        '[contenteditable="true"][aria-label*="To" i]',
+        '[contenteditable="true"][aria-label*="Send to" i]',
+        '[contenteditable="true"][aria-label*="recipient" i]',
+        'gv-text-input-control input[aria-label*="To" i]',
+        'gv-text-input-control input[aria-label*="recipient" i]',
+        'input[aria-label="Send to"]',
+        'input[aria-label*="Enter a name" i]',
+      ];
+      let recipientSel: string | null = null;
+      for (const sel of recipientSelectors) {
+        const loc = page.locator(sel).first();
+        if ((await loc.count()) > 0 && await loc.isVisible().catch(() => false)) {
+          recipientSel = sel;
+          break;
+        }
+      }
+
+      if (!recipientSel) {
+        const debug = await page.evaluate(() => ({
+          url: location.href,
+          inputs: Array.from(document.querySelectorAll("input")).slice(0, 12).map(i => ({
             ariaLabel: i.getAttribute("aria-label"),
-            placeholder: i.placeholder,
-            outerHTML: (i as HTMLInputElement).outerHTML.substring(0, 300),
-          }))
-        );
+            placeholder: (i as HTMLInputElement).placeholder,
+            role: i.getAttribute("role"),
+            outerHTML: (i as HTMLInputElement).outerHTML.substring(0, 250),
+          })),
+          contenteditables: Array.from(document.querySelectorAll('[contenteditable="true"]')).slice(0, 6).map(t => ({
+            ariaLabel: t.getAttribute("aria-label"),
+            role: t.getAttribute("role"),
+            outerHTML: (t as HTMLElement).outerHTML.substring(0, 250),
+          })),
+          comboboxes: Array.from(document.querySelectorAll('[role="combobox"]')).slice(0, 6).map(t => ({
+            ariaLabel: t.getAttribute("aria-label"),
+            outerHTML: (t as HTMLElement).outerHTML.substring(0, 250),
+          })),
+        }));
         return ok(JSON.stringify({
           ok: false,
-          error: "Could not find recipient input on new-conversation page",
-          debug: { url: page.url(), inputs_seen: inputs },
+          error: "Could not find messages-recipient input on /messages?action=new — none of the To/Send-to/recipient selectors matched",
+          debug,
         }, null, 2));
       }
-      await recipient.fill(args.number);
+
+      // Click to focus, then type. Use keyboard.type for both contenteditable
+      // and input elements — most natural events.
+      const recipientLoc = page.locator(recipientSel).first();
+      await recipientLoc.click();
+      await page.waitForTimeout(300);
+      await page.keyboard.type(args.number, { delay: 20 });
       await page.waitForTimeout(2000);
 
-      // Voice shows a dropdown — pick the "Send to <number>" option if present,
-      // else commit with Enter.
+      // Voice surfaces a "Send to <number>" option in a dropdown. Click it.
+      // Don't fall back to Enter — Enter on the dial input would call.
       const sendToOption = page.locator(
-        '[role="option"]:has-text("Send to"), [role="menuitem"]:has-text("Send to"), [role="option"]:has-text("' + args.number + '")'
+        `[role="option"]:has-text("Send to"), [role="menuitem"]:has-text("Send to"), ` +
+        `[role="option"]:has-text("${args.number}"), [role="option"]:has-text("${args.number.slice(-7)}")`
       ).first();
       if ((await sendToOption.count()) > 0) {
         await sendToOption.click().catch(() => {});
       } else {
-        await page.keyboard.press("Enter");
+        // Tab is safe (won't call); commits the typed text in most input types.
+        await page.keyboard.press("Tab");
       }
       await page.waitForTimeout(2500);
+
+      // Verify a recipient chip / pill appeared. If not, the recipient didn't
+      // commit and proceeding will either send to nobody or trigger something
+      // unintended.
+      const chipExists = await page.evaluate((num) => {
+        const text = (document.body.innerText || "").replace(/\s+/g, " ");
+        // A committed recipient appears as a chip with the number visible
+        return text.includes(num) || text.includes(num.slice(-10));
+      }, args.number).catch(() => false);
+
+      if (!chipExists) {
+        const debug = await page.evaluate(() => ({
+          url: location.href,
+          body_preview: (document.body.innerText || "").substring(0, 1500),
+        }));
+        return ok(JSON.stringify({
+          ok: false,
+          error: "Recipient number did not commit (no chip/pill visible after type+Tab/dropdown). Voice may have routed to a different field.",
+          debug: { recipient_selector_used: recipientSel, ...debug },
+        }, null, 2));
+      }
     }
 
     // Pre-read: snapshot the last few message bodies so we can detect ours after send.
