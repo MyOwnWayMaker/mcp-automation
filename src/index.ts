@@ -25,6 +25,7 @@ import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMov
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
 import { imessageSend, imessageGetRecentChats } from "./tools/imessage.js";
 import { httpRequest } from "./tools/http.js";
+import { mapsGeocode } from "./tools/maps.js";
 import { gdocsCreateDocument, gdocsGetDocument, gdocsFindDocument, gdocsAppendText, gdocsFindAndReplace } from "./tools/gdocs.js";
 import { tasksListTasklists, tasksListTasks, tasksCreateTask, tasksUpdateTask, tasksCompleteTask, tasksDeleteTask } from "./tools/tasks.js";
 import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/meet.js";
@@ -217,6 +218,9 @@ const TOOLS: Tool[] = [
 
   // HTTP
   { name: "http_request", description: "Make an HTTP request to any URL", inputSchema: { type: "object", properties: { url: { type: "string" }, method: { type: "string" }, headers: { type: "object", additionalProperties: { type: "string" } }, body: { type: "string" }, timeout_ms: { type: "number" } }, required: ["url"] } },
+
+  // Maps
+  { name: "maps_geocode", description: "Convert a street address to lat/lng coordinates via the Google Geocoding API. Returns formatted_address, place_id, lat, lng, location_type (ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE), and partial_match flag.", inputSchema: { type: "object", properties: { address: { type: "string", description: "The street address (or lat,lng for reverse) to geocode." } }, required: ["address"] } },
 ];
 
 // ─── Tool Router ───────────────────────────────────────────────────────────────
@@ -363,6 +367,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "imessage_send": return imessageSend(args as any);
     case "imessage_get_recent_chats": return imessageGetRecentChats(args as any);
     case "http_request": return httpRequest(args as any);
+    case "maps_geocode": return mapsGeocode(args as any);
     default: throw new Error(`Unknown tool: ${name}`);
   }
 }
