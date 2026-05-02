@@ -21,6 +21,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === "--body") flags.body = args[++i];
   else if (a === "--skip-verify") flags.skip_verify = true;
   else if (a === "--force") flags.force = true;
+  else if (a === "--manual") flags.manual_recipient = true;
 }
 
 if (!flags.body) {

@@ -102,6 +102,7 @@ async function getVoicePage(): Promise<{ browser: Browser; context: BrowserConte
     viewport: { width: 1280, height: 800 },
     locale: "en-US",
     timezoneId: "America/Los_Angeles",
+    permissions: ["clipboard-read", "clipboard-write"],
   });
   await context.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
@@ -638,6 +639,7 @@ export async function voiceSendSms(args: {
   body: string;
   force?: boolean;
   skip_verify?: boolean;
+  manual_recipient?: boolean;
 }): Promise<CallToolResult> {
   const body = (args.body ?? "").trim();
   if (!body) {
@@ -683,93 +685,420 @@ export async function voiceSendSms(args: {
     // would call the number on Enter. Match the messages "To" field SPECIFICALLY
     // by aria-label, and never press Enter as fallback (Tab is safer).
     if (!args.thread_id && args.number) {
-      const recipientSelectors = [
-        '[role="combobox"][aria-label*="To" i]',
-        '[role="combobox"][aria-label*="Send to" i]',
-        '[contenteditable="true"][aria-label*="To" i]',
-        '[contenteditable="true"][aria-label*="Send to" i]',
-        '[contenteditable="true"][aria-label*="recipient" i]',
-        'gv-text-input-control input[aria-label*="To" i]',
-        'gv-text-input-control input[aria-label*="recipient" i]',
-        'input[aria-label="Send to"]',
-        'input[aria-label*="Enter a name" i]',
-      ];
+      // The visible recipient input on Voice's web UI lives in the right-side
+      // dial-pad widget (`<gv-make-call-panel>`), which serves BOTH calls and
+      // messages. Typing a number opens a dropdown with two options: "Call"
+      // (default — Enter/Tab triggers it) and "Send message". We type into
+      // that input, then click the message option explicitly. The "Send new
+      // message" FAB / `?action=new` URL flips the route but doesn't render a
+      // separate compose input — the dial pad IS the entry point.
+      const fabClicked = false; // Vestigial, kept in debug payload for back-compat.
+      const pickResult = await page.evaluate(() => {
+        const isVisible = (el: Element) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const inputs = Array.from(document.querySelectorAll<HTMLInputElement>(
+          'input[placeholder*="Enter a name" i], input#il1'
+        )).filter(isVisible);
+
+        const ancestry = (el: HTMLElement) => {
+          const chain: string[] = [];
+          let cur: HTMLElement | null = el;
+          for (let i = 0; i < 12 && cur; i++) {
+            const tag = cur.tagName.toLowerCase();
+            const cls = (cur.getAttribute("class") || "").substring(0, 60);
+            chain.push(`${tag}${cls ? `.${cls.replace(/\s+/g, ".")}` : ""}`);
+            cur = cur.parentElement;
+          }
+          return chain;
+        };
+
+        // Tag each candidate with tokens from its ancestry chain
+        const annotated = inputs.map((input, idx) => {
+          const chain = ancestry(input);
+          const chainStr = chain.join(" > ").toLowerCase();
+          const isDial =
+            /(\bdial\b|make-call|new-call|gv-call|click-to-call|phone-input|placeCall|call-widget|call-pane)/.test(chainStr);
+          const isMessage =
+            /(message|compose|new-conversation|recipient|conversation-input)/.test(chainStr);
+          const r = input.getBoundingClientRect();
+          // Mark the input so we can target it via Playwright
+          input.setAttribute("data-mcp-pick", String(idx));
+          return {
+            idx,
+            isDial,
+            isMessage,
+            rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+            chain,
+          };
+        });
+
+        // Prefer message-flavored, then non-dial, then anything visible
+        const messageMatch = annotated.find(a => a.isMessage && !a.isDial);
+        const nonDial = annotated.find(a => !a.isDial);
+        const picked = messageMatch ?? nonDial ?? annotated[0] ?? null;
+
+        return {
+          url: location.href,
+          totalVisible: annotated.length,
+          candidates: annotated,
+          pickedIdx: picked?.idx ?? null,
+        };
+      });
+
       let recipientSel: string | null = null;
-      for (const sel of recipientSelectors) {
-        const loc = page.locator(sel).first();
-        if ((await loc.count()) > 0 && await loc.isVisible().catch(() => false)) {
-          recipientSel = sel;
-          break;
-        }
+      if (pickResult.pickedIdx !== null) {
+        recipientSel = `[data-mcp-pick="${pickResult.pickedIdx}"]`;
       }
 
       if (!recipientSel) {
-        const debug = await page.evaluate(() => ({
-          url: location.href,
-          inputs: Array.from(document.querySelectorAll("input")).slice(0, 12).map(i => ({
-            ariaLabel: i.getAttribute("aria-label"),
-            placeholder: (i as HTMLInputElement).placeholder,
-            role: i.getAttribute("role"),
-            outerHTML: (i as HTMLInputElement).outerHTML.substring(0, 250),
-          })),
-          contenteditables: Array.from(document.querySelectorAll('[contenteditable="true"]')).slice(0, 6).map(t => ({
-            ariaLabel: t.getAttribute("aria-label"),
-            role: t.getAttribute("role"),
-            outerHTML: (t as HTMLElement).outerHTML.substring(0, 250),
-          })),
-          comboboxes: Array.from(document.querySelectorAll('[role="combobox"]')).slice(0, 6).map(t => ({
-            ariaLabel: t.getAttribute("aria-label"),
-            outerHTML: (t as HTMLElement).outerHTML.substring(0, 250),
-          })),
-        }));
+        const debug = await page.evaluate(() => {
+          const isVisible = (el: Element) => {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          return {
+            url: location.href,
+            dialog_open: !!document.querySelector('[role="dialog"], mat-dialog-container, gv-new-call'),
+            overlay_panes: Array.from(document.querySelectorAll(".cdk-overlay-pane")).map(p => ({
+              visible: isVisible(p),
+              has_input: !!p.querySelector("input"),
+              first_input_html: (p.querySelector("input") as HTMLInputElement | null)?.outerHTML.substring(0, 250) ?? null,
+              outerHTML_head: (p as HTMLElement).outerHTML.substring(0, 200),
+            })),
+            il1_count: document.querySelectorAll("#il1").length,
+            il1_visible_count: Array.from(document.querySelectorAll("#il1")).filter(isVisible).length,
+            inputs: Array.from(document.querySelectorAll("input")).slice(0, 12).map(i => ({
+              ariaLabel: i.getAttribute("aria-label"),
+              placeholder: (i as HTMLInputElement).placeholder,
+              role: i.getAttribute("role"),
+              visible: isVisible(i),
+              outerHTML: (i as HTMLInputElement).outerHTML.substring(0, 250),
+            })),
+            contenteditables: Array.from(document.querySelectorAll('[contenteditable="true"]')).slice(0, 6).map(t => ({
+              ariaLabel: t.getAttribute("aria-label"),
+              role: t.getAttribute("role"),
+              visible: isVisible(t),
+              outerHTML: (t as HTMLElement).outerHTML.substring(0, 250),
+            })),
+            comboboxes: Array.from(document.querySelectorAll('[role="combobox"]')).slice(0, 6).map(t => ({
+              ariaLabel: t.getAttribute("aria-label"),
+              visible: isVisible(t),
+              outerHTML: (t as HTMLElement).outerHTML.substring(0, 250),
+            })),
+          };
+        });
         return ok(JSON.stringify({
           ok: false,
           error: "Could not find messages-recipient input on /messages?action=new — none of the To/Send-to/recipient selectors matched",
+          fab_clicked: fabClicked,
+          pick_result: pickResult,
           debug,
         }, null, 2));
       }
 
-      // Click to focus, then type. Use keyboard.type for both contenteditable
-      // and input elements — most natural events.
-      const recipientLoc = page.locator(recipientSel).first();
-      await recipientLoc.click();
+      // Use the first VISIBLE match, not .first() (which may grab a hidden
+      // Angular duplicate).
+      const candidates = page.locator(recipientSel);
+      const candidateCount = await candidates.count();
+      let recipientLoc = candidates.first();
+      for (let i = 0; i < candidateCount; i++) {
+        const c = candidates.nth(i);
+        if (await c.isVisible().catch(() => false)) {
+          recipientLoc = c;
+          break;
+        }
+      }
+
+      // Voice opens an Angular Material contact-list overlay with a backdrop
+      // (`cdk-overlay-backdrop contact-list-backdrop`) that intercepts pointer
+      // events on the recipient input. Use `.focus()` directly — it bypasses
+      // the pointer-event check entirely. Fall back to a forced click if focus
+      // didn't take.
+      try {
+        await recipientLoc.focus({ timeout: 5000 });
+      } catch {
+        await recipientLoc.click({ force: true, timeout: 5000 });
+      }
       await page.waitForTimeout(300);
       await page.keyboard.type(args.number, { delay: 20 });
       await page.waitForTimeout(2000);
 
-      // Voice surfaces a "Send to <number>" option in a dropdown. Click it.
-      // Don't fall back to Enter — Enter on the dial input would call.
-      const sendToOption = page.locator(
-        `[role="option"]:has-text("Send to"), [role="menuitem"]:has-text("Send to"), ` +
-        `[role="option"]:has-text("${args.number}"), [role="option"]:has-text("${args.number.slice(-7)}")`
-      ).first();
-      if ((await sendToOption.count()) > 0) {
-        await sendToOption.click().catch(() => {});
-      } else {
-        // Tab is safe (won't call); commits the typed text in most input types.
-        await page.keyboard.press("Tab");
+      // The visible recipient input is `gv-make-call-panel` — Voice's
+      // dial-pad widget that handles BOTH calls and messages. After typing
+      // a number it shows a dropdown with two actions: "Call" and "Send a
+      // message". Pressing Enter or Tab triggers Call (the default), which
+      // is why earlier attempts dialed the number. We must explicitly click
+      // the message option.
+      //
+      // Try a wide net of selectors — Voice has shipped this dropdown with
+      // various role/text combinations. Capture all candidates for debug if
+      // none match.
+      const messageOptionLocators = [
+        page.getByRole("menuitem", { name: /message/i }),
+        page.getByRole("option", { name: /message/i }),
+        page.getByRole("button", { name: /message/i }),
+        page.locator('[aria-label*="message" i]:visible:has-text("message")'),
+        page.locator('mat-option:has-text("message")'),
+        page.locator(':is(li, [role="option"], [role="menuitem"], button):has-text("Send message")'),
+        page.locator(':is(li, [role="option"], [role="menuitem"], button):has-text("Send a message")'),
+      ];
+      let messageClicked = false;
+      for (const loc of messageOptionLocators) {
+        const first = loc.first();
+        if ((await first.count()) > 0 && await first.isVisible().catch(() => false)) {
+          await first.click({ timeout: 5000 }).catch(() => {});
+          messageClicked = true;
+          break;
+        }
       }
-      await page.waitForTimeout(2500);
 
-      // Verify a recipient chip / pill appeared. If not, the recipient didn't
-      // commit and proceeding will either send to nobody or trigger something
-      // unintended.
-      const chipExists = await page.evaluate((num) => {
-        const text = (document.body.innerText || "").replace(/\s+/g, " ");
-        // A committed recipient appears as a chip with the number visible
-        return text.includes(num) || text.includes(num.slice(-10));
-      }, args.number).catch(() => false);
-
-      if (!chipExists) {
-        const debug = await page.evaluate(() => ({
-          url: location.href,
-          body_preview: (document.body.innerText || "").substring(0, 1500),
-        }));
+      if (!messageClicked) {
+        // Capture every visible option/button with text so we can pinpoint
+        // the right selector. NEVER fall back to Tab/Enter here — both
+        // trigger Call on this input.
+        const dropdownDebug = await page.evaluate(() => {
+          const isVisible = (el: Element) => {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          const sel = '[role="option"], [role="menuitem"], [role="button"], button, mat-option, li';
+          return Array.from(document.querySelectorAll(sel))
+            .filter(isVisible)
+            .filter(el => {
+              const t = (el as HTMLElement).innerText || "";
+              return t.length > 0 && t.length < 80;
+            })
+            .slice(0, 30)
+            .map(el => ({
+              tag: el.tagName.toLowerCase(),
+              role: el.getAttribute("role"),
+              ariaLabel: el.getAttribute("aria-label"),
+              text: ((el as HTMLElement).innerText || "").trim().substring(0, 80),
+              outerHTML_head: (el as HTMLElement).outerHTML.substring(0, 200),
+            }));
+        });
         return ok(JSON.stringify({
           ok: false,
-          error: "Recipient number did not commit (no chip/pill visible after type+Tab/dropdown). Voice may have routed to a different field.",
-          debug: { recipient_selector_used: recipientSel, ...debug },
+          error: "Typed number but couldn't find the 'Send message' option in the dial-pad dropdown. Voice may have shipped new markup — see dropdown_debug to add a matching selector.",
+          dropdown_debug: dropdownDebug,
+          pick_result: pickResult,
         }, null, 2));
+      }
+      // Wait for compose to render. Clicking "Send a message" in the dial-pad
+      // dropdown transitions to the messages compose dialog, which renders a
+      // NEW empty "To" input. Voice does NOT auto-fill from the dial pad — we
+      // have to retype the number into the compose To field and then click the
+      // autocomplete option to commit a chip.
+      await page.waitForTimeout(2500);
+
+      const composeRecipient = await page.evaluate(() => {
+        const isVisible = (el: Element) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        // Find inputs that look like a To/recipient: text inputs with
+        // empty value, NOT inside the dial-pad widget, NOT search box.
+        const inputs = Array.from(document.querySelectorAll<HTMLInputElement>(
+          'input[type="text"], input:not([type])'
+        )).filter(isVisible);
+
+        const annotated = inputs.map((input, idx) => {
+          const chain: string[] = [];
+          let cur: HTMLElement | null = input;
+          for (let i = 0; i < 12 && cur; i++) {
+            chain.push(cur.tagName.toLowerCase());
+            cur = cur.parentElement;
+          }
+          const chainStr = chain.join(" > ");
+          const isDial = /gv-make-call-panel|gv-call-sidebar/.test(chainStr);
+          const isSearch = (input.getAttribute("aria-label") || "")
+            .toLowerCase()
+            .includes("search");
+          const r = input.getBoundingClientRect();
+          input.setAttribute("data-mcp-pick2", String(idx));
+          return {
+            idx,
+            isDial,
+            isSearch,
+            placeholder: input.placeholder,
+            ariaLabel: input.getAttribute("aria-label"),
+            value: input.value,
+            rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+            chain,
+          };
+        });
+
+        // The compose To field is the visible text input that is NOT the dial
+        // pad and NOT search. Should be empty (no value yet).
+        const composeInput = annotated.find(a => !a.isDial && !a.isSearch);
+        return { candidates: annotated, pickedIdx: composeInput?.idx ?? null };
+      });
+
+      if (composeRecipient.pickedIdx === null) {
+        return ok(JSON.stringify({
+          ok: false,
+          error: "Clicked 'Send a message' option but could not find the compose-dialog 'To' input afterwards. Compose may not have rendered.",
+          stage: "post_message_option_click",
+          compose_recipient_debug: composeRecipient,
+          pick_result: pickResult,
+        }, null, 2));
+      }
+
+      // Focus the compose To field, type the number, and click the autocomplete
+      // option Voice surfaces (a contact card or "Send to <number>" tile).
+      const composeToLoc = page.locator(`[data-mcp-pick2="${composeRecipient.pickedIdx}"]`);
+
+      // Hoisted state used by the chip-verify failure-debug payload below.
+      // Auto mode populates these; manual mode leaves them at defaults.
+      let autocompleteClicked = false;
+      let suggestionDebug: any = null;
+      let nativeSetResult: { ok: boolean; valueAfter: string | null; reason?: string } = {
+        ok: true,
+        valueAfter: null,
+      };
+
+      // MANUAL MODE: pause and let the human commit the recipient chip
+      // themselves. Useful for diagnosing a stuck picker — once the chip is
+      // visible in the browser, press Enter in the calling terminal and the
+      // script takes over to type the body and click Send.
+      if (args.manual_recipient) {
+        // Click into the field so the human knows where to type.
+        await composeToLoc.click({ force: true, timeout: 5000 }).catch(() => {});
+        process.stdout.write(
+          "\n=== MANUAL MODE ===\n" +
+          "Browser is open. Type/commit the recipient chip yourself in the compose To field.\n" +
+          "Once you see the recipient chip rendered (number is in a pill, To input is empty),\n" +
+          "press Enter in THIS terminal to continue with body + Send.\n" +
+          "(Press Ctrl+C to abort.)\n> "
+        );
+        await new Promise<void>((resolve) => {
+          process.stdin.resume();
+          process.stdin.once("data", () => resolve());
+        });
+        process.stdout.write("Resuming — typing body and clicking Send...\n");
+        // Skip the auto-commit logic below.
+      } else {
+        // Click first (not just focus) — Voice's gv-message-party-picker may
+        // require a real pointer event to arm its input handlers.
+        await composeToLoc.click({ force: true, timeout: 5000 }).catch(async () => {
+          await composeToLoc.focus({ timeout: 5000 }).catch(() => {});
+        });
+        await page.waitForTimeout(500);
+
+        // PASTE the number rather than typing keystrokes. Manual testing
+        // (2026-05-01) showed Voice's `gv-message-party-picker` only renders
+        // a "Send to <number>" suggestion tile when the input arrives via a
+        // real paste event — typing keystrokes (slow OR fast) and native
+        // value-setter both leave the input visually populated but the
+        // picker never surfaces the tile. Clipboard paste with granted
+        // permissions emits a trusted ClipboardEvent that the picker
+        // listens for.
+        await page.evaluate((num) => navigator.clipboard.writeText(num), args.number);
+        await page.keyboard.press("Control+V");
+        await page.waitForTimeout(500);
+
+        const valueAfterType = await page.evaluate((sel) => {
+          const input = document.querySelector(sel) as HTMLInputElement | null;
+          return input ? input.value : null;
+        }, `[data-mcp-pick2="${composeRecipient.pickedIdx}"]`);
+        nativeSetResult = { ok: true, valueAfter: valueAfterType };
+
+        // Poll for the "Send to <number>" suggestion tile. Voice's picker
+        // surfaces it ~500-1500ms after the paste event. Match by visible
+        // text starting with "Send to" — that's the gesture the user
+        // confirmed works (clicking that tile commits a chip).
+        const numDigitsForLookup = args.number.replace(/\D/g, "").slice(-10);
+        for (let i = 0; i < 12; i++) {
+          const found = await page.evaluate((last10) => {
+            const isVisible = (el: Element) => {
+              const r = (el as HTMLElement).getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            };
+            const candidates: any[] = [];
+            // Cast a wide net — Voice's tile may live inside a CDK overlay
+            // pane, gv-contact-suggestion-list, or just a plain button.
+            const all = document.querySelectorAll(
+              'gv-contact-card, gv-contact-suggestion-list *, [role="option"], mat-option, button, [role="button"], li'
+            );
+            let pickEl: HTMLElement | null = null;
+            for (const el of Array.from(all)) {
+              if (!isVisible(el)) continue;
+              const text = ((el as HTMLElement).innerText || "").trim();
+              if (!text) continue;
+              // Either: explicit "Send to" prefix, OR contains the number's
+              // last 10 digits in any format.
+              const digits = text.replace(/\D/g, "");
+              const isSendToTile = /^send to\b/i.test(text);
+              const containsNumber = digits.includes(last10);
+              if (isSendToTile || containsNumber) {
+                candidates.push({
+                  tag: el.tagName.toLowerCase(),
+                  text: text.substring(0, 80),
+                });
+                // Prefer the "Send to" tile over generic number-containing
+                // elements — that's the explicit commit gesture.
+                if (!pickEl || (isSendToTile && !/^send to\b/i.test(pickEl.innerText || ""))) {
+                  pickEl = el as HTMLElement;
+                }
+              }
+            }
+            if (pickEl) pickEl.setAttribute("data-mcp-suggest", "1");
+            return { candidates, picked: !!pickEl };
+          }, numDigitsForLookup);
+
+          if (found.picked) {
+            await page.locator('[data-mcp-suggest="1"]').first().click({ timeout: 3000 }).catch(() => {});
+            autocompleteClicked = true;
+            suggestionDebug = found.candidates;
+            break;
+          }
+          if (i === 11) suggestionDebug = found.candidates;
+          await page.waitForTimeout(500);
+        }
+      } // close else (auto mode)
+      await page.waitForTimeout(1500);
+
+      // Verify a recipient chip / pill appeared. Voice renders chips with
+      // formatted numbers like "(424) 466-3685" or "‪+1 424-466-3685‬", so
+      // strip non-digits before comparing — substring match on the raw text
+      // misses formatted variants.
+      const numDigitsLast10 = args.number.replace(/\D/g, "").slice(-10);
+      const chipExists = await page.evaluate((last10) => {
+        const digits = (document.body.innerText || "").replace(/\D/g, "");
+        return digits.includes(last10);
+      }, numDigitsLast10).catch(() => false);
+
+      if (!chipExists) {
+        if (args.manual_recipient) {
+          // In manual mode, trust the user — they already confirmed the chip
+          // is committed before pressing Enter. Continue to body+send and let
+          // the post-send verification be the source of truth.
+          process.stdout.write(
+            "WARNING: chip not detected via body-text scan, but manual mode " +
+            "trusts the user. Continuing to body + Send.\n"
+          );
+        } else {
+          const debug = await page.evaluate(() => ({
+            url: location.href,
+            body_preview: (document.body.innerText || "").substring(0, 1500),
+          }));
+          return ok(JSON.stringify({
+            ok: false,
+            error: "Compose To field accepted the number but no recipient chip committed.",
+            stage: "compose_chip_verify",
+            autocomplete_clicked: autocompleteClicked,
+            native_set_result: nativeSetResult,
+            suggestion_candidates_seen: suggestionDebug,
+            debug: {
+              recipient_selector_used: recipientSel,
+              compose_recipient_debug: composeRecipient,
+              pick_result: pickResult,
+              ...debug,
+            },
+          }, null, 2));
+        }
       }
     }
 
@@ -831,11 +1160,20 @@ export async function voiceSendSms(args: {
       }, null, 2));
     }
 
-    // Click to focus, then type. fill() doesn't reliably work on contenteditable
-    // divs — keyboard.type with a small delay simulates real keypresses, which
-    // any framework binding will respect.
+    // Focus to type. fill() doesn't reliably work on contenteditable divs —
+    // keyboard.type with a small delay simulates real keypresses, which any
+    // framework binding will respect.
+    //
+    // Use .focus() instead of .click() because Voice may have a residual
+    // `cdk-overlay-backdrop contact-list-backdrop` over the page from the
+    // recipient picker autocomplete — that backdrop intercepts pointer events
+    // even after the chip is committed. Focus bypasses the pointer-event check.
     const compose = page.locator(composeSel).first();
-    await compose.click();
+    try {
+      await compose.focus({ timeout: 5000 });
+    } catch {
+      await compose.click({ force: true, timeout: 5000 });
+    }
     await page.waitForTimeout(400);
 
     const isContentEditable = await compose.evaluate(el =>
@@ -871,33 +1209,81 @@ export async function voiceSendSms(args: {
       }, null, 2));
     }
 
-    // Find and click Send. Voice disables the button when compose is empty,
-    // so :not([disabled]) ensures we only match the active one.
+    // Snapshot every Send-ish element so we can see what state Voice's UI
+    // is in when we go to click. This catches cases where the button is
+    // rendered but disabled (aria-disabled="true" or the matDisabled class).
+    const sendStateBefore = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('[aria-label*="Send" i], button:has(mat-icon)'))
+        .slice(0, 12)
+        .map(el => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return {
+            tagName: el.tagName,
+            ariaLabel: el.getAttribute("aria-label"),
+            ariaDisabled: el.getAttribute("aria-disabled"),
+            disabledAttr: (el as HTMLButtonElement).disabled,
+            classList: (el.getAttribute("class") || "").substring(0, 120),
+            visible: r.width > 0 && r.height > 0,
+            outerHTML: (el as HTMLElement).outerHTML.substring(0, 250),
+          };
+        });
+    });
+
+    // MANUAL MODE: pause again so the user can verify body + chip + Send
+    // button state is correct, and either let the script click Send or click
+    // Send themselves.
+    if (args.manual_recipient) {
+      process.stdout.write(
+        "\n=== MANUAL MODE — STAGE 2 ===\n" +
+        "Body typed. About to click Send.\n" +
+        "Send button state captured (see send_state_before in result if this fails).\n" +
+        "Either click Send YOURSELF in the browser, OR let the script click it.\n" +
+        "Press Enter in this terminal when ready (script will then click Send and verify).\n> "
+      );
+      await new Promise<void>((resolve) => {
+        process.stdin.resume();
+        process.stdin.once("data", () => resolve());
+      });
+    }
+
+    // Find Send. Voice has TWO "Send"-flavored elements on the page:
+    //   - `<div role="button" aria-label="Send new message">` — the FAB that
+    //     opens a new compose dialog. Clicking this DOES NOT send anything;
+    //     it just resets the compose pane.
+    //   - `<button class="send-button" mattooltip="Send message">` — the
+    //     actual Send button inside the compose dialog. THIS is what we want.
+    //
+    // Prefer the `.send-button` class (specific) over generic aria-label
+    // matchers (which match the FAB first via DOM order).
     const sendButton = page.locator(
-      'button[aria-label*="Send" i]:not([disabled]):not([aria-disabled="true"]), ' +
-      '[role="button"][aria-label*="Send" i]:not([aria-disabled="true"])'
+      'button.send-button:not([disabled]):not([aria-disabled="true"]):not(.mat-mdc-button-disabled), ' +
+      'button[mattooltip*="Send message" i]:not([disabled]):not([aria-disabled="true"]):not(.mat-mdc-button-disabled), ' +
+      'button[aria-label*="Send message" i]:not([disabled]):not([aria-disabled="true"]):not(.mat-mdc-button-disabled)'
     ).first();
 
     if ((await sendButton.count()) === 0) {
-      // Capture every "Send"-related element so we can see what's there
-      const sendish = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('[aria-label*="Send" i]')).slice(0, 8).map(el => ({
-          tagName: el.tagName,
-          ariaLabel: el.getAttribute("aria-label"),
-          disabled: (el as HTMLButtonElement).disabled || el.getAttribute("aria-disabled") === "true",
-          visible: (el as HTMLElement).getBoundingClientRect().width > 0,
-          outerHTML: (el as HTMLElement).outerHTML.substring(0, 300),
-        }))
-      );
       return ok(JSON.stringify({
         ok: false,
         error: "Compose filled but no enabled Send button found",
-        debug: { send_candidates: sendish, url: page.url() },
+        debug: { send_state_before: sendStateBefore, url: page.url() },
       }, null, 2));
     }
 
-    await sendButton.click();
-    await page.waitForTimeout(2500);
+    // Send button can sit under the residual contact-list-backdrop — force
+    // the click so the pointer-event check doesn't block it.
+    await sendButton.click({ force: true, timeout: 10_000 });
+    // Capture state immediately after the click so we can diagnose whether
+    // Voice actually accepted the submission.
+    await page.waitForTimeout(800);
+    const sendStateAfter = await page.evaluate(() => ({
+      url: location.href,
+      urlChanged: !location.href.includes("?itemId=draft"),
+      composeBodyValue: (() => {
+        const ta = document.querySelector(".message-input, textarea[placeholder*='message' i]") as HTMLTextAreaElement | null;
+        return ta?.value ?? null;
+      })(),
+    }));
+    await page.waitForTimeout(1700);
 
     if (skipVerify) {
       return ok(JSON.stringify({
@@ -911,17 +1297,30 @@ export async function voiceSendSms(args: {
     // Post-read: poll for up to 12s for a new message bubble whose body
     // contains the first ~50 chars of what we sent.
     const probe = body.substring(0, 50);
+    const probeShort = body.substring(0, Math.min(20, body.length));
     let landed = false;
-    let lastSnapshot: string[] = [];
+    let lastSnapshot: any = {};
     for (let i = 0; i < 24; i++) {
-      const afterBodies: string[] = await page.evaluate(() =>
-        Array.from(document.querySelectorAll("gv-message-item"))
-          .slice(-6)
-          .map(m => (m as HTMLElement).innerText.replace(/\s+/g, " ").trim())
-      );
-      lastSnapshot = afterBodies;
-      const fresh = afterBodies.filter(b => !beforeBodies.includes(b));
-      if (fresh.some(b => b.includes(probe))) {
+      const verify = await page.evaluate((shortProbe) => {
+        const url = location.href;
+        // Wider net: check several candidate message-bubble selectors plus
+        // whole-body innerText. Voice's compose-after-send may render the
+        // first message via a transient element name.
+        const items = Array.from(document.querySelectorAll(
+          'gv-message-item, gv-text-message-item, [role="article"], [aria-roledescription*="message" i]'
+        )).slice(-8).map(m => (m as HTMLElement).innerText.replace(/\s+/g, " ").trim());
+        const bodyText = (document.body.innerText || "").replace(/\s+/g, " ");
+        const bodyHasProbe = bodyText.includes(shortProbe);
+        return { url, items, bodyHasProbe, urlChanged: !url.includes("?itemId=draft") };
+      }, probeShort);
+      lastSnapshot = verify;
+      const fresh = verify.items.filter((b: string) => !beforeBodies.includes(b));
+      // Three signals that the send went through:
+      // 1. A message bubble containing the body text
+      // 2. The URL transitioned away from ?itemId=draft to a real thread
+      // 3. The body text appears anywhere on the page in a fresh bubble
+      if (fresh.some((b: string) => b.includes(probe)) ||
+          (verify.urlChanged && verify.bodyHasProbe)) {
         landed = true;
         break;
       }
@@ -932,10 +1331,13 @@ export async function voiceSendSms(args: {
       return ok(JSON.stringify({
         ok: false,
         verified: false,
-        error: "Send fired but the new message did not appear in the thread within 12s",
+        error: "Send fired but the new message did not appear in the thread within 12s. " +
+               "Check the recipient phone — the message may have actually been sent " +
+               "(Voice's UI sometimes doesn't refresh draft view) or the Send click was a no-op.",
         before_count: beforeBodies.length,
-        after_count: lastSnapshot.length,
-        last_snapshot: lastSnapshot.slice(-3),  // last 3 visible bubbles for debug
+        send_state_before: sendStateBefore,
+        send_state_after: sendStateAfter,
+        last_snapshot: lastSnapshot,
         url: page.url(),
       }, null, 2));
     }
