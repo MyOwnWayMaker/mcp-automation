@@ -99,7 +99,7 @@ export type DriveTimeResult =
 
 const DISTANCE_MATRIX_URL = "https://maps.googleapis.com/maps/api/distancematrix/json";
 
-type LatLng = { lat: number; lng: number };
+export type LatLng = { lat: number; lng: number };
 
 function toLocationParam(loc: string | LatLng): string {
   if (typeof loc === "string") return loc;
@@ -218,17 +218,17 @@ export async function mapsDriveTime(args: {
 
 // ─── Quadrant / service-area classification ────────────────────────────────────
 
-const HOME_LAT = 34.1524516;
-const HOME_LNG = -118.4297816;
-const HOME_LABEL = "4470 Ventura Canyon Ave, Sherman Oaks, CA 91423";
-const CENTRAL_RADIUS_MILES = 5.0;
+export const HOME_LAT = 34.1524516;
+export const HOME_LNG = -118.4297816;
+export const HOME_LABEL = "4470 Ventura Canyon Ave, Sherman Oaks, CA 91423";
+export const CENTRAL_RADIUS_MILES = 5.0;
 const EARTH_RADIUS_MILES = 3958.8;
 
 function toRadians(deg: number): number {
   return (deg * Math.PI) / 180;
 }
 
-function haversineMiles(a: LatLng, b: LatLng): number {
+export function haversineMiles(a: LatLng, b: LatLng): number {
   const dLat = toRadians(b.lat - a.lat);
   const dLng = toRadians(b.lng - a.lng);
   const lat1 = toRadians(a.lat);
@@ -273,7 +273,7 @@ export type Quadrant = "Central" | "N" | "W" | "E" | "S";
  *      City, LAX, Inglewood, South Bay, Orange County, San Diego
  *      (405 S / 5 S corridor)
  */
-function classifyPoint(p: LatLng, origin: LatLng): Quadrant {
+export function classifyPoint(p: LatLng, origin: LatLng): Quadrant {
   const dist = haversineMiles(origin, p);
   if (dist <= CENTRAL_RADIUS_MILES) return "Central";
   if (p.lat >= 34.20) return "N";
