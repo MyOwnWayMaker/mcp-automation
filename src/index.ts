@@ -26,6 +26,7 @@ import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, shee
 import { imessageSend, imessageGetRecentChats } from "./tools/imessage.js";
 import { httpRequest } from "./tools/http.js";
 import { mapsGeocode, mapsDriveTime, mapsClassifyQuadrant } from "./tools/maps.js";
+import { parseAssignmentEmailTool } from "./tools/assignment_email.js";
 import { gdocsCreateDocument, gdocsGetDocument, gdocsFindDocument, gdocsAppendText, gdocsFindAndReplace } from "./tools/gdocs.js";
 import { tasksListTasklists, tasksListTasks, tasksCreateTask, tasksUpdateTask, tasksCompleteTask, tasksDeleteTask } from "./tools/tasks.js";
 import { meetScheduleMeeting, meetGetMeeting, meetCancelMeeting } from "./tools/meet.js";
@@ -223,6 +224,7 @@ const TOOLS: Tool[] = [
   { name: "maps_geocode", description: "Convert a street address to lat/lng coordinates via the Google Geocoding API. Returns formatted_address, place_id, lat, lng, location_type (ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE), and partial_match flag.", inputSchema: { type: "object", properties: { address: { type: "string", description: "The street address (or lat,lng for reverse) to geocode." } }, required: ["address"] } },
   { name: "maps_drive_time", description: "Get drive duration + distance between two locations via Google Distance Matrix API. origin/destination can each be a string address OR an object {lat, lng}. Set departure_time to \"now\" or a unix timestamp to enable traffic-aware estimates (returns duration_in_traffic_seconds). Defaults: mode=driving, units=imperial.", inputSchema: { type: "object", properties: { origin: { description: "Either a street address string or {lat, lng} object" }, destination: { description: "Either a street address string or {lat, lng} object" }, mode: { type: "string", enum: ["driving", "walking", "bicycling", "transit"] }, departure_time: { description: "\"now\" or unix-seconds timestamp; enables duration_in_traffic" } }, required: ["origin", "destination"] } },
   { name: "maps_classify_quadrant", description: "Classify an address (or lat/lng) into a service-area zone relative to home (Sherman Oaks): Central (≤5mi), N, W, E, or S. Zones are organized by freeway corridor — places reachable via the same route from home land in the same zone. Returns quadrant, distance_miles, bearing_degrees, and the canonical origin used. Pass `origin` to override home.", inputSchema: { type: "object", properties: { address: { type: "string", description: "Street address to classify (will be geocoded internally)" }, location: { type: "object", properties: { lat: { type: "number" }, lng: { type: "number" } }, description: "Pre-geocoded {lat, lng} — use instead of address to skip the geocoding API call" }, origin: { type: "object", properties: { lat: { type: "number" }, lng: { type: "number" } }, description: "Optional override for the origin point. Defaults to home (Sherman Oaks)." } }, required: [] } },
+  { name: "parse_assignment_email", description: "Parse a new-claim email into structured fields per known sender (PCS Adjusting, US Claim Solutions, Xactware, AAN, StraightLine Global, etc.). Returns sender_kind, email_kind (new_assignment vs status_update vs supplement_request vs note_added), platform (filetrac/xactanalysis/aan/manual), and as many of {claim_number, carrier, insured_name, insured_phone, loss_address, claimant_name, date_of_loss, loss_type, desk_adjuster, ...} as the email exposes. The platform field tells the caller whether to follow up with filetrac_get_claim or xact_get_assignment.", inputSchema: { type: "object", properties: { from: { type: "string", description: "The 'From:' header value (with optional <email> bracket)" }, subject: { type: "string" }, body: { type: "string", description: "Email body — HTML or plain text both fine" } }, required: ["from", "subject", "body"] } },
 ];
 
 // ─── Tool Router ───────────────────────────────────────────────────────────────
@@ -372,6 +374,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "maps_geocode": return mapsGeocode(args as any);
     case "maps_drive_time": return mapsDriveTime(args as any);
     case "maps_classify_quadrant": return mapsClassifyQuadrant(args as any);
+    case "parse_assignment_email": return parseAssignmentEmailTool(args as any);
     default: throw new Error(`Unknown tool: ${name}`);
   }
 }
