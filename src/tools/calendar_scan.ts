@@ -21,6 +21,11 @@ export type ScannedEvent = {
   end: string;         // ISO datetime
   all_day: boolean;
   location?: string;
+  // Google Calendar colorId as a string ("1".."11"). Undefined = default
+  // (no color set). Per the 2026-05-04 convention, [ADJ]=6, [NOTARY]=3,
+  // and anything not undefined/null AND not "9" is treated as an
+  // inviolable hard block by the slot picker.
+  color_id?: string;
   // Geocoded fields — only present when the event has a location AND
   // geocoding succeeded.
   lat?: number;
@@ -120,6 +125,7 @@ export async function scanCalendarWithQuadrants(args: {
       end: endVal,
       all_day,
       location: item.location || undefined,
+      color_id: item.colorId || undefined,
     };
 
     if (item.location && !all_day) {

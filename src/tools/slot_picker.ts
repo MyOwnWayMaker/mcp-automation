@@ -174,10 +174,14 @@ export type PickSlotsResult =
       };
       slots: SchedulingSlot[];
       same_quadrant_match: boolean;
+      same_quadrant_today: boolean;
+      today_allowed: boolean;
       considered_days: string[];
       working_hours: { start_hour: number; end_hour: number };
       slot_minutes: number;
       drive_times_validated: boolean;
+      preferred_days: number;
+      max_days: number;
     }
   | { ok: false; error: string };
 
@@ -207,14 +211,23 @@ export async function pickInspectionSlots(args: {
   slot_minutes?: number;
   validate_drive_times?: boolean;
   filter_infeasible?: boolean;
+  preferred_days?: number;
+  block_uncolored_events?: boolean;
 }): Promise<PickSlotsResult> {
-  const days = args.days ?? 3;
+  const days = args.days ?? 5;                  // upper bound; preferred is below
+  const preferredDays = args.preferred_days ?? 3;
   const workStart = args.work_start_hour ?? 7;
   const workEnd = args.work_end_hour ?? 16;
   const slotMin = args.slot_minutes ?? 60;
   const maxSlots = args.max_slots ?? 5;
   const validateDrive = args.validate_drive_times ?? true;
   const filterInfeasible = args.filter_infeasible ?? false;
+  // Color-based hard-block rule (locked 2026-05-04): only events with a
+  // colorId set AND not "9" (Blueberry) are inviolable. Default and
+  // Blueberry events are soft and can be overlapped. Set
+  // block_uncolored_events=true to fall back to "every timed event blocks"
+  // behavior if the user temporarily breaks color discipline.
+  const blockUncolored = args.block_uncolored_events ?? false;
   const now = args.time_min ? new Date(args.time_min) : new Date();
 
   // 1. Geocode + classify the loss address.
@@ -275,6 +288,24 @@ export async function pickInspectionSlots(args: {
   const considered: string[] = [];
   const slotMs = slotMin * 60_000;
 
+  // Color-based hard-block predicate (locked 2026-05-04). Soft = no colorId
+  // OR colorId === "9" (Blueberry). Anything else is inviolable.
+  const isHardBlock = (ev: { color_id?: string }) => {
+    if (blockUncolored) return true;
+    if (!ev.color_id) return false;
+    if (ev.color_id === "9") return false;
+    return true;
+  };
+
+  // Today rule: schedule today only if Hakiel will already be in the loss's
+  // quadrant today (existing same-quadrant timed event today). Otherwise
+  // earliest = tomorrow 7AM.
+  const todayDate = instantToLAParts(now).date;
+  const sameQuadrantToday = timedEvents.some(
+    (e) => e.quadrant === lossQuadrant && instantToLAParts(new Date(e.startMs)).date === todayDate,
+  );
+  const todayAllowed = sameQuadrantToday;
+
   // Helper: try to add a slot at a specific instant. Returns true if added.
   const tryAddSlot = (
     startInstant: Date,
@@ -287,6 +318,7 @@ export async function pickInspectionSlots(args: {
 
     const p = instantToLAParts(startInstant);
     if (blockedDays.has(p.date)) return false;
+    if (!todayAllowed && p.date === todayDate) return false;
 
     // Must be entirely inside working hours (LA-local).
     if (p.h < workStart) return false;
@@ -296,8 +328,9 @@ export async function pickInspectionSlots(args: {
     if (endParts.h > workEnd) return false;
     if (endParts.h === workEnd && endParts.mi > 0) return false;
 
-    // Conflict with any timed event?
+    // Conflict with any HARD-BLOCK timed event (color != null AND != "9").
     for (const ev of timedEvents) {
+      if (!isHardBlock(ev)) continue;
       if (ev.startMs < endMs && ev.endMs > startMs) return false;
     }
 
@@ -373,8 +406,15 @@ export async function pickInspectionSlots(args: {
     }
   }
 
-  // 6. Sort: adjacent first (in ev order), then earliest_free by start time.
+  // 6. Sort: prefer slots inside the preferred_days window first, then by
+  // rationale (adjacent before earliest_free), then by start time.
+  const preferredCutoffMs =
+    laWallToInstant(startParts.y, startParts.mo, startParts.d, 0, 0).getTime() +
+    preferredDays * 24 * 60 * 60 * 1000;
   slots.sort((a, b) => {
+    const aInPref = new Date(a.start).getTime() < preferredCutoffMs ? 0 : 1;
+    const bInPref = new Date(b.start).getTime() < preferredCutoffMs ? 0 : 1;
+    if (aInPref !== bInPref) return aInPref - bInPref;
     const rankA = a.rationale === "adjacent_after" ? 0 : a.rationale === "adjacent_before" ? 1 : 2;
     const rankB = b.rationale === "adjacent_after" ? 0 : b.rationale === "adjacent_before" ? 1 : 2;
     if (rankA !== rankB) return rankA - rankB;
@@ -477,10 +517,14 @@ export async function pickInspectionSlots(args: {
     },
     slots: finalSlots,
     same_quadrant_match,
+    same_quadrant_today: sameQuadrantToday,
+    today_allowed: todayAllowed,
     considered_days: considered,
     working_hours: { start_hour: workStart, end_hour: workEnd },
     slot_minutes: slotMin,
     drive_times_validated: validateDrive,
+    preferred_days: preferredDays,
+    max_days: days,
   };
 }
 
@@ -495,6 +539,8 @@ export async function pickInspectionSlotsTool(args: {
   slot_minutes?: number;
   validate_drive_times?: boolean;
   filter_infeasible?: boolean;
+  preferred_days?: number;
+  block_uncolored_events?: boolean;
 }): Promise<CallToolResult> {
   const result = await pickInspectionSlots(args);
   return ok(JSON.stringify(result, null, 2));
