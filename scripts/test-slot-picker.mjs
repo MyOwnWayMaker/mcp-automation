@@ -30,16 +30,20 @@ for (const c of cases) {
   console.log(`Considered days: ${result.considered_days.join(", ")}`);
   console.log(`Slots (${result.slots.length}):`);
   for (const s of result.slots) {
-    let line = `  • ${s.weekday} ${s.date}  ${s.start_label} – ${s.end_label}  [${s.rationale}]`;
+    const flag = s.feasible === false ? "✗ INFEASIBLE" : s.feasible === true ? "✓" : "-";
+    let line = `  ${flag}  ${s.weekday} ${s.date}  ${s.start_label} – ${s.end_label}  [${s.rationale}]`;
     if (s.adjacent_event) {
-      line += `  adj→ ${s.adjacent_event.summary ?? "(no title)"} @ ${s.adjacent_event.location ?? "?"}`;
+      line += `  adj→ ${s.adjacent_event.summary ?? "(no title)"}`;
     }
     console.log(line);
-    if (s.prev_event_with_location) {
-      console.log(`      prev: ${s.prev_event_with_location.summary ?? "(no title)"} @ ${s.prev_event_with_location.location} (ends ${s.prev_event_with_location.end})`);
+    if (s.prev_leg) {
+      const slack = Math.round(s.prev_leg.slack_seconds / 60);
+      console.log(`      prev_leg: ${s.prev_leg.duration_text} drive (${s.prev_leg.distance_text}), ${slack}m slack`);
     }
-    if (s.next_event_with_location) {
-      console.log(`      next: ${s.next_event_with_location.summary ?? "(no title)"} @ ${s.next_event_with_location.location} (starts ${s.next_event_with_location.start})`);
+    if (s.next_leg) {
+      const slack = Math.round(s.next_leg.slack_seconds / 60);
+      console.log(`      next_leg: ${s.next_leg.duration_text} drive (${s.next_leg.distance_text}), ${slack}m slack`);
     }
+    if (s.infeasible_reason) console.log(`      reason: ${s.infeasible_reason}`);
   }
 }

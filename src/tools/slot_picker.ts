@@ -3,6 +3,7 @@ import {
   geocode,
   classifyPoint,
   haversineMiles,
+  driveTime,
   HOME_LAT,
   HOME_LNG,
   type Quadrant,
@@ -131,6 +132,33 @@ export type SchedulingSlot = {
     lng: number;
     start: string;
   };
+  // C4 drive-time validation. Only set when validate_drive_times is true
+  // (default). `feasible: false` means at least one leg violates the
+  // window — see infeasible_reason.
+  feasible?: boolean;
+  infeasible_reason?: string;
+  prev_leg?: {
+    from: string;
+    to: string;
+    duration_seconds: number;
+    duration_text: string;
+    distance_text: string;
+    leaves_at: string;        // ISO — when prev event ends
+    arrives_by: string;       // ISO — leaves_at + duration
+    slot_start: string;       // ISO — for context
+    slack_seconds: number;    // slot_start - arrives_by (negative = late)
+  };
+  next_leg?: {
+    from: string;
+    to: string;
+    duration_seconds: number;
+    duration_text: string;
+    distance_text: string;
+    leaves_at: string;        // ISO — slot_end
+    arrives_by: string;       // ISO — leaves_at + duration
+    next_start: string;       // ISO — for context
+    slack_seconds: number;    // next_start - arrives_by (negative = late)
+  };
 };
 
 export type PickSlotsResult =
@@ -149,6 +177,7 @@ export type PickSlotsResult =
       considered_days: string[];
       working_hours: { start_hour: number; end_hour: number };
       slot_minutes: number;
+      drive_times_validated: boolean;
     }
   | { ok: false; error: string };
 
@@ -176,12 +205,16 @@ export async function pickInspectionSlots(args: {
   work_start_hour?: number;
   work_end_hour?: number;
   slot_minutes?: number;
+  validate_drive_times?: boolean;
+  filter_infeasible?: boolean;
 }): Promise<PickSlotsResult> {
   const days = args.days ?? 3;
   const workStart = args.work_start_hour ?? 7;
   const workEnd = args.work_end_hour ?? 16;
   const slotMin = args.slot_minutes ?? 60;
   const maxSlots = args.max_slots ?? 5;
+  const validateDrive = args.validate_drive_times ?? true;
+  const filterInfeasible = args.filter_infeasible ?? false;
   const now = args.time_min ? new Date(args.time_min) : new Date();
 
   // 1. Geocode + classify the loss address.
@@ -348,6 +381,90 @@ export async function pickInspectionSlots(args: {
     return new Date(a.start).getTime() - new Date(b.start).getTime();
   });
 
+  // Trim to max_slots before drive-time validation so we don't burn API
+  // calls on slots that won't be returned anyway.
+  const trimmed = slots.slice(0, maxSlots);
+
+  // 7. C4 — drive-time validation per slot.
+  //   prev leg: prev event's location → loss address; must arrive ≤ slot.start
+  //   next leg: loss address → next event's location; must arrive ≤ next.start
+  // Slots without a prev or next anchor get the leg skipped (treated as ok
+  // for that side). All-or-nothing: any infeasible leg flips feasible=false.
+  if (validateDrive) {
+    const lossLatLng: LatLng = { lat: g.lat, lng: g.lng };
+    for (const s of trimmed) {
+      let feasible = true;
+      let reason: string | undefined;
+      const slotStartMs = new Date(s.start).getTime();
+      const slotEndMs = new Date(s.end).getTime();
+
+      if (s.prev_event_with_location) {
+        const prev = s.prev_event_with_location;
+        const prevEndMs = new Date(prev.end).getTime();
+        const dt = await driveTime({
+          origin: { lat: prev.lat, lng: prev.lng },
+          destination: lossLatLng,
+        });
+        if (dt.ok) {
+          const arriveMs = prevEndMs + dt.duration_seconds * 1000;
+          const slack = Math.round((slotStartMs - arriveMs) / 1000);
+          s.prev_leg = {
+            from: prev.location,
+            to: g.formatted_address,
+            duration_seconds: dt.duration_seconds,
+            duration_text: dt.duration_text,
+            distance_text: dt.distance_text,
+            leaves_at: prev.end,
+            arrives_by: new Date(arriveMs).toISOString(),
+            slot_start: s.start,
+            slack_seconds: slack,
+          };
+          if (slack < 0) {
+            feasible = false;
+            reason = `prev leg: arrive ${Math.abs(slack / 60).toFixed(0)}m late from ${prev.location}`;
+          }
+        }
+      }
+
+      if (s.next_event_with_location) {
+        const next = s.next_event_with_location;
+        const nextStartMs = new Date(next.start).getTime();
+        const dt = await driveTime({
+          origin: lossLatLng,
+          destination: { lat: next.lat, lng: next.lng },
+        });
+        if (dt.ok) {
+          const arriveMs = slotEndMs + dt.duration_seconds * 1000;
+          const slack = Math.round((nextStartMs - arriveMs) / 1000);
+          s.next_leg = {
+            from: g.formatted_address,
+            to: next.location,
+            duration_seconds: dt.duration_seconds,
+            duration_text: dt.duration_text,
+            distance_text: dt.distance_text,
+            leaves_at: s.end,
+            arrives_by: new Date(arriveMs).toISOString(),
+            next_start: next.start,
+            slack_seconds: slack,
+          };
+          if (slack < 0) {
+            feasible = false;
+            reason = reason
+              ? `${reason}; next leg: arrive ${Math.abs(slack / 60).toFixed(0)}m late at ${next.location}`
+              : `next leg: arrive ${Math.abs(slack / 60).toFixed(0)}m late at ${next.location}`;
+          }
+        }
+      }
+
+      s.feasible = feasible;
+      if (!feasible) s.infeasible_reason = reason;
+    }
+  }
+
+  const finalSlots = filterInfeasible
+    ? trimmed.filter((s) => s.feasible !== false)
+    : trimmed;
+
   return {
     ok: true,
     loss: {
@@ -358,11 +475,12 @@ export async function pickInspectionSlots(args: {
       quadrant: lossQuadrant,
       distance_miles_from_home: Math.round(distFromHome * 10) / 10,
     },
-    slots: slots.slice(0, maxSlots),
+    slots: finalSlots,
     same_quadrant_match,
     considered_days: considered,
     working_hours: { start_hour: workStart, end_hour: workEnd },
     slot_minutes: slotMin,
+    drive_times_validated: validateDrive,
   };
 }
 
@@ -375,6 +493,8 @@ export async function pickInspectionSlotsTool(args: {
   work_start_hour?: number;
   work_end_hour?: number;
   slot_minutes?: number;
+  validate_drive_times?: boolean;
+  filter_infeasible?: boolean;
 }): Promise<CallToolResult> {
   const result = await pickInspectionSlots(args);
   return ok(JSON.stringify(result, null, 2));
