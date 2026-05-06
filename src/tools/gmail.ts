@@ -138,6 +138,33 @@ function extractBody(payload: any): string {
   return "";
 }
 
+// Recursively collect attachment metadata from a Gmail payload tree.
+// A part is an attachment when it has a non-empty filename + a body.attachmentId.
+type AttachmentMeta = {
+  filename: string;
+  mime_type: string;
+  attachment_id: string;
+  size_bytes: number;
+};
+
+function collectAttachments(payload: any, out: AttachmentMeta[] = []): AttachmentMeta[] {
+  if (!payload) return out;
+  const filename = payload.filename || "";
+  const attachmentId = payload.body?.attachmentId;
+  if (filename && attachmentId) {
+    out.push({
+      filename,
+      mime_type: payload.mimeType || "application/octet-stream",
+      attachment_id: attachmentId,
+      size_bytes: Number(payload.body?.size ?? 0),
+    });
+  }
+  if (Array.isArray(payload.parts)) {
+    for (const p of payload.parts) collectAttachments(p, out);
+  }
+  return out;
+}
+
 export async function gmailGetEmail(args: {
   message_id: string;
 }): Promise<CallToolResult> {
@@ -153,19 +180,31 @@ export async function gmailGetEmail(args: {
     headers.find((h) => h.name === name)?.value ?? "";
 
   const body = extractBody(res.data.payload);
+  const attachments = collectAttachments(res.data.payload);
 
-  const text = [
+  const lines = [
     `From: ${get("From")}`,
     `To: ${get("To")}`,
     `Date: ${get("Date")}`,
     `Subject: ${get("Subject")}`,
     `Thread ID: ${res.data.threadId}`,
     `Message ID: ${res.data.id}`,
-    "",
-    body || "(no readable body found)",
-  ].join("\n");
+  ];
 
-  return makeTextContent(text);
+  if (attachments.length > 0) {
+    lines.push("");
+    lines.push(`Attachments (${attachments.length}):`);
+    for (const a of attachments) {
+      const sizeKb = a.size_bytes ? `${(a.size_bytes / 1024).toFixed(1)} KB` : "?";
+      lines.push(`  - ${a.filename} (${a.mime_type}, ${sizeKb})`);
+      lines.push(`    attachment_id: ${a.attachment_id}`);
+    }
+  }
+
+  lines.push("");
+  lines.push(body || "(no readable body found)");
+
+  return makeTextContent(lines.join("\n"));
 }
 
 export async function gmailReplyToEmail(args: {
