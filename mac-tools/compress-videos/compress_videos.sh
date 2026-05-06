@@ -74,9 +74,17 @@ done
 mkdir -p "$(dirname "$LOG_FILE")"
 
 # --- Logger ------------------------------------------------------------------
+# When invoked under launchd (via the watch script), stdout is already routed
+# to LOG_FILE. tee'ing to LOG_FILE on top of that double-writes every line.
+# Only tee when stdout is a terminal (interactive standalone run).
 log() {
-  local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
-  printf '%s %s\n' "$ts" "$*" | tee -a "$LOG_FILE"
+  local line
+  line="$(date '+%Y-%m-%d %H:%M:%S') $*"
+  if [[ -t 1 ]]; then
+    printf '%s\n' "$line" | tee -a "$LOG_FILE"
+  else
+    printf '%s\n' "$line"
+  fi
 }
 
 # --- Helpers -----------------------------------------------------------------

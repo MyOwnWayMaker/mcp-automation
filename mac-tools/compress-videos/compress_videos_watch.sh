@@ -24,8 +24,17 @@ export PATH="${SCRIPT_DIR}/bin:${PATH}"
 mkdir -p "$WATCH_DIR" "$DONE_DIR" "$(dirname "$LOG_FILE")"
 
 # --- Logger ------------------------------------------------------------------
+# When invoked by launchd, stdout is already redirected to LOG_FILE via the
+# plist's StandardOutPath. tee'ing to LOG_FILE on top of that double-writes
+# every line. Only tee when stdout is a terminal (interactive standalone run).
 log() {
-  printf '%s [watch] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"
+  local line
+  line="$(date '+%Y-%m-%d %H:%M:%S') [watch] $*"
+  if [[ -t 1 ]]; then
+    printf '%s\n' "$line" | tee -a "$LOG_FILE"
+  else
+    printf '%s\n' "$line"
+  fi
 }
 
 # --- Tool checks -------------------------------------------------------------
@@ -99,8 +108,15 @@ handle() {
     log "kept in place $result"
   else
     if [[ -f "$result" ]]; then
-      if mv -f "$result" "$DONE_DIR/"; then
-        log "moved -> $DONE_DIR/$(basename "$result")"
+      # Mirror the source's relative path under WATCH_DIR into DONE_DIR so
+      # the original folder structure is preserved (and idempotent re-scans
+      # don't re-pick-up files in done/).
+      local rel="${result#${WATCH_DIR%/}/}"
+      local target="$DONE_DIR/$rel"
+      local target_dir; target_dir="$(dirname "$target")"
+      mkdir -p "$target_dir"
+      if mv -f "$result" "$target"; then
+        log "moved -> $target"
       else
         log "ERROR move-to-done failed for $result"
       fi
@@ -109,13 +125,17 @@ handle() {
 }
 
 # --- Main: scan once, exit -------------------------------------------------
-log "trigger fired, scanning $WATCH_DIR"
+log "trigger fired, scanning $WATCH_DIR (recursive)"
 
-# Flat watch dir (not recursive). done/ is excluded inside handle().
+# Recursive walk. -prune skips the entire done/ subtree without descending
+# into it (cheaper than -not -path on large done/ folders).
 while IFS= read -r -d '' f; do
   handle "$f"
-done < <(find "$WATCH_DIR" -maxdepth 1 -type f \( \
-  -iname '*.mp4' -o -iname '*.mov' -o -iname '*.avi' -o \
-  -iname '*.mkv' -o -iname '*.m4v' -o -iname '*.webm' \) -print0)
+done < <(find "$WATCH_DIR" \
+  -path "$DONE_DIR" -prune -o \
+  -type f \( \
+    -iname '*.mp4' -o -iname '*.mov' -o -iname '*.avi' -o \
+    -iname '*.mkv' -o -iname '*.m4v' -o -iname '*.webm' \
+  \) -print0)
 
 log "scan complete"
