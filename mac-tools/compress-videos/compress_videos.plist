@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   LaunchAgent for the compress_videos watcher.
+
+  Uses launchd's built-in WatchPaths trigger - the agent is invoked each
+  time something changes inside ~/CompressMe/. The agent runs once, scans
+  the folder for stable video files, processes them, and exits.
+  ThrottleInterval prevents rapid-fire re-invocation (10s minimum gap).
+
   Path placeholders __HOME__ and __SCRIPT_DIR__ are replaced by setup_watch.sh
   before this file is copied to ~/Library/LaunchAgents/.
 -->
@@ -16,10 +22,12 @@
     <string>__SCRIPT_DIR__/compress_videos_watch.sh</string>
   </array>
 
-  <key>RunAtLoad</key>
-  <true/>
+  <key>WatchPaths</key>
+  <array>
+    <string>__HOME__/CompressMe</string>
+  </array>
 
-  <key>KeepAlive</key>
+  <key>RunAtLoad</key>
   <true/>
 
   <key>ThrottleInterval</key>
@@ -34,7 +42,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>__SCRIPT_DIR__/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HOME</key>
     <string>__HOME__</string>
   </dict>

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# compress_videos_watch.sh - fswatch daemon for ~/CompressMe/.
-# Drop a video in, watcher waits for the copy to finish, then runs
-# compress_videos.sh on it. On success, moves the result to ~/CompressMe/done/
-# (or leaves it in place if IN_PLACE=1).
+# compress_videos_watch.sh - launched by launchd each time WatchPaths fires
+# on ~/CompressMe/. Runs ONCE per invocation: scans the folder for stable
+# video files, processes each, exits. launchd re-fires on the next change.
 #
-# Run by hand (foreground) for testing, or via the LaunchAgent for daemon mode.
+# No fswatch dependency - relies entirely on launchd WatchPaths.
 
 set -uo pipefail
 
@@ -12,12 +11,15 @@ set -uo pipefail
 WATCH_DIR="${WATCH_DIR:-${HOME}/CompressMe}"
 DONE_DIR="${DONE_DIR:-${WATCH_DIR}/done}"
 THRESHOLD="${THRESHOLD:-80}"
-IN_PLACE="${IN_PLACE:-0}"           # 1 = leave compressed file where it landed
+IN_PLACE="${IN_PLACE:-0}"
 LOG_FILE="${LOG_FILE:-${HOME}/Library/Logs/compress_videos.log}"
 DEBOUNCE_SECONDS="${DEBOUNCE_SECONDS:-5}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPRESS="${COMPRESS:-${SCRIPT_DIR}/compress_videos.sh}"
+
+# Prefer the static binaries shipped with the toolkit.
+export PATH="${SCRIPT_DIR}/bin:${PATH}"
 
 mkdir -p "$WATCH_DIR" "$DONE_DIR" "$(dirname "$LOG_FILE")"
 
@@ -27,9 +29,9 @@ log() {
 }
 
 # --- Tool checks -------------------------------------------------------------
-for tool in fswatch ffmpeg ffprobe; do
+for tool in ffmpeg ffprobe; do
   if ! command -v "$tool" >/dev/null 2>&1; then
-    log "ERROR required tool not in PATH: $tool - run setup_watch.sh first"
+    log "ERROR required tool not in PATH: $tool"
     exit 1
   fi
 done
@@ -49,11 +51,9 @@ is_video() {
 }
 
 # wait_until_stable - poll the file size until it hasn't changed for
-# DEBOUNCE_SECONDS seconds. This handles "still copying" cases - Drive sync,
-# AirDrop, slow USB transfer, etc. Bails after ~10 minutes of churn.
+# DEBOUNCE_SECONDS. Handles "still copying" cases.
 wait_until_stable() {
-  local f="$1"
-  local prev=-1 cur deadline
+  local f="$1" prev=-1 cur deadline
   deadline=$(( $(date +%s) + 600 ))
   while [[ -f "$f" ]]; do
     cur="$(file_size "$f" 2>/dev/null || echo -1)"
@@ -67,14 +67,12 @@ wait_until_stable() {
     prev="$cur"
     sleep "$DEBOUNCE_SECONDS"
   done
-  return 1   # file vanished
+  return 1
 }
 
-# Process one video: run compress_videos.sh on it, move/keep result.
 handle() {
   local in="$1"
 
-  # Skip files in the done/ subfolder (post-compress destination).
   case "$in" in
     "$DONE_DIR"/*) return 0 ;;
     *.compressing.tmp.*|*.compressing-*.tmp.*) return 0 ;;
@@ -91,12 +89,10 @@ handle() {
     return 0
   fi
 
-  # Determine post-compress path. compress_videos.sh may have changed the
-  # extension if the source was avi/webm.
   local result="$in"
   if [[ ! -f "$in" ]]; then
     local stem="${in%.*}"
-    if [[ -f "${stem}.mp4" ]]; then result="${stem}.mp4"; fi
+    [[ -f "${stem}.mp4" ]] && result="${stem}.mp4"
   fi
 
   if (( IN_PLACE )); then
@@ -112,18 +108,14 @@ handle() {
   fi
 }
 
-# --- Main loop ---------------------------------------------------------------
-log "starting on $WATCH_DIR (threshold=${THRESHOLD}%, in_place=${IN_PLACE}, debounce=${DEBOUNCE_SECONDS}s)"
-log "log file: $LOG_FILE"
+# --- Main: scan once, exit -------------------------------------------------
+log "trigger fired, scanning $WATCH_DIR"
 
-# fswatch -0 emits NUL-terminated paths (safe for spaces/newlines).
-# --latency batches rapid-fire events. We then filter inside handle().
-fswatch -0 \
-  --latency="$DEBOUNCE_SECONDS" \
-  --event=Created \
-  --event=Updated \
-  --event=Renamed \
-  "$WATCH_DIR" \
-| while IFS= read -r -d '' path; do
-    handle "$path"
-  done
+# Flat watch dir (not recursive). done/ is excluded inside handle().
+while IFS= read -r -d '' f; do
+  handle "$f"
+done < <(find "$WATCH_DIR" -maxdepth 1 -type f \( \
+  -iname '*.mp4' -o -iname '*.mov' -o -iname '*.avi' -o \
+  -iname '*.mkv' -o -iname '*.m4v' -o -iname '*.webm' \) -print0)
+
+log "scan complete"

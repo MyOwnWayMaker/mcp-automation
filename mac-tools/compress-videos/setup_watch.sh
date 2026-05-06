@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# setup_watch.sh - one-time installer for the compress_videos watcher on macOS.
-# Installs ffmpeg + fswatch, generates the LaunchAgent plist with the right
-# paths, and loads it so the watcher starts now and at every login.
+# setup_watch.sh - registers the compress_videos LaunchAgent.
+# Portable mode: relies on the static ffmpeg/ffprobe in ./bin/ (placed there
+# by install.sh) and uses launchd's built-in WatchPaths trigger -- no brew,
+# no fswatch, no Xcode CLT required.
 
 set -euo pipefail
 
@@ -18,47 +19,36 @@ echo "    DONE_DIR   : $DONE_DIR"
 echo "    PLIST_DEST : $PLIST_DEST"
 echo
 
-# --- Sanity: this is only meant to run on macOS. Bail loudly elsewhere. ------
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "Error: setup_watch.sh is for macOS. Detected $(uname -s)." >&2
   exit 1
 fi
 
-# --- Homebrew ----------------------------------------------------------------
-if ! command -v brew >/dev/null 2>&1; then
-  echo "Homebrew is not installed. Install it first from https://brew.sh, then re-run." >&2
-  exit 1
-fi
-
-# --- ffmpeg + fswatch --------------------------------------------------------
-for pkg in ffmpeg fswatch; do
-  if brew list --formula "$pkg" >/dev/null 2>&1; then
-    echo "==> $pkg already installed."
-  else
-    echo "==> Installing $pkg via brew..."
-    brew install "$pkg"
+# Prefer the local ./bin/ (static binaries from install.sh) over the system,
+# in case the user has a partial system install of ffmpeg.
+export PATH="${SCRIPT_DIR}/bin:${PATH}"
+for tool in ffmpeg ffprobe; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "ERROR: $tool not found." >&2
+    echo "  install.sh should have placed it in $SCRIPT_DIR/bin/." >&2
+    echo "  Re-run: curl -fsSL ${BASE:-https://raw.githubusercontent.com/MyOwnWayMaker/mcp-automation/main/mac-tools/compress-videos}/install.sh | bash" >&2
+    exit 1
   fi
 done
 
-# --- Folders -----------------------------------------------------------------
 mkdir -p "$WATCH_DIR" "$DONE_DIR" "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs"
-
-# --- Make scripts executable ------------------------------------------------
 chmod +x "${SCRIPT_DIR}/compress_videos.sh" "${SCRIPT_DIR}/compress_videos_watch.sh"
 
-# --- Render plist with absolute paths ----------------------------------------
 echo "==> Rendering LaunchAgent plist -> $PLIST_DEST"
 sed \
   -e "s|__SCRIPT_DIR__|${SCRIPT_DIR}|g" \
   -e "s|__HOME__|${HOME}|g" \
   "${SCRIPT_DIR}/compress_videos.plist" > "$PLIST_DEST"
 
-# --- (Re)load the agent ------------------------------------------------------
-echo "==> Reloading LaunchAgent ($PLIST_LABEL)"
+echo "==> (Re)loading LaunchAgent ($PLIST_LABEL)"
 launchctl unload "$PLIST_DEST" 2>/dev/null || true
 launchctl load   "$PLIST_DEST"
 
-# --- Status ------------------------------------------------------------------
 echo
 echo "Installed."
 echo
