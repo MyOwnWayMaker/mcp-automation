@@ -16,6 +16,7 @@ FILES=(
   compress_videos_watch.sh
   compress_videos.plist
   setup_watch.sh
+  fix_hevc_tag.sh
   README.md
 )
 

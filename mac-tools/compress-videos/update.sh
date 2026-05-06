@@ -13,6 +13,7 @@ BASE="https://raw.githubusercontent.com/MyOwnWayMaker/mcp-automation/main/mac-to
 FILES=(
   compress_videos.sh
   compress_videos_watch.sh
+  fix_hevc_tag.sh
 )
 
 if [[ ! -d "$DEST" ]]; then

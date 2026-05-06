@@ -190,10 +190,15 @@ process_file() {
   # -y overwrite tmp; -nostdin so a watcher invocation doesn't hang on input;
   # -map 0 keeps every stream (audio + subs); -c:s copy keeps subs without
   # re-encoding (HEVC + mp4 supports mov_text; mkv handles all).
+  # -tag:v hvc1 tells the mp4 muxer to use Apple's preferred HEVC codec tag.
+  # Without it, libx265 writes 'hev1' which is valid HEVC but Apple's
+  # QuickTime / Finder / Photos refuse to play. With 'hvc1' the file plays
+  # natively. No effect on stream contents - just the container header.
   if ! ffmpeg -hide_banner -nostdin -loglevel "$ff_loglevel" -y \
          -i "$in" \
          -map 0 \
          -c:v libx265 -crf 26 -preset medium \
+         -tag:v hvc1 \
          -c:a copy \
          -c:s copy \
          "$tmp" 2>>"$LOG_FILE"; then
