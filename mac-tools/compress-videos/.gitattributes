@@ -1,0 +1,5 @@
+# Mac scripts MUST keep LF line endings — CRLF would break the shebang
+# (#!/usr/bin/env bash<CR>) when these files are run on macOS.
+*.sh    text eol=lf
+*.plist text eol=lf
+*.md    text eol=lf
