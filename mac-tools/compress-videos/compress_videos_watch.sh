@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# compress_videos_watch.sh — fswatch daemon for ~/CompressMe/.
+# compress_videos_watch.sh - fswatch daemon for ~/CompressMe/.
 # Drop a video in, watcher waits for the copy to finish, then runs
 # compress_videos.sh on it. On success, moves the result to ~/CompressMe/done/
 # (or leaves it in place if IN_PLACE=1).
@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-# ─── Config ──────────────────────────────────────────────────────────────────
+# --- Config ------------------------------------------------------------------
 WATCH_DIR="${WATCH_DIR:-${HOME}/CompressMe}"
 DONE_DIR="${DONE_DIR:-${WATCH_DIR}/done}"
 THRESHOLD="${THRESHOLD:-80}"
@@ -21,15 +21,15 @@ COMPRESS="${COMPRESS:-${SCRIPT_DIR}/compress_videos.sh}"
 
 mkdir -p "$WATCH_DIR" "$DONE_DIR" "$(dirname "$LOG_FILE")"
 
-# ─── Logger ──────────────────────────────────────────────────────────────────
+# --- Logger ------------------------------------------------------------------
 log() {
   printf '%s [watch] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"
 }
 
-# ─── Tool checks ─────────────────────────────────────────────────────────────
+# --- Tool checks -------------------------------------------------------------
 for tool in fswatch ffmpeg ffprobe; do
   if ! command -v "$tool" >/dev/null 2>&1; then
-    log "ERROR required tool not in PATH: $tool — run setup_watch.sh first"
+    log "ERROR required tool not in PATH: $tool - run setup_watch.sh first"
     exit 1
   fi
 done
@@ -39,7 +39,7 @@ file_size() {
   if stat -f%z "$1" >/dev/null 2>&1; then stat -f%z "$1"; else stat -c%s "$1"; fi
 }
 
-# is_video — case-insensitive extension match against the allow-list.
+# is_video - case-insensitive extension match against the allow-list.
 is_video() {
   local lower; lower="$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')"
   case "$lower" in
@@ -48,8 +48,8 @@ is_video() {
   esac
 }
 
-# wait_until_stable — poll the file size until it hasn't changed for
-# DEBOUNCE_SECONDS seconds. This handles "still copying" cases — Drive sync,
+# wait_until_stable - poll the file size until it hasn't changed for
+# DEBOUNCE_SECONDS seconds. This handles "still copying" cases - Drive sync,
 # AirDrop, slow USB transfer, etc. Bails after ~10 minutes of churn.
 wait_until_stable() {
   local f="$1"
@@ -104,7 +104,7 @@ handle() {
   else
     if [[ -f "$result" ]]; then
       if mv -f "$result" "$DONE_DIR/"; then
-        log "moved → $DONE_DIR/$(basename "$result")"
+        log "moved -> $DONE_DIR/$(basename "$result")"
       else
         log "ERROR move-to-done failed for $result"
       fi
@@ -112,7 +112,7 @@ handle() {
   fi
 }
 
-# ─── Main loop ───────────────────────────────────────────────────────────────
+# --- Main loop ---------------------------------------------------------------
 log "starting on $WATCH_DIR (threshold=${THRESHOLD}%, in_place=${IN_PLACE}, debounce=${DEBOUNCE_SECONDS}s)"
 log "log file: $LOG_FILE"
 

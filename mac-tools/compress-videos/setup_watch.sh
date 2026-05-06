@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup_watch.sh — one-time installer for the compress_videos watcher on macOS.
+# setup_watch.sh - one-time installer for the compress_videos watcher on macOS.
 # Installs ffmpeg + fswatch, generates the LaunchAgent plist with the right
 # paths, and loads it so the watcher starts now and at every login.
 
@@ -18,19 +18,19 @@ echo "    DONE_DIR   : $DONE_DIR"
 echo "    PLIST_DEST : $PLIST_DEST"
 echo
 
-# ─── Sanity: this is only meant to run on macOS. Bail loudly elsewhere. ──────
+# --- Sanity: this is only meant to run on macOS. Bail loudly elsewhere. ------
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "Error: setup_watch.sh is for macOS. Detected $(uname -s)." >&2
   exit 1
 fi
 
-# ─── Homebrew ────────────────────────────────────────────────────────────────
+# --- Homebrew ----------------------------------------------------------------
 if ! command -v brew >/dev/null 2>&1; then
   echo "Homebrew is not installed. Install it first from https://brew.sh, then re-run." >&2
   exit 1
 fi
 
-# ─── ffmpeg + fswatch ────────────────────────────────────────────────────────
+# --- ffmpeg + fswatch --------------------------------------------------------
 for pkg in ffmpeg fswatch; do
   if brew list --formula "$pkg" >/dev/null 2>&1; then
     echo "==> $pkg already installed."
@@ -40,27 +40,27 @@ for pkg in ffmpeg fswatch; do
   fi
 done
 
-# ─── Folders ─────────────────────────────────────────────────────────────────
+# --- Folders -----------------------------------------------------------------
 mkdir -p "$WATCH_DIR" "$DONE_DIR" "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs"
 
-# ─── Make scripts executable ────────────────────────────────────────────────
+# --- Make scripts executable ------------------------------------------------
 chmod +x "${SCRIPT_DIR}/compress_videos.sh" "${SCRIPT_DIR}/compress_videos_watch.sh"
 
-# ─── Render plist with absolute paths ────────────────────────────────────────
-echo "==> Rendering LaunchAgent plist → $PLIST_DEST"
+# --- Render plist with absolute paths ----------------------------------------
+echo "==> Rendering LaunchAgent plist -> $PLIST_DEST"
 sed \
   -e "s|__SCRIPT_DIR__|${SCRIPT_DIR}|g" \
   -e "s|__HOME__|${HOME}|g" \
   "${SCRIPT_DIR}/compress_videos.plist" > "$PLIST_DEST"
 
-# ─── (Re)load the agent ──────────────────────────────────────────────────────
+# --- (Re)load the agent ------------------------------------------------------
 echo "==> Reloading LaunchAgent ($PLIST_LABEL)"
 launchctl unload "$PLIST_DEST" 2>/dev/null || true
 launchctl load   "$PLIST_DEST"
 
-# ─── Status ──────────────────────────────────────────────────────────────────
+# --- Status ------------------------------------------------------------------
 echo
-echo "✅ Installed."
+echo "Installed."
 echo
 echo "Drop a video into:  $WATCH_DIR"
 echo "Compressed result:  $DONE_DIR (or in place if you set IN_PLACE=1)"
@@ -69,4 +69,4 @@ echo
 echo "Disable: launchctl unload \"$PLIST_DEST\""
 echo "Re-enable: launchctl load \"$PLIST_DEST\""
 echo
-launchctl list | grep -F "$PLIST_LABEL" || echo "(LaunchAgent not visible yet — give it a few seconds.)"
+launchctl list | grep -F "$PLIST_LABEL" || echo "(LaunchAgent not visible yet - give it a few seconds.)"

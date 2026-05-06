@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# compress_videos.sh — recursively re-encode video files to H.265 (HEVC) to
+# compress_videos.sh - recursively re-encode video files to H.265 (HEVC) to
 # reclaim disk space. Skips files already in HEVC. Only replaces the original
 # when the new file is meaningfully smaller (default: < 80% of original).
 #
@@ -12,7 +12,7 @@
 
 set -uo pipefail
 
-# ─── Defaults ────────────────────────────────────────────────────────────────
+# --- Defaults ----------------------------------------------------------------
 THRESHOLD=80                # only replace when new size < THRESHOLD% of original
 DRY_RUN=0
 VERBOSE=0
@@ -23,7 +23,7 @@ usage() {
 Usage: $0 [--dry-run] [--threshold N] [--verbose] PATH
 
   PATH        Directory (recursed) OR a single video file.
-  --dry-run   Walk the tree and report what would be done — no encoding.
+  --dry-run   Walk the tree and report what would be done - no encoding.
   --threshold N  Replacement threshold as a percent (default 80). New file
                  is kept only when its size is < N% of the original.
   --verbose   Show ffmpeg progress in addition to errors.
@@ -34,7 +34,7 @@ Environment:
 EOF
 }
 
-# ─── Flag parsing ────────────────────────────────────────────────────────────
+# --- Flag parsing ------------------------------------------------------------
 TARGET=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,11 +58,11 @@ if [[ ! -e "$TARGET" ]]; then
   exit 1
 fi
 if ! [[ "$THRESHOLD" =~ ^[0-9]+$ ]] || (( THRESHOLD < 1 || THRESHOLD > 100 )); then
-  echo "--threshold must be an integer 1–100 (got '$THRESHOLD')" >&2
+  echo "--threshold must be an integer 1-100 (got '$THRESHOLD')" >&2
   exit 2
 fi
 
-# ─── Tool checks ─────────────────────────────────────────────────────────────
+# --- Tool checks -------------------------------------------------------------
 for tool in ffmpeg ffprobe; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Required tool not found in PATH: $tool" >&2
@@ -73,15 +73,15 @@ done
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# ─── Logger ──────────────────────────────────────────────────────────────────
+# --- Logger ------------------------------------------------------------------
 log() {
   local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
   printf '%s %s\n' "$ts" "$*" | tee -a "$LOG_FILE"
 }
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# --- Helpers -----------------------------------------------------------------
 
-# file_size — emit byte count (portable across macOS BSD stat + GNU stat).
+# file_size - emit byte count (portable across macOS BSD stat + GNU stat).
 file_size() {
   if stat -f%z "$1" >/dev/null 2>&1; then
     stat -f%z "$1"      # macOS / BSD
@@ -90,12 +90,12 @@ file_size() {
   fi
 }
 
-# fmt_gb — bytes → "1.23 GB" string. Uses awk for floating-point.
+# fmt_gb - bytes to "1.23 GB" string. Uses awk for floating-point.
 fmt_gb() {
   awk -v b="$1" 'BEGIN { printf "%.2f", b/1024/1024/1024 }'
 }
 
-# is_hevc — exit 0 when first video stream is H.265/HEVC.
+# is_hevc - exit 0 when first video stream is H.265/HEVC.
 is_hevc() {
   local codec
   codec=$(ffprobe -v error -select_streams v:0 \
@@ -120,7 +120,7 @@ out_ext_for() {
   esac
 }
 
-# ─── Counters ────────────────────────────────────────────────────────────────
+# --- Counters ----------------------------------------------------------------
 TOTAL_FILES=0
 SKIPPED_HEVC=0
 SKIPPED_INSUFF=0
@@ -130,7 +130,7 @@ NONVIDEO=0
 ORIG_BYTES=0
 NEW_BYTES=0
 
-# ─── Per-file processing ─────────────────────────────────────────────────────
+# --- Per-file processing -----------------------------------------------------
 process_file() {
   local in="$1"
   local ext="${in##*.}"
@@ -140,7 +140,7 @@ process_file() {
 
   TOTAL_FILES=$((TOTAL_FILES + 1))
 
-  # Codec check first — cheap, lets us skip without size arithmetic noise.
+  # Codec check first - cheap, lets us skip without size arithmetic noise.
   if is_hevc "$in"; then
     local sz; sz="$(file_size "$in")"
     ORIG_BYTES=$((ORIG_BYTES + sz))
@@ -166,7 +166,7 @@ process_file() {
 
   if (( DRY_RUN )); then
     # Heuristic estimate: ~50% reduction is typical for SDR consumer video
-    # going from H.264 medium → H.265 medium @ CRF 26.
+    # going from H.264 medium to H.265 medium @ CRF 26.
     local est_new=$((orig_sz / 2))
     ORIG_BYTES=$((ORIG_BYTES + orig_sz))
     NEW_BYTES=$((NEW_BYTES + est_new))
@@ -207,12 +207,12 @@ process_file() {
   local pct=$(( new_sz * 100 / orig_sz ))
 
   if (( pct < THRESHOLD )); then
-    # Replace. If the output extension changed (avi/webm → mp4), remove the
+    # Replace. If the output extension changed (avi/webm to mp4), remove the
     # original after moving the new file into its target name.
     if ! mv -f "$tmp" "$out_path"; then
       rm -f "$tmp"
       ERRORS=$((ERRORS + 1))
-      log "ERROR       could not move tmp into place: $tmp → $out_path"
+      log "ERROR       could not move tmp into place: $tmp -> $out_path"
       return 0
     fi
     if [[ "$out_path" != "$in" ]]; then
@@ -231,7 +231,7 @@ process_file() {
   fi
 }
 
-# ─── Walk + dispatch ─────────────────────────────────────────────────────────
+# --- Walk + dispatch ---------------------------------------------------------
 
 # Canonicalize for the start banner. realpath is GNU-only on Linux but
 # present on macOS via coreutils-style binary; fall back to absolute-via-cd.
@@ -265,7 +265,7 @@ else
   exit 1
 fi
 
-# ─── Summary ─────────────────────────────────────────────────────────────────
+# --- Summary -----------------------------------------------------------------
 SAVED=$((ORIG_BYTES - NEW_BYTES))
 log "===== compress_videos.sh DONE ====="
 log "  total=$TOTAL_FILES  replaced=$REPLACED  skipped_hevc=$SKIPPED_HEVC  skipped_ratio=$SKIPPED_INSUFF  errors=$ERRORS"
