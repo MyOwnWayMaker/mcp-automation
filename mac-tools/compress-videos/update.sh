@@ -14,6 +14,7 @@ FILES=(
   compress_videos.sh
   compress_videos_watch.sh
   fix_hevc_tag.sh
+  dl.sh
 )
 
 if [[ ! -d "$DEST" ]]; then
