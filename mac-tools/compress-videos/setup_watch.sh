@@ -40,7 +40,8 @@ mkdir -p "$WATCH_DIR" "$DONE_DIR" "${HOME}/Library/LaunchAgents" "${HOME}/Librar
 chmod +x "${SCRIPT_DIR}/compress_videos.sh" \
          "${SCRIPT_DIR}/compress_videos_watch.sh" \
          "${SCRIPT_DIR}/fix_hevc_tag.sh" \
-         "${SCRIPT_DIR}/dl.sh" 2>/dev/null || true
+         "${SCRIPT_DIR}/dl.sh" \
+         "${SCRIPT_DIR}/remux.sh" 2>/dev/null || true
 
 echo "==> Rendering LaunchAgent plist -> $PLIST_DEST"
 sed \

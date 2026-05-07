@@ -18,6 +18,7 @@ FILES=(
   setup_watch.sh
   fix_hevc_tag.sh
   dl.sh
+  remux.sh
   README.md
 )
 
