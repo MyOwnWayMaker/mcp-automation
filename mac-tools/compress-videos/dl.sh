@@ -59,6 +59,15 @@ echo "Dest:    $DEST"
 echo
 
 cmd=("$YT" -P "$DEST" --ffmpeg-location "$FFMPEG_DIR")
+# For HLS (.m3u8) streams, route through ffmpeg directly. yt-dlp's native
+# HLS downloader concatenates raw .ts segments into an mp4 wrapper, then
+# runs a "FixupM3u8" pass to re-mux MPEG-TS framing into mp4 framing.
+# That fixup step fails on some streams (esp. when audio uses ADTS framing
+# that needs aac_adtstoasc). Letting ffmpeg do the whole download+mux in
+# one pass sidesteps that.
+if [[ "$URL" == *.m3u8* ]]; then
+  cmd+=(--downloader "m3u8:ffmpeg")
+fi
 if [[ -n "$REFERER" ]]; then
   cmd+=(--referer "$REFERER")
 fi
