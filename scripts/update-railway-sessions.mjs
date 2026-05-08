@@ -27,30 +27,47 @@ const files = {
   GOOGLE_NOTARY_TOKEN_JSON:  path.join(root, "token_notary.json"),
 };
 
-// ── Read Railway CLI config to get auth token + project IDs ─────────────────
+// ── Resolve auth token + project IDs ────────────────────────────────────────
+// Two auth sources, in priority order:
+//   1. RAILWAY_API_TOKEN env var (Personal Access Token from
+//      https://railway.com/account/tokens) — preferred, doesn't expire,
+//      authorized for GraphQL API calls.
+//   2. ~/.railway/config.json accessToken (the OAuth session token Railway
+//      CLI caches) — works for the CLI but NOT for direct GraphQL calls;
+//      kept here so we can read project IDs from the config even when the
+//      env var is set, and as a fallback that surfaces a clear error message
+//      if the user hasn't generated a PAT yet.
 function readRailwayConfig() {
   const configPath = path.join(os.homedir(), ".railway", "config.json");
-  if (!fs.existsSync(configPath)) {
-    console.error(`❌  Railway CLI config not found at ${configPath}`);
-    console.error("    Run: railway login");
-    process.exit(1);
+
+  let cfg = null;
+  if (fs.existsSync(configPath)) {
+    try {
+      cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    } catch (e) {
+      console.error(`⚠️  Could not parse ${configPath}: ${e.message}`);
+    }
   }
 
-  let cfg;
-  try {
-    cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-  } catch (e) {
-    console.error(`❌  Could not parse ${configPath}: ${e.message}`);
-    process.exit(1);
-  }
+  // Prefer PAT from env. The CLI's accessToken (OAuth session) gets
+  // "Not Authorized" from variableUpsert even though the CLI itself works
+  // with it — the CLI hits a different endpoint behind the scenes.
+  const envToken = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+  const cfgToken = cfg?.user?.accessToken || cfg?.user?.token;
+  const token = envToken || cfgToken;
+  const tokenSource = envToken ? "RAILWAY_API_TOKEN env var (PAT)" : "Railway CLI config (OAuth)";
 
-  const token = cfg?.user?.accessToken || cfg?.user?.token;
   if (!token) {
-    console.error(`❌  No auth token in ${configPath}. Run: railway login`);
+    console.error("❌  No Railway auth token found.");
+    console.error("    Two options:");
+    console.error("    (1) Generate a Personal Access Token at https://railway.com/account/tokens");
+    console.error("        then set: $env:RAILWAY_API_TOKEN=\"<token>\"  (PowerShell)");
+    console.error("    (2) Run `railway login` so the CLI caches credentials");
     process.exit(1);
   }
 
-  // Find the project linked to THIS repo (cwd).
+  // Find the project linked to THIS repo from the CLI config (we still need
+  // projectId/environmentId/serviceId regardless of token source).
   const projects = cfg?.projects || {};
   const repoProject = projects[root]
     ?? projects[root.replace(/\\/g, "/")]
@@ -65,6 +82,7 @@ function readRailwayConfig() {
 
   return {
     token,
+    tokenSource,
     projectId: repoProject.project,
     environmentId: repoProject.environment,
     serviceId: repoProject.service,
@@ -116,6 +134,7 @@ const cfg = readRailwayConfig();
 console.log(`Project:     ${cfg.projectName} (${cfg.projectId})`);
 console.log(`Environment: ${cfg.environmentId}`);
 console.log(`Service:     ${cfg.serviceId}`);
+console.log(`Auth:        ${cfg.tokenSource}`);
 console.log("");
 
 let okCount = 0;
@@ -142,7 +161,12 @@ for (const [key, filePath] of Object.entries(files)) {
 
 console.log(`Done. ${okCount} updated, ${failCount} failed.`);
 if (failCount > 0) {
-  console.log("\nIf the auth token is expired, refresh it: railway login");
+  console.log("\nIf you saw 'Not Authorized' errors, the Railway CLI's cached OAuth");
+  console.log("token doesn't have GraphQL API scope. Generate a Personal Access Token:");
+  console.log("  1. https://railway.com/account/tokens");
+  console.log("  2. Create token, copy it");
+  console.log("  3. PowerShell: [Environment]::SetEnvironmentVariable(\"RAILWAY_API_TOKEN\", \"<token>\", \"User\")");
+  console.log("  4. Close + reopen terminal, re-run this script");
   process.exit(1);
 }
 console.log("Railway will redeploy automatically (~60s).");
