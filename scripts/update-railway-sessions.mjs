@@ -6,15 +6,20 @@
  * auth-xactanalysis.mjs, etc.) write session files locally but the deployed
  * MCP server on Railway reads from env vars. Without pushing the local file
  * up to Railway, the deployed server keeps using the stale session.
+ *
+ * Implementation: calls Railway's GraphQL API directly using credentials
+ * from ~/.railway/config.json (or %USERPROFILE%\.railway\config.json on
+ * Windows). Bypasses the CLI entirely — avoids Windows spawn issues with
+ * .cmd files, command-line length limits on large session JSONs, and CLI
+ * version syntax differences (v3 vs v4).
  */
-import { spawnSync, execSync } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
-const isWin = process.platform === "win32";
 
 const files = {
   FILETRAC_SESSION_JSON:     path.join(root, "filetrac_session.json"),
@@ -22,47 +27,96 @@ const files = {
   GOOGLE_NOTARY_TOKEN_JSON:  path.join(root, "token_notary.json"),
 };
 
-// Resolve the absolute path to `railway` once. spawnSync on Windows doesn't
-// auto-resolve .exe extensions from PATH the way the cmd shell does, which
-// silently failed before with "exit code null" on every call.
-//
-// On Windows, npm-installed CLIs typically have THREE files alongside each
-// other: a no-extension shell script (works in Unix shells), a .cmd batch
-// file (the Windows-executable shim), and a .ps1 (PowerShell). `where`
-// often returns the no-extension file first, which Windows can't spawn.
-// Prefer .cmd on Windows when the resolved file lacks an extension.
-function resolveRailway() {
-  const cmd = isWin ? "where railway" : "command -v railway";
-  try {
-    const out = execSync(cmd, { encoding: "utf-8" });
-    const candidates = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    if (candidates.length === 0) throw new Error("`where railway` returned no path");
-
-    if (isWin) {
-      // Prefer .cmd (Windows-runnable). If `where` only returned the
-      // extension-less shim, append .cmd and verify it exists.
-      const cmdPath = candidates.find(p => /\.cmd$/i.test(p))
-                   ?? candidates.find(p => /\.exe$/i.test(p));
-      if (cmdPath) return cmdPath;
-
-      // Fall back: try appending .cmd to the first candidate
-      const guess = candidates[0] + ".cmd";
-      if (fs.existsSync(guess)) return guess;
-      throw new Error(`No .cmd or .exe variant found alongside ${candidates[0]}`);
-    }
-
-    return candidates[0];
-  } catch (e) {
-    console.error("❌  Could not locate the `railway` CLI on PATH.");
-    console.error("    Install: https://docs.railway.com/guides/cli");
-    console.error("    Or check PATH includes the directory where railway.exe lives.");
-    console.error("    Underlying error:", e.message);
+// ── Read Railway CLI config to get auth token + project IDs ─────────────────
+function readRailwayConfig() {
+  const configPath = path.join(os.homedir(), ".railway", "config.json");
+  if (!fs.existsSync(configPath)) {
+    console.error(`❌  Railway CLI config not found at ${configPath}`);
+    console.error("    Run: railway login");
     process.exit(1);
   }
+
+  let cfg;
+  try {
+    cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  } catch (e) {
+    console.error(`❌  Could not parse ${configPath}: ${e.message}`);
+    process.exit(1);
+  }
+
+  const token = cfg?.user?.accessToken || cfg?.user?.token;
+  if (!token) {
+    console.error(`❌  No auth token in ${configPath}. Run: railway login`);
+    process.exit(1);
+  }
+
+  // Find the project linked to THIS repo (cwd).
+  const projects = cfg?.projects || {};
+  const repoProject = projects[root]
+    ?? projects[root.replace(/\\/g, "/")]
+    ?? Object.values(projects).find(p => p.projectPath === root || p.projectPath === root.replace(/\\/g, "/"));
+
+  if (!repoProject) {
+    console.error(`❌  No Railway project linked to ${root}.`);
+    console.error("    Run: railway link");
+    console.error(`    Configured projects in config.json: ${Object.keys(projects).join(", ") || "(none)"}`);
+    process.exit(1);
+  }
+
+  return {
+    token,
+    projectId: repoProject.project,
+    environmentId: repoProject.environment,
+    serviceId: repoProject.service,
+    projectName: repoProject.name,
+  };
 }
 
-const railwayPath = resolveRailway();
-console.log(`Using railway at: ${railwayPath}\n`);
+// ── GraphQL: upsert one variable on Railway ─────────────────────────────────
+async function setVariable({ token, projectId, environmentId, serviceId }, name, value) {
+  const query = `
+    mutation VariableUpsert($input: VariableUpsertInput!) {
+      variableUpsert(input: $input)
+    }
+  `;
+  const variables = {
+    input: {
+      projectId,
+      environmentId,
+      serviceId,
+      name,
+      value,
+    },
+  };
+
+  const res = await fetch("https://backboard.railway.com/graphql/v2", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = null; }
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${text.substring(0, 500)}`);
+  }
+  if (data?.errors?.length) {
+    throw new Error(`GraphQL error: ${JSON.stringify(data.errors)}`);
+  }
+  return data;
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+const cfg = readRailwayConfig();
+console.log(`Project:     ${cfg.projectName} (${cfg.projectId})`);
+console.log(`Environment: ${cfg.environmentId}`);
+console.log(`Service:     ${cfg.serviceId}`);
+console.log("");
 
 let okCount = 0;
 let failCount = 0;
@@ -76,53 +130,19 @@ for (const [key, filePath] of Object.entries(files)) {
   const value = fs.readFileSync(filePath, "utf8").trim();
   console.log(`Updating ${key} (${value.length} chars)...`);
 
-  // Railway CLI v4 syntax: `railway variables --set "KEY=VALUE"`. Old v3
-  // used `railway variables set KEY=VALUE`. Try the new syntax first; if
-  // it fails with "unknown flag" (still on v3), fall back.
-  let result = spawnSync(
-    railwayPath,
-    ["variables", "--set", `${key}=${value}`],
-    { cwd: root, stdio: ["inherit", "pipe", "pipe"], maxBuffer: 20 * 1024 * 1024 }
-  );
-
-  // If --set isn't recognized (older CLI), retry with subcommand syntax.
-  if (result.status !== 0) {
-    const stderr = result.stderr ? result.stderr.toString() : "";
-    if (/unknown flag|unexpected argument|unrecognized/i.test(stderr)) {
-      console.log(`   (--set syntax not recognized, falling back to "variables set")`);
-      result = spawnSync(
-        railwayPath,
-        ["variables", "set", `${key}=${value}`],
-        { cwd: root, stdio: ["inherit", "pipe", "pipe"], maxBuffer: 20 * 1024 * 1024 }
-      );
-    }
-  }
-
-  if (result.error) {
-    console.error(`❌  ${key} — spawn error: ${result.error.message}\n`);
-    failCount++;
-    continue;
-  }
-  if (result.status === 0) {
+  try {
+    await setVariable(cfg, key, value);
     console.log(`✅  ${key} updated\n`);
     okCount++;
-  } else {
-    const stdout = result.stdout ? result.stdout.toString().trim() : "";
-    const stderr = result.stderr ? result.stderr.toString().trim() : "";
-    console.error(`❌  ${key} failed (exit ${result.status})`);
-    if (stdout) console.error(`    stdout: ${stdout}`);
-    if (stderr) console.error(`    stderr: ${stderr}`);
-    console.error("");
+  } catch (e) {
+    console.error(`❌  ${key} failed: ${e.message}\n`);
     failCount++;
   }
 }
 
-console.log(`\nDone. ${okCount} updated, ${failCount} failed.`);
+console.log(`Done. ${okCount} updated, ${failCount} failed.`);
 if (failCount > 0) {
-  console.log("Common causes:");
-  console.log("  - `railway login` not done in this terminal (run: railway login)");
-  console.log("  - `railway link` not pointing at the right project (run: railway link)");
-  console.log("  - On Windows, value too large for cmd line (rare for sessions <8KB)");
+  console.log("\nIf the auth token is expired, refresh it: railway login");
   process.exit(1);
 }
 console.log("Railway will redeploy automatically (~60s).");
