@@ -580,6 +580,45 @@ export async function notionRestorePage(args: {
   return ok(`Page restored from trash.\nID:  ${args.page_id}\nURL: ${url}`);
 }
 
+// Reorder properties in a database's default view. Notion API accepts a
+// `properties` object on PATCH /v1/databases/:id; the iteration order of
+// that object determines the canonical schema order. Unspecified properties
+// are appended after the listed ones in their existing order.
+export async function notionReorderProperties(args: {
+  database_id: string;
+  property_order: string[];
+}): Promise<CallToolResult> {
+  // Fetch current schema so we can reuse each property's definition unchanged.
+  const current = await notionFetch(`/databases/${args.database_id}`, "GET");
+  const existingProps: Record<string, any> = current.properties ?? {};
+  const existingNames = Object.keys(existingProps);
+
+  // Validate every requested name actually exists. Misspelled names are a
+  // common footgun and silently dropping them would produce a "fixed" schema
+  // that's still in the wrong order — surface the error.
+  const missing = args.property_order.filter((n) => !(n in existingProps));
+  if (missing.length > 0) {
+    return ok(`ERROR: these property names don't exist on the database: ${missing.join(", ")}\nExisting names: ${existingNames.join(", ")}`);
+  }
+
+  // Build the new properties object: requested order first, then any
+  // remaining properties in their original order so nothing gets dropped.
+  const remaining = existingNames.filter((n) => !args.property_order.includes(n));
+  const finalOrder = [...args.property_order, ...remaining];
+  const newProps: Record<string, any> = {};
+  for (const name of finalOrder) {
+    // Re-send the property minus its read-only `id` field. PATCHing with the
+    // existing config is effectively a no-op semantically but bumps the
+    // property's position in the schema's iteration order.
+    const { id: _omit, ...def } = existingProps[name];
+    newProps[name] = def;
+  }
+
+  const res = await notionFetch(`/databases/${args.database_id}`, "PATCH", { properties: newProps });
+  const finalNames = Object.keys(res.properties ?? {});
+  return ok(`Reorder requested.\nRequested order: ${args.property_order.join(", ")}\nFinal schema order returned by Notion:\n  ${finalNames.join("\n  ")}\n\nNote: Notion's default-view column order generally follows schema order but may need a refresh in the UI to reflect.`);
+}
+
 export async function notionInsertAfterBlock(args: {
   target_block_id: string;
   content: string;

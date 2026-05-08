@@ -31,7 +31,7 @@ if (fs.existsSync(ENV_PATH)) dotenv.config({ path: ENV_PATH });
 const STATE_PATH = path.resolve(REPO_ROOT, "claim_monitor_state.json");
 const LOG_PATH = path.resolve(REPO_ROOT, "claim_monitor.log");
 const POLL_INTERVAL_MS = 60_000; // 60 seconds
-const NTFY_TOPIC = process.env.CLAIM_MONITOR_NTFY_TOPIC || "Dino-claims-alerts-fpx";
+const NTFY_TOPIC = process.env.CLAIM_MONITOR_NTFY_TOPIC || "dino-claims-alerts-fpx";
 const NTFY_SERVER = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
 // iMessage fallback (only used if CLAIM_MONITOR_IMESSAGE_PHONE is set AND we're on macOS)
 const IMESSAGE_PHONE = process.env.CLAIM_MONITOR_IMESSAGE_PHONE || "";
@@ -55,12 +55,31 @@ const HIGH_SUBJECT_RE = /^(re:\s*)?new (claim )?assignment/i;
 const HIGH_XACTWARE_RE = /^new .+ claim/i;
 const SUPPLEMENT_RE = /supplement(al)?\s+(request|payment)/i;
 
+// Carriers/firms asking to correct/revise/clarify a SUBMITTED report.
+// Distinct from new assignments — same approval-driven response flow but
+// fires under [CORRECTION] subject prefix on dino-claims-alerts-fpx so the
+// phone notification clearly distinguishes "new work" from "rework on
+// previously-submitted work".
+const CORRECTION_KEYWORD_RE = /\b(correction|revis(e|ion|ed)|clarif(y|ication)|rework|kindly correct|please correct|please update)\b/i;
+// "claim 12345", "file #ABC-12", "claim # 06V3CT8" — generic enough to catch
+// most carrier reply formats. Requires 4+ chars after the keyword to avoid
+// matching "claim 1" / "file 2" filler text.
+const CLAIM_REF_RE = /\b(claim|file)\s*[#:]?\s*[\w-]{4,}\b/i;
+
 const MEDIUM_XACTWARE_RE = /(Status Has Been Updated|Note Has Been Added|Reviewed with Exceptions)/i;
 const MEDIUM_SLG_RE = /^re:\s*an assignment note/i;
 
 function classify(fromHeader, subject) {
   const fromLower = (fromHeader || "").toLowerCase();
   const senderEmail = (fromLower.match(/<([^>]+)>/) || [null, fromLower])[1];
+
+  // ── CORRECTION on a submitted report ─────────────────────────
+  // Check before HIGH so we route correctly: a "Re: claim 12-1226 please
+  // revise the estimate" reply from an examiner would otherwise hit HIGH
+  // via the firm-domain path.
+  if (CORRECTION_KEYWORD_RE.test(subject) && CLAIM_REF_RE.test(subject)) {
+    return "CORRECTION";
+  }
 
   // ── HIGH priority ────────────────────────────────────────────
   if (HIGH_PRIORITY_SENDERS.has(senderEmail)) return "HIGH";
@@ -260,13 +279,17 @@ async function pollOnce(gmail, state) {
     // Match — build the alert
     const body = extractBody(full.data.payload);
     const snippet = snippetFromBody(body, 220);
-    const isHigh = tier === "HIGH";
-    const title = isHigh
-      ? `🚨 NEW ASSIGNMENT — ${subject}`
-      : `📋 Status update — ${subject}`;
+    const isCorrection = tier === "CORRECTION";
+    const isHigh = tier === "HIGH" || isCorrection;
+    const title = isCorrection
+      ? `[CORRECTION] ${subject}`
+      : isHigh
+        ? `🚨 NEW ASSIGNMENT — ${subject}`
+        : `📋 Status update — ${subject}`;
     const message = `From: ${fromHeader}\n\n${snippet}\n\n[id: ${m.id}]`;
-    const priority = isHigh ? 5 : 3; // ntfy: 5=urgent, 3=default
-    const tags = isHigh ? ["rotating_light"] : ["clipboard"];
+    // CORRECTION + HIGH both fire at urgent priority (5). MEDIUM at 3.
+    const priority = isHigh ? 5 : 3;
+    const tags = isCorrection ? ["pencil2"] : isHigh ? ["rotating_light"] : ["clipboard"];
 
     log(`[${tier}] ${fromHeader} — ${subject}`);
     await sendAlert({ title, message, priority, tags });
