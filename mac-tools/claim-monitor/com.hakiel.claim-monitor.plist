@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent for the Phase 1 claim monitor.
+
+  Polls Gmail every 60s for new claim assignments. Fires [NEW] / [SUPP] /
+  [CORRECTION] etc. ntfy alerts on dino-claims-alerts-fpx, which Cloud
+  Dispatch keys off of to start D1-D4.
+
+  Why this LaunchAgent exists: previously the monitor was started manually
+  via `node scripts/claim-monitor.mjs &` in a terminal. When the Mac was
+  rebooted, the terminal closed, or the process got OOM-killed (e.g. during
+  heavy ffmpeg load), the monitor silently died and assignments slipped
+  through. KeepAlive=true + RunAtLoad=true guarantees auto-restart.
+
+  Path placeholders __HOME__, __REPO_ROOT__, __NODE__ are replaced by
+  setup-launchagent.sh before this file is copied into ~/Library/LaunchAgents/.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hakiel.claim-monitor</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__REPO_ROOT__/scripts/claim-monitor.mjs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/claim-monitor.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/claim-monitor.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

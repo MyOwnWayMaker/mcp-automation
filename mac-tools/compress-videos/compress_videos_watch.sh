@@ -91,9 +91,18 @@ handle() {
 
   log "candidate $in"
   wait_until_stable "$in" || { log "vanished mid-copy $in"; return 0; }
-  log "stable, processing $in"
 
-  if ! bash "$COMPRESS" --threshold "$THRESHOLD" "$in" 2>>"$LOG_FILE"; then
+  # _hq/ special folder convention: any file under a path component named
+  # "_hq" gets encoded at higher quality (CRF 22 vs default 26). Output is
+  # ~30-50% larger but visibly better — for archival sources or content
+  # where compression artifacts would matter. Match anywhere in the path.
+  local crf="${DEFAULT_CRF:-26}"
+  case "$in" in
+    */_hq/*) crf="${HQ_CRF:-22}"; log "stable, processing (HQ crf=$crf) $in" ;;
+    *)       log "stable, processing $in" ;;
+  esac
+
+  if ! bash "$COMPRESS" --threshold "$THRESHOLD" --crf "$crf" "$in" 2>>"$LOG_FILE"; then
     log "ERROR compress_videos.sh exited non-zero on $in"
     return 0
   fi

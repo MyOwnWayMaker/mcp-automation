@@ -14,6 +14,7 @@ set -uo pipefail
 
 # --- Defaults ----------------------------------------------------------------
 THRESHOLD=80                # only replace when new size < THRESHOLD% of original
+CRF=26                      # libx265 quality knob; lower = better quality, larger files
 DRY_RUN=0
 VERBOSE=0
 LOG_FILE="${LOG_FILE:-${HOME}/Library/Logs/compress_videos.log}"
@@ -41,6 +42,8 @@ while [[ $# -gt 0 ]]; do
     --dry-run)        DRY_RUN=1; shift ;;
     --threshold)      THRESHOLD="$2"; shift 2 ;;
     --threshold=*)    THRESHOLD="${1#--threshold=}"; shift ;;
+    --crf)            CRF="$2"; shift 2 ;;
+    --crf=*)          CRF="${1#--crf=}"; shift ;;
     --verbose|-v)     VERBOSE=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     --)               shift; TARGET="${1:-}"; shift || true; break ;;
@@ -197,7 +200,7 @@ process_file() {
   if ! ffmpeg -hide_banner -nostdin -loglevel "$ff_loglevel" -y \
          -i "$in" \
          -map 0 \
-         -c:v libx265 -crf 26 -preset medium \
+         -c:v libx265 -crf "$CRF" -preset medium \
          -tag:v hvc1 \
          -c:a copy \
          -c:s copy \

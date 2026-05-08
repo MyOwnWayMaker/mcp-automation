@@ -1238,6 +1238,23 @@ export async function xactSetPlannedInspectionDate(args: {
   const { browser, context, page } = await getPage();
 
   try {
+    // Idempotency guard: read the current value first. If XA already shows
+    // the target date, skip the submit. Without this, retries (Cloud
+    // Dispatch network blips, multiple pipeline invocations) each append a
+    // fresh timeline entry, leaving 5x duplicate "Planned Inspection Date"
+    // rows in the XA status history.
+    const existing = await readPlannedDate(page, args.mfn).catch(() => "");
+    if (existing && dateMatchesAny(existing, dateIso)) {
+      return ok(JSON.stringify({
+        ok: true,
+        submitted: false,
+        skipped: "already set",
+        value_read: existing,
+        target_iso: dateIso,
+        message: "Planned Inspection Date already matches target — no submit (idempotent skip).",
+      }, null, 2));
+    }
+
     await navigateToTab(page, args.mfn, "d_assignment");
     const found = await page.evaluate(() => {
       const labelRe = /^\s*planned\s+inspection\s+date\s*:?\s*$/i;
