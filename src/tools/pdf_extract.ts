@@ -1,4 +1,7 @@
 import fs from "fs";
+import os from "os";
+import path from "path";
+import { execFileSync } from "child_process";
 import { google } from "googleapis";
 import { getGoogleAuthClient } from "../auth/google.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -15,11 +18,146 @@ function ok(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
 }
 
+// ── OCR fallback ────────────────────────────────────────────────────────────
+// When pdf-parse returns empty text (PDF has no text layer — i.e., it's a
+// scanned image), shell out to poppler's pdftoppm to render each page as a
+// PNG, then run tesseract on each PNG. Both binaries are installed via the
+// Dockerfile (poppler-utils + tesseract-ocr + tesseract-ocr-eng).
+//
+// Tradeoffs vs. tesseract.js (pure-JS WASM):
+//   - System tesseract is ~5x faster
+//   - No 10MB+ language data download on first call (WASM build downloads on demand)
+//   - Costs an apt install (already done in Dockerfile)
+
+function which(bin: string): string | null {
+  try {
+    const out = execFileSync("which", [bin], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+let _ocrAvailable: boolean | null = null;
+let _ocrUnavailableReason = "";
+function ocrAvailable(): boolean {
+  if (_ocrAvailable !== null) return _ocrAvailable;
+  const missing: string[] = [];
+  if (!which("pdftoppm")) missing.push("pdftoppm (poppler-utils)");
+  if (!which("tesseract")) missing.push("tesseract");
+  if (missing.length > 0) {
+    _ocrAvailable = false;
+    _ocrUnavailableReason = `OCR fallback unavailable — missing: ${missing.join(", ")}. Install in Dockerfile via: apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng`;
+    return false;
+  }
+  _ocrAvailable = true;
+  return true;
+}
+
+type OcrPageResult = {
+  page_num: number;
+  text: string;
+  confidence: number | null; // 0-100, null if not parseable
+};
+
+async function ocrFromBuffer(buf: Buffer): Promise<{ pages: OcrPageResult[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pdfocr_"));
+  const pdfPath = path.join(tmpDir, "in.pdf");
+
+  try {
+    fs.writeFileSync(pdfPath, buf);
+
+    // Render PDF pages to PNG. -r 200 gives 200 DPI which is the sweet spot
+    // for OCR accuracy vs. encode time. -png picks the format. Pages land
+    // as page-1.png, page-2.png, etc.
+    try {
+      execFileSync("pdftoppm", ["-png", "-r", "200", pdfPath, path.join(tmpDir, "page")], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch (e: any) {
+      const stderr = e?.stderr ? e.stderr.toString() : String(e?.message || e);
+      warnings.push(`pdftoppm failed: ${stderr.trim().substring(0, 300)}`);
+      return { pages: [], warnings };
+    }
+
+    const pngs = fs.readdirSync(tmpDir)
+      .filter(n => /^page-\d+\.png$/.test(n))
+      .sort((a, b) => {
+        const ai = parseInt((a.match(/^page-(\d+)\.png$/) || ["0", "0"])[1], 10);
+        const bi = parseInt((b.match(/^page-(\d+)\.png$/) || ["0", "0"])[1], 10);
+        return ai - bi;
+      })
+      .map(n => path.join(tmpDir, n));
+
+    if (pngs.length === 0) {
+      warnings.push("pdftoppm produced no PNG output — the PDF may be empty or malformed");
+      return { pages: [], warnings };
+    }
+
+    const pages: OcrPageResult[] = [];
+    for (let i = 0; i < pngs.length; i++) {
+      const png = pngs[i];
+      const pageNum = i + 1;
+      try {
+        // Run tesseract twice: once for plain text (clean output), once for
+        // TSV (per-word confidence). The TSV pass is small overhead given
+        // tesseract has already loaded the model.
+        const text = execFileSync("tesseract", [png, "stdout", "-l", "eng"], {
+          stdio: ["ignore", "pipe", "pipe"],
+          maxBuffer: 50 * 1024 * 1024,
+        }).toString("utf-8").trim();
+
+        let confidence: number | null = null;
+        try {
+          const tsv = execFileSync("tesseract", [png, "stdout", "-l", "eng", "tsv"], {
+            stdio: ["ignore", "pipe", "pipe"],
+            maxBuffer: 50 * 1024 * 1024,
+          }).toString("utf-8");
+          // TSV columns: level page block para line word_num left top width height conf text
+          // We want word-level rows (level 5) with non-empty text.
+          const lines = tsv.split("\n").slice(1);
+          const wordConfidences: number[] = [];
+          for (const line of lines) {
+            const cols = line.split("\t");
+            if (cols.length < 12) continue;
+            if (cols[0] !== "5") continue; // word-level only
+            const conf = parseFloat(cols[10]);
+            const word = cols[11];
+            if (Number.isFinite(conf) && conf >= 0 && word && word.trim().length > 0) {
+              wordConfidences.push(conf);
+            }
+          }
+          if (wordConfidences.length > 0) {
+            const avg = wordConfidences.reduce((a, b) => a + b, 0) / wordConfidences.length;
+            confidence = Math.round(avg * 10) / 10;
+          }
+        } catch {
+          // confidence is best-effort; if TSV pass fails just leave it null
+        }
+
+        pages.push({ page_num: pageNum, text, confidence });
+      } catch (e: any) {
+        const stderr = e?.stderr ? e.stderr.toString() : String(e?.message || e);
+        warnings.push(`tesseract failed on page ${pageNum}: ${stderr.trim().substring(0, 200)}`);
+        pages.push({ page_num: pageNum, text: "", confidence: null });
+      }
+    }
+
+    return { pages, warnings };
+  } finally {
+    // Cleanup temp dir + all rendered PNGs
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// ── Main extract result type ────────────────────────────────────────────────
 type ExtractResult = {
-  source: "text_layer" | "empty";
+  source: "text_layer" | "ocr" | "empty";
   text: string;
   num_pages: number;
   warnings: string[];
+  ocr_pages?: OcrPageResult[]; // populated only when source === "ocr"
 };
 
 async function extractFromBuffer(buf: Buffer): Promise<ExtractResult> {
@@ -27,20 +165,41 @@ async function extractFromBuffer(buf: Buffer): Promise<ExtractResult> {
   const text = (data.text || "").trim();
   const num_pages = data.numpages || 0;
 
-  if (!text) {
+  if (text) {
+    return { source: "text_layer", text, num_pages, warnings: [] };
+  }
+
+  // No text layer — try OCR fallback
+  if (!ocrAvailable()) {
     return {
       source: "empty",
       text: "",
       num_pages,
       warnings: [
-        "No text layer found. PDF is likely a scanned image.",
-        "OCR fallback (tesseract) not yet wired in this server — caller should download the PDF and OCR locally, or request OCR support be added.",
+        "No text layer found and OCR fallback is unavailable.",
+        _ocrUnavailableReason,
       ],
     };
   }
 
-  return { source: "text_layer", text, num_pages, warnings: [] };
+  const ocr = await ocrFromBuffer(buf);
+  const combinedText = ocr.pages
+    .map(p => `--- Page ${p.page_num} ---\n${p.text || "(empty)"}`)
+    .join("\n\n");
+  const hasAnyText = ocr.pages.some(p => p.text.trim().length > 0);
+
+  return {
+    source: hasAnyText ? "ocr" : "empty",
+    text: hasAnyText ? combinedText : "",
+    num_pages: ocr.pages.length || num_pages,
+    warnings: hasAnyText
+      ? ocr.warnings
+      : ["OCR ran but produced no text — PDF may be blank, image-corrupted, or in a non-English language", ...ocr.warnings],
+    ocr_pages: ocr.pages,
+  };
 }
+
+// ── Tools ───────────────────────────────────────────────────────────────────
 
 export async function extractPdfText(args: {
   file_path?: string;
@@ -99,6 +258,18 @@ export async function extractPdfText(args: {
       `From:      ${label}`,
       `Bytes:     ${buf!.length}`,
     ];
+
+    // For OCR, surface average confidence so callers can decide whether to
+    // trust critical fields (phone numbers, names) or warn the user.
+    if (result.source === "ocr" && result.ocr_pages) {
+      const confs = result.ocr_pages.map(p => p.confidence).filter((c): c is number => c !== null);
+      if (confs.length > 0) {
+        const avg = Math.round((confs.reduce((a, b) => a + b, 0) / confs.length) * 10) / 10;
+        const min = Math.min(...confs);
+        lines.push(`OCR conf:  avg=${avg}%, min=${min}% (per page: ${result.ocr_pages.map(p => p.confidence ?? "n/a").join(", ")})`);
+        lines.push(`Caution:   OCR'd text — verify critical fields (phone, name spellings) against the source PDF before relying on them.`);
+      }
+    }
     if (args.page_range) {
       lines.push(`Note:      page_range "${args.page_range}" was passed but is ignored — full document returned (per-page extraction not yet supported).`);
     }
