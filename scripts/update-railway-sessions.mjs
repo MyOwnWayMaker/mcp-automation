@@ -25,13 +25,33 @@ const files = {
 // Resolve the absolute path to `railway` once. spawnSync on Windows doesn't
 // auto-resolve .exe extensions from PATH the way the cmd shell does, which
 // silently failed before with "exit code null" on every call.
+//
+// On Windows, npm-installed CLIs typically have THREE files alongside each
+// other: a no-extension shell script (works in Unix shells), a .cmd batch
+// file (the Windows-executable shim), and a .ps1 (PowerShell). `where`
+// often returns the no-extension file first, which Windows can't spawn.
+// Prefer .cmd on Windows when the resolved file lacks an extension.
 function resolveRailway() {
   const cmd = isWin ? "where railway" : "command -v railway";
   try {
     const out = execSync(cmd, { encoding: "utf-8" });
-    const first = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
-    if (!first) throw new Error("`where railway` returned no path");
-    return first;
+    const candidates = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (candidates.length === 0) throw new Error("`where railway` returned no path");
+
+    if (isWin) {
+      // Prefer .cmd (Windows-runnable). If `where` only returned the
+      // extension-less shim, append .cmd and verify it exists.
+      const cmdPath = candidates.find(p => /\.cmd$/i.test(p))
+                   ?? candidates.find(p => /\.exe$/i.test(p));
+      if (cmdPath) return cmdPath;
+
+      // Fall back: try appending .cmd to the first candidate
+      const guess = candidates[0] + ".cmd";
+      if (fs.existsSync(guess)) return guess;
+      throw new Error(`No .cmd or .exe variant found alongside ${candidates[0]}`);
+    }
+
+    return candidates[0];
   } catch (e) {
     console.error("❌  Could not locate the `railway` CLI on PATH.");
     console.error("    Install: https://docs.railway.com/guides/cli");
