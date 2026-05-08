@@ -561,6 +561,25 @@ export async function notionArchiveBlock(args: {
   return ok(`Block ${args.block_id} archived (recoverable from Notion trash for 30 days).`);
 }
 
+// Page archive/restore: Notion treats database items as pages, and the blocks
+// endpoint refuses page-level archive ("Updating a page via the blocks endpoint
+// unsupported"). Must hit /pages/:id directly.
+export async function notionArchivePage(args: {
+  page_id: string;
+}): Promise<CallToolResult> {
+  const res = await notionFetch(`/pages/${args.page_id}`, "PATCH", { archived: true });
+  const url = res?.url ?? `https://www.notion.so/${args.page_id.replace(/-/g, "")}`;
+  return ok(`Page archived (recoverable from Notion trash for 30 days).\nID:  ${args.page_id}\nURL: ${url}`);
+}
+
+export async function notionRestorePage(args: {
+  page_id: string;
+}): Promise<CallToolResult> {
+  const res = await notionFetch(`/pages/${args.page_id}`, "PATCH", { archived: false });
+  const url = res?.url ?? `https://www.notion.so/${args.page_id.replace(/-/g, "")}`;
+  return ok(`Page restored from trash.\nID:  ${args.page_id}\nURL: ${url}`);
+}
+
 export async function notionInsertAfterBlock(args: {
   target_block_id: string;
   content: string;
