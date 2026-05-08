@@ -20,6 +20,7 @@ import express from "express";
 
 // Tool implementations
 import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
+import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -59,6 +60,8 @@ const TOOLS: Tool[] = [
   { name: "gmail_reply_to_email", description: "Reply to an existing email thread", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
   { name: "gmail_archive_email", description: "Archive an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "gmail_download_attachment", description: "Download a Gmail attachment OR a Google Drive file linked in an email body. Three modes: (1) pass attachment_id for standard Gmail attachments; (2) pass drive_file_id to download directly from Drive; (3) pass neither and the tool auto-detects Drive links in the message body. Returns structured error with the Drive URL if access is denied.", inputSchema: { type: "object", properties: { message_id: { type: "string" }, attachment_id: { type: "string", description: "Gmail attachment ID (from part.body.attachmentId in gmail_get_email)" }, drive_file_id: { type: "string", description: "Google Drive file ID — use when the email has a Drive share link instead of a true attachment" }, dest_path: { type: "string", description: "Absolute local path to save the file (e.g. /tmp/invoice.pdf)" } }, required: ["message_id", "dest_path"] } },
+  { name: "extract_pdf_text", description: "Extract text from a PDF. Server-side — no client sandbox required. Pass exactly one of: file_path (server-local path), drive_file_id (Google Drive file ID), or gmail_message_id + attachment_id (Gmail attachment). Returns extracted text + page count. Scanned/image PDFs return empty text with a warning (OCR fallback not yet wired).", inputSchema: { type: "object", properties: { file_path: { type: "string" }, drive_file_id: { type: "string" }, gmail_message_id: { type: "string" }, attachment_id: { type: "string" }, page_range: { type: "string", description: "Reserved for per-page extraction; currently informational only — full document is returned." } } } },
+  { name: "gmail_attachment_text", description: "One-call shortcut: given a Gmail message ID and a PDF attachment filename (exact match or case-insensitive substring), download the PDF and return its text. Combines gmail_download_attachment + extract_pdf_text without needing to manage temp paths or look up attachment IDs.", inputSchema: { type: "object", properties: { message_id: { type: "string" }, attachment_filename: { type: "string", description: "Exact filename or case-insensitive substring (e.g. 'LossNotice')" } }, required: ["message_id", "attachment_filename"] } },
 
   // Calendar
   { name: "calendar_list_events", description: "List calendar events within a time range", inputSchema: { type: "object", properties: { calendar_id: { type: "string" }, time_min: { type: "string" }, time_max: { type: "string" }, query: { type: "string" }, max_results: { type: "number" } }, required: [] } },
@@ -260,6 +263,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "gmail_reply_to_email": return gmailReplyToEmail(args as any);
     case "gmail_archive_email": return gmailArchiveEmail(args as any);
     case "gmail_download_attachment": return gmailDownloadAttachment(args as any);
+    case "extract_pdf_text": return extractPdfText(args as any);
+    case "gmail_attachment_text": return gmailAttachmentText(args as any);
     case "calendar_list_events": return calendarListEvents(args as any);
     case "calendar_create_event": return calendarCreateEvent(args as any);
     case "calendar_update_event": return calendarUpdateEvent(args as any);

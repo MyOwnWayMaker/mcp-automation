@@ -271,4 +271,32 @@ console.log(`Size: ${(fs.statSync(SESSION_PATH).size / 1024).toFixed(1)} KB`);
 
 await page.waitForTimeout(2000);
 await browser.close();
+
+// Auto-push the fresh session to Railway. Without this step, the local file
+// is up to date but Railway's XACTANALYSIS_SESSION_JSON env var still holds
+// the expired session — every xact_* call from the deployed MCP server
+// fails with "session expired" until the Railway env var is updated.
+// Skip with SKIP_RAILWAY_PUSH=1 if you only want the local file (e.g. for
+// debugging the auth flow without redeploying production).
+if (process.env.SKIP_RAILWAY_PUSH === "1") {
+  console.log("\n⚠️  SKIP_RAILWAY_PUSH=1 set — Railway env var NOT updated.");
+  console.log("    Run `node scripts/update-railway-sessions.mjs` manually when ready.");
+} else {
+  console.log("\n>>> Pushing session to Railway env var XACTANALYSIS_SESSION_JSON...");
+  const { spawnSync } = await import("child_process");
+  const value = fs.readFileSync(SESSION_PATH, "utf8").trim();
+  const result = spawnSync(
+    "railway",
+    ["variables", "set", `XACTANALYSIS_SESSION_JSON=${value}`],
+    { cwd: REPO_ROOT, stdio: "inherit", maxBuffer: 20 * 1024 * 1024 }
+  );
+  if (result.status === 0) {
+    console.log("✅ XACTANALYSIS_SESSION_JSON pushed to Railway.");
+    console.log("   Railway will auto-redeploy in ~60s. xact_* tools should work after that.");
+  } else {
+    console.error(`❌ Railway push failed (exit code ${result.status}).`);
+    console.error("   Run manually: node scripts/update-railway-sessions.mjs");
+  }
+}
+
 console.log("Done!");
