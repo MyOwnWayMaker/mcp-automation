@@ -297,49 +297,59 @@ export async function notionUpdateDatabaseSchema(args: {
   return ok(`Updated database ${args.database_id}: property "${args.property_name}" now has ${args.select_options.length} options: ${args.select_options.map((o) => o.name).join(", ")}`);
 }
 
-export async function notionAddDatabaseProperty(args: {
-  database_id: string;
-  property_name: string;
-  property_type: "number" | "text" | "checkbox" | "date" | "url" | "email" | "phone_number" | "select" | "multi_select";
-  number_format?: "number" | "number_with_commas" | "percent" | "dollar" | "canadian_dollar" | "euro" | "pound" | "yen" | "ruble" | "rupee" | "won" | "yuan" | "real" | "lira" | "rupiah" | "franc" | "hong_kong_dollar" | "new_zealand_dollar" | "krona" | "norwegian_krone" | "mexican_peso" | "rand" | "new_taiwan_dollar" | "danish_krone" | "zloty" | "baht" | "forint" | "koruna" | "shekel" | "chilean_peso" | "philippine_peso" | "dirham" | "colombian_peso" | "riyal" | "ringgit" | "leu" | "argentine_peso" | "uruguayan_peso" | "singapore_dollar";
-}): Promise<CallToolResult> {
-  let propertyDef: any;
+export function buildPropertyDef(args: {
+  property_type: "number" | "text" | "checkbox" | "date" | "url" | "email" | "phone_number" | "select" | "multi_select" | "formula";
+  number_format?: string;
+  formula_expression?: string;
+}): any {
   switch (args.property_type) {
     case "number":
-      propertyDef = { number: { format: args.number_format ?? "number" } };
-      break;
+      return { number: { format: args.number_format ?? "number" } };
     case "text":
-      propertyDef = { rich_text: {} };
-      break;
+      return { rich_text: {} };
     case "checkbox":
-      propertyDef = { checkbox: {} };
-      break;
+      return { checkbox: {} };
     case "date":
-      propertyDef = { date: {} };
-      break;
+      return { date: {} };
     case "url":
-      propertyDef = { url: {} };
-      break;
+      return { url: {} };
     case "email":
-      propertyDef = { email: {} };
-      break;
+      return { email: {} };
     case "phone_number":
-      propertyDef = { phone_number: {} };
-      break;
+      return { phone_number: {} };
     case "select":
-      propertyDef = { select: { options: [] } };
-      break;
+      return { select: { options: [] } };
     case "multi_select":
-      propertyDef = { multi_select: { options: [] } };
-      break;
+      return { multi_select: { options: [] } };
+    case "formula":
+      if (!args.formula_expression || !args.formula_expression.trim()) {
+        throw new Error("formula_expression is required when property_type is 'formula'");
+      }
+      return { formula: { expression: args.formula_expression } };
     default:
       throw new Error(`Unsupported property type: ${args.property_type}`);
   }
+}
 
+export async function notionAddDatabaseProperty(args: {
+  database_id: string;
+  property_name: string;
+  property_type: "number" | "text" | "checkbox" | "date" | "url" | "email" | "phone_number" | "select" | "multi_select" | "formula";
+  number_format?: "number" | "number_with_commas" | "percent" | "dollar" | "canadian_dollar" | "euro" | "pound" | "yen" | "ruble" | "rupee" | "won" | "yuan" | "real" | "lira" | "rupiah" | "franc" | "hong_kong_dollar" | "new_zealand_dollar" | "krona" | "norwegian_krone" | "mexican_peso" | "rand" | "new_taiwan_dollar" | "danish_krone" | "zloty" | "baht" | "forint" | "koruna" | "shekel" | "chilean_peso" | "philippine_peso" | "dirham" | "colombian_peso" | "riyal" | "ringgit" | "leu" | "argentine_peso" | "uruguayan_peso" | "singapore_dollar";
+  formula_expression?: string;
+}): Promise<CallToolResult> {
+  const propertyDef = buildPropertyDef(args);
+
+  // Notion has two formula syntax versions in flight. The PATCH below sends the
+  // expression as-given. If the workspace is on v2 and the caller passed v1
+  // syntax (or vice versa), Notion returns 400 with a parse error. Caller
+  // catches and retries with the other syntax (see the Total Hours / Effective
+  // $/hr backfill script for an example).
   await notionFetch(`/databases/${args.database_id}`, "PATCH", {
     properties: { [args.property_name]: propertyDef },
   });
-  return ok(`Added "${args.property_name}" (${args.property_type}) to database ${args.database_id}.`);
+  const detail = args.property_type === "formula" ? ` formula: ${args.formula_expression}` : "";
+  return ok(`Added "${args.property_name}" (${args.property_type}) to database ${args.database_id}.${detail}`);
 }
 
 export async function notionUpdateBlock(args: {

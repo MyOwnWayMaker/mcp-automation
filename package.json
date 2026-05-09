@@ -10,7 +10,8 @@
     "dev": "npx ts-node --esm src/index.ts",
     "auth:google": "npx ts-node --esm src/auth/google.ts",
     "auth:quickbooks": "npx ts-node --esm src/auth/quickbooks.ts",
-    "auth:notary-gmail": "node dist/auth/google-notary.js"
+    "auth:notary-gmail": "node dist/auth/google-notary.js",
+    "test": "tsc && node --test tests/"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
