@@ -22,6 +22,7 @@ import express from "express";
 import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
 import { startClaimMonitor } from "./watchers/claim_monitor.js";
+import { startNotaryMonitor } from "./watchers/notary_monitor.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -595,6 +596,10 @@ if (PORT) {
     // Replaces the standalone scripts/claim-monitor.mjs that used to require
     // running on Hakiel's Mac. See src/watchers/claim_monitor.ts.
     startClaimMonitor();
+    // Notary inbox watcher: polls drupenterprise1@gmail.com and fires only on
+    // availability inquiries + signing-document deliveries. See
+    // src/watchers/notary_monitor.ts.
+    startNotaryMonitor();
   });
   // Disable Nagle's algorithm so small SSE packets aren't buffered on localhost
   httpServer.on("connection", (socket) => socket.setNoDelay(true));
