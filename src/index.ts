@@ -21,6 +21,7 @@ import express from "express";
 // Tool implementations
 import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
+import { startClaimMonitor } from "./watchers/claim_monitor.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -589,6 +590,11 @@ if (PORT) {
 
   const httpServer = app.listen(Number(PORT), () => {
     console.log(`mcp-automation server running on port ${PORT} (HTTP/SSE mode)`);
+    // Kick off the in-process claim watcher. Polls Gmail every 60s and fires
+    // ntfy alerts on new claim assignments / supplements / corrections.
+    // Replaces the standalone scripts/claim-monitor.mjs that used to require
+    // running on Hakiel's Mac. See src/watchers/claim_monitor.ts.
+    startClaimMonitor();
   });
   // Disable Nagle's algorithm so small SSE packets aren't buffered on localhost
   httpServer.on("connection", (socket) => socket.setNoDelay(true));
