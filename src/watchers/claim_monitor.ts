@@ -23,6 +23,7 @@
 
 import { google } from "googleapis";
 import { getGoogleAuthClient } from "../auth/google.js";
+import { classifyImportant, buildImportantNtfyPayload } from "./important_classifier.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -180,12 +181,42 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     }
 
     const tier = classify(fromHeader, subject);
+    const body = extractBody(full.data.payload);
+
+    // If no adjuster-pattern match, try the general "outside the adjuster
+    // path" importance classifier. This catches grant-writer, tax/CPA, legal,
+    // banking, regulatory, and personally-important emails that don't match
+    // any of the existing tag patterns. Fires [IMPORTANT][category] alerts.
     if (!tier) {
+      const dateHeader = get("Date");
+      const hasUnsubscribe = headers.some(h => /^list-unsubscribe$/i.test(h.name || ""));
+      try {
+        const verdict = await classifyImportant({
+          from: fromHeader,
+          subject,
+          date: dateHeader,
+          body,
+          has_unsubscribe: hasUnsubscribe,
+        });
+        if (verdict) {
+          const { title, message } = buildImportantNtfyPayload({ from: fromHeader, subject, verdict });
+          const fullMessage = `${message}\n\n[id: ${m.id}]`;
+          await sendNtfy({
+            title,
+            message: fullMessage,
+            priority: 5,
+            tags: ["bell"],
+          });
+          console.log(`[claim-monitor] [IMPORTANT/${verdict.category}] ${fromHeader} — ${subject}`);
+          alerts++;
+        }
+      } catch (e: any) {
+        console.error(`[claim-monitor] importance classifier error: ${e?.message || e}`);
+      }
       alerted.set(m.id, Date.now());
       continue;
     }
 
-    const body = extractBody(full.data.payload);
     const snippet = snippetFromBody(body);
 
     const isCorrection = tier === "CORRECTION";
