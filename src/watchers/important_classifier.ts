@@ -48,6 +48,7 @@ export type ImportantVerdict = {
   action_hint: string;
   deadline: string | null;
   source: "marketing_filter" | "hard_allowlist" | "llm" | "fail_open";
+  suggested_reply: string; // body-only — NO greeting, NO closing, NO signature
 };
 
 // ── Layer 1: Marketing pre-filter ───────────────────────────────────────────
@@ -118,6 +119,63 @@ export function isObviousMarketing(args: {
   return false;
 }
 
+// ── Layer 1b: IA-firm auto-dispatch skip ────────────────────────────────────
+//
+// Hakiel already gets SMS/in-app pings via FileTrac and XactAnalysis when an
+// IA firm dispatches a new assignment to him via their auto-dispatch
+// mailboxes. Surfacing those again here would double-fire alerts. So drop
+// silently when the sender's local-part matches a known shared-mailbox name
+// AND the domain is on a known IA-firm list.
+//
+// CRITICAL CARVE-OUT: a real human at the same firm domain (e.g.
+// bwilhoite@pcsadj.com, Brittany.McCarty@sedgwick.com,
+// Candice.Millsaps@usclaimsolutions.co) MUST pass through to the classifier.
+// The skip ONLY applies when the local-part is a generic shared-mailbox name.
+
+const DISPATCH_LOCALPARTS = new Set([
+  "newclaim",
+  "dispatch",
+  "info",
+  "claims",
+  "noreply",
+  "no-reply",
+  "donotreply",
+  "do-not-reply",
+  "notifications",
+  "notify",
+  "claims-dispatcher",
+  "resource",
+  "resourcing",
+]);
+
+const IA_FIRM_DOMAINS = [
+  "usclaimsolutions.co",
+  "pcsadj.com",
+  "straightlineglobal.com",
+  "xactware.com",
+  "filetrac.net",
+  "aanationwide.com",
+  "premierclaims.com",
+  "sedgwick.com",
+];
+
+export function isIaFirmAutoDispatch(fromHeader: string): boolean {
+  const addr = extractEmailAddress(fromHeader);
+  if (!addr) return false;
+  const at = addr.indexOf("@");
+  if (at < 0) return false;
+  const localpart = addr.substring(0, at).toLowerCase();
+  const domain = addr.substring(at + 1).toLowerCase();
+
+  // Skip ONLY when local-part is shared-mailbox AND domain is IA-firm.
+  // Real humans (firstname.lastname etc.) at firm domains pass through.
+  const isSharedMailbox = DISPATCH_LOCALPARTS.has(localpart);
+  if (!isSharedMailbox) return false;
+
+  const isFirmDomain = IA_FIRM_DOMAINS.some(d => domain === d || domain.endsWith("." + d));
+  return isFirmDomain;
+}
+
 // ── Layer 2: Hard allowlist ─────────────────────────────────────────────────
 
 // Senders Hakiel always wants to see, regardless of subject. Each entry is
@@ -179,7 +237,13 @@ export function matchesHardAllowlist(fromHeader: string): boolean {
 
 // ── Layer 3: LLM classifier ─────────────────────────────────────────────────
 
-const CLASSIFIER_PROMPT = `You are an importance triage classifier for an independent insurance adjuster's
+const CLASSIFIER_PROMPT = `CONTEXT — Auto-dispatch bot mailboxes (newclaim@, dispatch@, info@, claims@,
+noreply@, etc.) on IA-firm domains are filtered upstream. When YOU see an
+email here, the sender is either on a non-firm domain or is a NAMED HUMAN at
+a firm. Evaluate on the email's content, not on whether the domain happens
+to be an IA-firm domain.
+
+You are an importance triage classifier for an independent insurance adjuster's
 personal inbox. The user already has automated alerts for adjuster-side claim
 work (new assignments, supplements, re-inspections, examiner corrections, notary
 work). Your job is to flag emails OUTSIDE that workflow that look personally
@@ -192,8 +256,25 @@ Return STRICT JSON only, no prose, no markdown:
   "category": "tax" | "legal" | "grant_or_funding" | "banking_finance" | "regulatory_or_govt" | "personal_signed_doc" | "professional_question" | "deadline_notice" | "business_admin" | "other_important" | "not_important",
   "summary": "one-sentence what this email is",
   "action_hint": "one short clause about what the recipient should do",
-  "deadline": "YYYY-MM-DD or null"
+  "deadline": "YYYY-MM-DD or null",
+  "suggested_reply": "REPLY BODY ONLY — see strict rules below"
 }
+
+CRITICAL — suggested_reply: write the REPLY BODY ONLY. The recipient's email
+signature is appended automatically downstream by the system (fetched from his
+Gmail sendAs settings).
+- DO NOT include any salutation/greeting line ("Hi X,", "Hello,", "Mr. Sara,").
+- DO NOT include any closing line ("Best,", "Thanks,", "Regards,", "Sincerely,").
+- DO NOT include any signature, name, title, contact info, or sign-off.
+- Just the reply prose itself, ready to slot into a thread.
+- If you include a greeting, closing, or signature, the system will append the
+  signature anyway and Hakiel will see duplicates. Don't.
+- Keep the draft 2-4 sentences. Concrete dates over "as soon as I can." Never
+  commit to large dollar amounts, schedules >14 days out, or sight-unseen
+  signatures. If unsure, fall back to:
+  "Acknowledging receipt — I'll review and circle back by [tomorrow/EOD]."
+  (still no greeting / sign-off).
+- If is_important is false, return suggested_reply as an empty string.
 
 Flag as important (is_important=true) if ANY are true:
 - Sender appears to be a real human writing personally (not template/automation), AND the message asks a question, requests action, or shares a status update that requires the recipient to do something
@@ -211,15 +292,32 @@ Be biased toward flagging when uncertain on:
 - Anything with "deadline", "respond by", "final notice", or a date in the next 14 days
 - Emails referencing money, contracts, signatures, government agencies`;
 
-const SUMMARY_PROMPT = `You are summarizing an email for a 1-line phone notification. Be concise and concrete.
+const SUMMARY_PROMPT = `You are summarizing an email from a known-important sender for a 1-line phone
+notification, and drafting a quick reply body.
 
 Return STRICT JSON only:
 {
   "category": "tax" | "legal" | "grant_or_funding" | "banking_finance" | "regulatory_or_govt" | "personal_signed_doc" | "professional_question" | "deadline_notice" | "business_admin" | "other_important",
   "summary": "one-sentence what this email is",
   "action_hint": "one short clause about what the recipient should do",
-  "deadline": "YYYY-MM-DD or null"
-}`;
+  "deadline": "YYYY-MM-DD or null",
+  "suggested_reply": "REPLY BODY ONLY — see strict rules below"
+}
+
+CRITICAL — suggested_reply: write the REPLY BODY ONLY. A signature is appended
+automatically downstream by the system (fetched from the sender's Gmail
+sendAs settings).
+- DO NOT include any salutation/greeting line ("Hi X,", "Hello,", "Mr. Sara,").
+- DO NOT include any closing line ("Best,", "Thanks,", "Regards,", "Sincerely,").
+- DO NOT include any signature, name, title, or contact info.
+- Just the reply prose itself, ready to slot into a thread.
+- Keep the draft 2-4 sentences. Concrete dates over "as soon as I can." Never
+  commit to large dollar amounts, schedules >14 days out, or sight-unseen
+  signatures. If unsure, fall back to:
+  "Acknowledging receipt — I'll review and circle back by [tomorrow/EOD]."
+  (still no greeting / sign-off).
+- If the email is purely informational/notification with no real request,
+  return suggested_reply as an empty string.`;
 
 function getGenAI(): GoogleGenerativeAI | null {
   const key = process.env.GOOGLE_AI_API_KEY;
@@ -273,6 +371,7 @@ async function llmClassify(args: {
       action_hint: "Review manually.",
       deadline: null,
       source: "fail_open",
+      suggested_reply: "",
     };
   }
 
@@ -301,6 +400,7 @@ async function llmClassify(args: {
           action_hint: String(parsed.action_hint || "").substring(0, 200),
           deadline: parsed.deadline && parsed.deadline !== "null" ? String(parsed.deadline) : null,
           source: "llm",
+          suggested_reply: String(parsed.suggested_reply || "").substring(0, 2000),
         };
       }
       console.error(`[important-classifier] Gemini malformed JSON on attempt ${attempt}: ${text.substring(0, 200)}`);
@@ -318,6 +418,7 @@ async function llmClassify(args: {
     action_hint: "Open + skim.",
     deadline: null,
     source: "fail_open",
+    suggested_reply: "",
   };
 }
 
@@ -339,6 +440,7 @@ async function llmSummarizeOnly(args: {
       action_hint: "Open + review.",
       deadline: null,
       source: "hard_allowlist",
+      suggested_reply: "",
     };
   }
 
@@ -362,6 +464,7 @@ async function llmSummarizeOnly(args: {
         action_hint: String(parsed.action_hint || "Open + review.").substring(0, 200),
         deadline: parsed.deadline && parsed.deadline !== "null" ? String(parsed.deadline) : null,
         source: "hard_allowlist",
+        suggested_reply: String(parsed.suggested_reply || "").substring(0, 2000),
       };
     }
   } catch (e: any) {
@@ -376,6 +479,7 @@ async function llmSummarizeOnly(args: {
     action_hint: "Open + review.",
     deadline: null,
     source: "hard_allowlist",
+    suggested_reply: "",
   };
 }
 
@@ -391,6 +495,12 @@ export async function classifyImportant(args: {
   // Layer 1: marketing pre-filter
   if (isObviousMarketing(args)) {
     console.log(`[important-classifier] DROP (marketing) — ${args.from} — ${args.subject}`);
+    return null;
+  }
+
+  // Layer 1b: IA-firm auto-dispatch mailbox skip — already alerted via FileTrac/XA
+  if (isIaFirmAutoDispatch(args.from)) {
+    console.log(`[important-classifier] DROP (ia-firm-dispatch) — ${args.from} — ${args.subject}`);
     return null;
   }
 
@@ -419,8 +529,10 @@ export function buildImportantNtfyPayload(args: {
   from: string;
   subject: string;
   verdict: ImportantVerdict;
+  draft_status?: "drafted" | "skipped_active_thread" | "failed" | "no_reply_text" | null;
+  draft_reason?: string;
 }): { title: string; message: string } {
-  const { from, subject, verdict } = args;
+  const { from, subject, verdict, draft_status, draft_reason } = args;
   // Display name — strip the email-address part if there's a quoted name
   const nameMatch = from.match(/^"?([^"<]+?)"?\s*<[^>]+>$/);
   const fromDisplay = nameMatch ? nameMatch[1].trim() : from;
@@ -431,6 +543,17 @@ export function buildImportantNtfyPayload(args: {
   if (verdict.action_hint) lines.push(`-> ${verdict.action_hint}`);
   if (verdict.deadline) lines.push(`Deadline: ${verdict.deadline}`);
   if (verdict.source === "fail_open") lines.push("(classifier fell through — review manually)");
+
+  if (draft_status === "drafted") {
+    lines.push("Draft ready in Gmail — review + send.");
+  } else if (draft_status === "skipped_active_thread") {
+    lines.push("(no draft — you replied in this thread recently)");
+  } else if (draft_status === "no_reply_text") {
+    lines.push("(no draft — no reply needed)");
+  } else if (draft_status === "failed") {
+    lines.push(`(draft failed: ${draft_reason || "unknown"})`);
+  }
+
   const message = lines.join("\n");
 
   return { title, message };

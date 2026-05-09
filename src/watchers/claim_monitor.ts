@@ -24,6 +24,7 @@
 import { google } from "googleapis";
 import { getGoogleAuthClient } from "../auth/google.js";
 import { classifyImportant, buildImportantNtfyPayload } from "./important_classifier.js";
+import { createImportantDraft } from "./important_drafter.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -189,6 +190,8 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     // any of the existing tag patterns. Fires [IMPORTANT][category] alerts.
     if (!tier) {
       const dateHeader = get("Date");
+      const messageIdHeader = get("Message-ID") || get("Message-Id") || get("message-id");
+      const ccHeader = get("Cc");
       const hasUnsubscribe = headers.some(h => /^list-unsubscribe$/i.test(h.name || ""));
       try {
         const verdict = await classifyImportant({
@@ -199,7 +202,42 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
           has_unsubscribe: hasUnsubscribe,
         });
         if (verdict) {
-          const { title, message } = buildImportantNtfyPayload({ from: fromHeader, subject, verdict });
+          // Try to draft a Gmail reply (skipped if Hakiel replied recently or
+          // the LLM returned no reply text). Best-effort — never block the alert.
+          let draft_status: "drafted" | "skipped_active_thread" | "failed" | "no_reply_text" | null = null;
+          let draft_reason: string | undefined;
+
+          const replyText = (verdict.suggested_reply || "").trim();
+          if (!replyText) {
+            draft_status = "no_reply_text";
+          } else if (full.data.threadId && messageIdHeader) {
+            try {
+              const result = await createImportantDraft({
+                thread_id: full.data.threadId,
+                in_reply_to_message_id: messageIdHeader,
+                reply_to_address: fromHeader,
+                cc_addresses: ccHeader || undefined,
+                original_subject: subject,
+                reply_body: replyText,
+                category: verdict.category,
+                source_email_id: m.id,
+              });
+              draft_status = result.status;
+              draft_reason = result.reason;
+            } catch (e: any) {
+              draft_status = "failed";
+              draft_reason = String(e?.message || e);
+              console.error(`[claim-monitor] draft create threw: ${draft_reason}`);
+            }
+          }
+
+          const { title, message } = buildImportantNtfyPayload({
+            from: fromHeader,
+            subject,
+            verdict,
+            draft_status,
+            draft_reason,
+          });
           const fullMessage = `${message}\n\n[id: ${m.id}]`;
           await sendNtfy({
             title,
@@ -207,7 +245,7 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
             priority: 5,
             tags: ["bell"],
           });
-          console.log(`[claim-monitor] [IMPORTANT/${verdict.category}] ${fromHeader} — ${subject}`);
+          console.log(`[claim-monitor] [IMPORTANT/${verdict.category}] draft=${draft_status || "n/a"} — ${fromHeader} — ${subject}`);
           alerts++;
         }
       } catch (e: any) {

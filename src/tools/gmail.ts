@@ -9,6 +9,12 @@ async function getGmail() {
   return google.gmail({ version: "v1", auth });
 }
 
+// Exported for use by watchers that need to create drafts / fetch signature
+// without going through the MCP tool surface.
+export async function getGmailClient() {
+  return getGmail();
+}
+
 function makeTextContent(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
 }
