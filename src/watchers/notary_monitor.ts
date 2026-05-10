@@ -45,6 +45,25 @@ const DOCUMENT_BODY_RE = /(protected message|sent you a (protected|secure|encryp
 
 // Common signing-service / agency sender patterns. Useful as a hint that
 // "we got something from a real agency" even when the subject is generic.
+// Primary agencies — get a distinctive prefix + tag so Hakiel can ID them
+// from the lock screen without opening the ntfy. Pickford = #1 today; add
+// others here if priority shifts. Map value is the short slug used in the
+// ntfy prefix (kept compact for phone-screen readability).
+const PRIMARY_AGENCY_SLUGS: Record<string, string> = {
+  "pickfordescrow.com": "PICKFORD",
+};
+
+function primaryAgencyName(fromHeader: string): string | null {
+  const addr = extractEmailAddress(fromHeader);
+  const at = addr.indexOf("@");
+  if (at < 0) return null;
+  const domain = addr.substring(at + 1);
+  for (const [d, slug] of Object.entries(PRIMARY_AGENCY_SLUGS)) {
+    if (domain === d || domain.endsWith("." + d)) return slug;
+  }
+  return null;
+}
+
 const KNOWN_NOTARY_AGENCY_DOMAINS = [
   "pickfordescrow.com",  // Hakiel's primary escrow agency
   "snapdocs.com",
@@ -282,14 +301,21 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
 
     const snippet = snippetFromBody(body);
 
-    const title = tier === "DOC"
-      ? `[NOTARY-DOC] ${subject}`
-      : `[NOTARY-AVAIL] ${subject}`;
+    // Primary agencies (Pickford today) get a distinctive prefix + star tag
+    // so they stand out in the lock-screen list. Other agencies use the
+    // generic [NOTARY-*] prefix.
+    const primary = primaryAgencyName(fromHeader);
+    const tierPart = primary ? `${primary}-${tier}` : tier;
+    const title = `[NOTARY-${tierPart}] ${subject}`;
     const message = `From: ${fromHeader}\n${hasAttachment ? "(has attachment)\n" : ""}\n${snippet}\n\n[id: ${m.id}]`;
-    const priority = tier === "DOC" ? 5 : 4;
-    const tags = tier === "DOC" ? ["page_facing_up"] : ["calendar"];
+    // Always max priority for primary agencies regardless of tier - even
+    // their availability inquiries are time-sensitive ("can you do it
+    // tonight" loses value by morning).
+    const priority = primary ? 5 : (tier === "DOC" ? 5 : 4);
+    const baseTag = tier === "DOC" ? "page_facing_up" : "calendar";
+    const tags = primary ? ["star", baseTag] : [baseTag];
 
-    console.log(`[notary-monitor] [${tier}] ${fromHeader} - ${subject}`);
+    console.log(`[notary-monitor] [${tierPart}] ${fromHeader} - ${subject}`);
     await sendNtfy({ title, message, priority, tags });
     alerted.set(m.id, Date.now());
     alertedThreadTier.set(threadTierKey, Date.now());

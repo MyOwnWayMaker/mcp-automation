@@ -20,9 +20,17 @@ function isNoReply(s) {
   return /(^|<)\s*(no[-_]?reply|donotreply|notifications?|do-not-reply)@/i.test(s || "");
 }
 const AGENCY_DOMAINS = ["pickfordescrow.com", "snapdocs.com", "signingorder.com", "notarycafe.com", "signingdirect.com"];
+const PRIMARY_AGENCY_SLUGS = { "pickfordescrow.com": "PICKFORD" };
 function fromAgency(s) {
   const d = extractAddr(s).split("@")[1] || "";
   return AGENCY_DOMAINS.some(a => d === a || d.endsWith("." + a));
+}
+function primaryAgencyName(s) {
+  const d = extractAddr(s).split("@")[1] || "";
+  for (const [domain, slug] of Object.entries(PRIMARY_AGENCY_SLUGS)) {
+    if (d === domain || d.endsWith("." + domain)) return slug;
+  }
+  return null;
 }
 function extractBody(p) {
   if (!p) return "";
@@ -76,14 +84,16 @@ for (const m of msgs.reverse()) {
   const body = extractBody(full.data.payload).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   const hasAttachment = hasMeaningfulAttachment(full.data.payload);
   const tier = classify({ fromHeader, subject, body, hasAttachment });
-  let outcome = tier ? `[${tier}]` : "(none - silent)";
+  const primary = primaryAgencyName(fromHeader);
+  const tierPart = primary ? `${primary}-${tier}` : tier;
+  let outcome = tier ? `[NOTARY-${tierPart}]` : "(none - silent)";
   if (tier) {
     const key = `${full.data.threadId}:${tier}`;
     if (alertedThreadTier.has(key)) {
-      outcome = `[${tier}] DEDUP (thread already alerted at this tier)`;
+      outcome = `[NOTARY-${tierPart}] DEDUP (thread already alerted at this tier)`;
     } else {
       alertedThreadTier.set(key, Date.now());
-      outcome = `[${tier}] FIRES`;
+      outcome = `[NOTARY-${tierPart}] FIRES${primary ? " (primary - star tag, prio 5)" : ""}`;
     }
   }
   console.log(`  Subject: ${subject}`);
