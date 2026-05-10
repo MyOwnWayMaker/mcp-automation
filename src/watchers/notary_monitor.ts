@@ -19,6 +19,7 @@
 
 import { google } from "googleapis";
 import { getNotaryGmailClient } from "../auth/google-notary.js";
+import { createPickfordDraft } from "./pickford_drafter.js";
 
 // Config
 const POLL_INTERVAL_MS = 60_000;
@@ -315,8 +316,46 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     const baseTag = tier === "DOC" ? "page_facing_up" : "calendar";
     const tags = primary ? ["star", baseTag] : [baseTag];
 
-    console.log(`[notary-monitor] [${tierPart}] ${fromHeader} - ${subject}`);
-    await sendNtfy({ title, message, priority, tags });
+    // For Pickford, fire the auto-drafter alongside the alert. The drafter
+    // creates a Gmail draft on this thread that Hakiel reviews + sends
+    // manually. Ntfy gets a draft-status line so he knows what landed.
+    let draftLine = "";
+    if (primary === "PICKFORD") {
+      const messageIdHeader = get("Message-ID") || get("Message-Id") || get("message-id");
+      const ccHeader = get("Cc");
+      const receivedIso = new Date(internalDate).toISOString();
+      try {
+        const draftResult = await createPickfordDraft({
+          tier,
+          thread_id: full.data.threadId || m.id,
+          in_reply_to_message_id: messageIdHeader,
+          reply_to_address: fromHeader,
+          cc_addresses: ccHeader || undefined,
+          original_subject: subject,
+          inquiry_body: body,
+          email_received_iso: receivedIso,
+          source_email_id: m.id,
+        });
+        if (draftResult.status === "drafted") {
+          const verdictTag = draftResult.verdict ? ` [${draftResult.verdict}/${draftResult.confidence}]` : "";
+          draftLine = `\nDraft ready in Gmail${verdictTag} - review + send.`;
+        } else if (draftResult.status === "skipped_active_thread") {
+          draftLine = "\n(no draft - you replied in this thread recently)";
+        } else if (draftResult.status === "skipped_no_extraction") {
+          draftLine = "\n(no draft - could not parse date/time, draft manually)";
+        } else {
+          draftLine = `\n(draft failed: ${draftResult.reason || "unknown"})`;
+        }
+      } catch (e: any) {
+        draftLine = `\n(draft threw: ${String(e?.message || e).substring(0, 100)})`;
+        console.error(`[notary-monitor] pickford drafter threw: ${e?.message || e}`);
+      }
+    }
+
+    const messageWithDraft = `${message}${draftLine}`;
+
+    console.log(`[notary-monitor] [${tierPart}] ${fromHeader} - ${subject}${draftLine ? " (drafter ran)" : ""}`);
+    await sendNtfy({ title, message: messageWithDraft, priority, tags });
     alerted.set(m.id, Date.now());
     alertedThreadTier.set(threadTierKey, Date.now());
     alerts++;
