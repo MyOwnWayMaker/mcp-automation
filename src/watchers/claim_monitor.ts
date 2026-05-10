@@ -25,6 +25,7 @@ import { google } from "googleapis";
 import { getGoogleAuthClient } from "../auth/google.js";
 import { classifyImportant, buildImportantNtfyPayload } from "./important_classifier.js";
 import { createImportantDraft } from "./important_drafter.js";
+import { getMatchableText } from "../util/email_text.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -47,36 +48,67 @@ const HIGH_PRIORITY_DOMAINS = [
   "@straightlineglobal.com",
 ];
 
-const HIGH_SUBJECT_RE = /^(re:\s*)?new (claim )?assignment/i;
-const HIGH_XACTWARE_RE = /^new .+ claim/i;
-const SUPPLEMENT_RE = /supplement(al)?\s+(request|payment)/i;
+// HIGH_RE (formerly HIGH_SUBJECT_RE) is now applied to subject+body via
+// getMatchableText. Broadened from the strict "^new claim assignment" anchor
+// to also catch examiner cold-asks in the body like "Are you available to
+// handle a new claim at <zip>" and "first contact within 24 hours" - the
+// telltale phrases of an IA-firm new-assignment ping.
+const HIGH_RE = /(^|\n)\s*(re:\s*)?new (claim )?assignment\b|\bnew claim\b|\bfirst contact (within|in)\b|\bare you available to (handle|take|cover)\b|\bcapacity for (a |an )?new\b|\binspection (request|needed|assignment)\b/i;
+const HIGH_XACTWARE_RE = /^new .+ claim/i; // sender-specific, kept subject-only
+const SUPPLEMENT_RE = /\bsupplement(al)?\s+(request|payment)\b|\bcan you supplement\b|\bsupplemental? (claim|estimate|needed|required)\b|\bneed (a |another )?supplement\b/i;
 
-const CORRECTION_KEYWORD_RE = /\b(correction|revis(e|ion|ed)|clarif(y|ication)|rework|kindly correct|please correct|please update)\b/i;
+// Re-inspection: examiner advisory variant ("re-inspection necessary"), or
+// explicit reinspection-request phrasing. Note the optional hyphen/space.
+const REINSP_RE = /\bre[\s-]?inspection (necessary|needed|required|requested)\b|\bre[\s-]?inspect (the|this|that)\b|\bif a re[\s-]?inspection\b|\brequest(ing)? (a |another )?re[\s-]?inspection\b/i;
+
+const CORRECTION_KEYWORD_RE = /\b(correction|revis(e|ion|ed|ing)|clarif(y|ication|ied)|rework|redo and resubmit|kindly correct|please correct|please update|asked (us )?to (revise|redo|correct))\b/i;
 const CLAIM_REF_RE = /\b(claim|file)\s*[#:]?\s*[\w-]{4,}\b/i;
 
 const MEDIUM_XACTWARE_RE = /(Status Has Been Updated|Note Has Been Added|Reviewed with Exceptions)/i;
 const MEDIUM_SLG_RE = /^re:\s*an assignment note/i;
 
-type Tier = "HIGH" | "CORRECTION" | "MEDIUM" | null;
+export type Tier = "HIGH" | "CORRECTION" | "SUPP" | "REINSP" | "MEDIUM" | null;
 
-function classify(fromHeader: string, subject: string): Tier {
+// Exported so dry-run scripts and tests can exercise the same classifier
+// the watcher uses. Subject + body are concatenated upstream via
+// getMatchableText; this function expects the already-combined text.
+export function classify(args: {
+  fromHeader: string;
+  subject: string;
+  matchableText: string;
+}): Tier {
+  const { fromHeader, subject, matchableText } = args;
   const fromLower = (fromHeader || "").toLowerCase();
   const senderEmail = (fromLower.match(/<([^>]+)>/) || [null, fromLower])[1] as string;
 
-  // CORRECTION before HIGH so a "Re: claim 12-1226 please revise" reply from
-  // a known firm domain routes correctly.
-  if (CORRECTION_KEYWORD_RE.test(subject) && CLAIM_REF_RE.test(subject)) {
+  // CORRECTION before everything else - "please revise" wins over "new
+  // claim" if both phrases somehow co-occur.
+  if (CORRECTION_KEYWORD_RE.test(matchableText) && CLAIM_REF_RE.test(matchableText)) {
     return "CORRECTION";
   }
 
+  // SUPP and REINSP are also gated on CLAIM_REF presence to avoid false
+  // positives from generic "we recently updated our supplement policy"
+  // marketing or "needs reinspection" in unrelated contexts.
+  if (SUPPLEMENT_RE.test(matchableText) && CLAIM_REF_RE.test(matchableText)) {
+    return "SUPP";
+  }
+  if (REINSP_RE.test(matchableText) && CLAIM_REF_RE.test(matchableText)) {
+    return "REINSP";
+  }
+
+  // HIGH path - sender-based detection first (works regardless of body),
+  // then content-based on subject+body.
   if (HIGH_PRIORITY_SENDERS.has(senderEmail)) return "HIGH";
   for (const dom of HIGH_PRIORITY_DOMAINS) {
     if (senderEmail.endsWith(dom)) return "HIGH";
   }
   if (senderEmail === "donotreply@xactware.com" && HIGH_XACTWARE_RE.test(subject)) return "HIGH";
-  if (HIGH_SUBJECT_RE.test(subject)) return "HIGH";
-  if (SUPPLEMENT_RE.test(subject)) return "HIGH";
+  if (HIGH_RE.test(matchableText)) return "HIGH";
 
+  // MEDIUM stays subject + sender only. These are XactAnalysis system
+  // notifications and SLG note threads - the relevant signal is in the
+  // subject line alone, body scanning would just add noise.
   if (senderEmail === "donotreply@xactware.com" && MEDIUM_XACTWARE_RE.test(subject)) return "MEDIUM";
   if (senderEmail === "claims@straightlineglobal.com" && MEDIUM_SLG_RE.test(subject)) return "MEDIUM";
 
@@ -181,8 +213,9 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
       continue;
     }
 
-    const tier = classify(fromHeader, subject);
     const body = extractBody(full.data.payload);
+    const matchableText = getMatchableText({ subject, payload: full.data.payload });
+    const tier = classify({ fromHeader, subject, matchableText });
 
     // If no adjuster-pattern match, try the general "outside the adjuster
     // path" importance classifier. This catches grant-writer, tax/CPA, legal,
@@ -257,18 +290,43 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
 
     const snippet = snippetFromBody(body);
 
-    const isCorrection = tier === "CORRECTION";
-    const isHigh = tier === "HIGH" || isCorrection;
-    const title = isCorrection
-      ? `[CORRECTION] ${subject}`
-      : isHigh
-        ? `[NEW] ${subject}`
-        : `[STATUS] ${subject}`;
+    // Tier -> ntfy prefix + priority + tag mapping. HIGH stays priority 5
+    // (action required); SUPP/REINSP/CORRECTION are also priority 5 since
+    // they imply a deliverable; MEDIUM stays priority 3 (informational).
+    let title: string;
+    let priority: number;
+    let tags: string[];
+    switch (tier) {
+      case "CORRECTION":
+        title = `[CORRECTION] ${subject}`;
+        priority = 5;
+        tags = ["pencil2"];
+        break;
+      case "SUPP":
+        title = `[SUPP] ${subject}`;
+        priority = 5;
+        tags = ["heavy_plus_sign"];
+        break;
+      case "REINSP":
+        title = `[REINSP] ${subject}`;
+        priority = 5;
+        tags = ["mag"];
+        break;
+      case "HIGH":
+        title = `[NEW] ${subject}`;
+        priority = 5;
+        tags = ["rotating_light"];
+        break;
+      case "MEDIUM":
+      default:
+        title = `[STATUS] ${subject}`;
+        priority = 3;
+        tags = ["clipboard"];
+        break;
+    }
     const message = `From: ${fromHeader}\n\n${snippet}\n\n[id: ${m.id}]`;
-    const priority = isHigh ? 5 : 3;
-    const tags = isCorrection ? ["pencil2"] : isHigh ? ["rotating_light"] : ["clipboard"];
 
-    console.log(`[claim-monitor] [${tier}] ${fromHeader} — ${subject}`);
+    console.log(`[claim-monitor] [${tier}] ${fromHeader} - ${subject}`);
     await sendNtfy({ title, message, priority, tags });
     alerted.set(m.id, Date.now());
     alerts++;
