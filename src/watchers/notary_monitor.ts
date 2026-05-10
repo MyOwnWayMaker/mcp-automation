@@ -26,14 +26,27 @@ const NTFY_TOPIC = process.env.NOTARY_MONITOR_NTFY_TOPIC || "dino-claims-alerts-
 const NTFY_SERVER = process.env.NOTARY_MONITOR_NTFY_SERVER || "https://ntfy.sh";
 const ALERTED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Tier classification rules
-const AVAILABILITY_RE = /(availab|are you (free|open)|when (can|are|would) you|do you have time|interested in (a |the )?(signing|notar)|open for|can you do (a )?(signing|notar))/i;
+// Tier classification rules. Tuned against real Pickford Escrow emails:
+//   AVAIL example body: "Can you do a loan doc signing tonight around 6:30 pm"
+//   DOC example subject: "[Encrypt] 2800 Veteran Ave Loan Doc Signing for Escrow No. 10152-MK"
+//   DOC example body:    "Rochelle Singh has sent you a protected message"
+const AVAILABILITY_RE = /(availab|are you (free|open|able)|when (can|are|would) you|do you have time|interested in (a |the )?(signing|notar)|open for|can you do .{0,40}?(signing|notar)|are you (taking|booking)|any (chance|interest)|do you cover|able to (do|cover|take))/i;
 
-const DOCUMENT_SUBJECT_RE = /(loan signing|signing assignment|signing request|loan document|signing package|borrower (doc|sign)|appointment (confirm|details)|signing details|new (loan )?signing|signing order|notary (assignment|order|request)|escrow (doc|signing))/i;
+// Subject-side document signals. Also matches "Loan Doc Signing", "loan doc",
+// "Escrow No.", and the [Encrypt] / [Encrypted] prefix that secure-portal
+// agencies (Pickford, etc.) tag their document deliveries with.
+const DOCUMENT_SUBJECT_RE = /(\[encrypt(ed)?\]|loan (doc[a-z ]* )?signing|signing assignment|signing request|loan document|signing package|borrower (doc|sign)|appointment (confirm|details)|signing details|new (loan )?signing|signing order|notary (assignment|order|request)|escrow (doc|signing|no\.?\s*\d)|doc(s|ument)?\s+(ready|attached|signing))/i;
+
+// Body-side document signals. Microsoft Purview / Office 365 encrypted-email
+// delivery (Pickford uses this) produces a body with "protected message" — no
+// Gmail attachment but still a document delivery. Also catches generic
+// attachment-language for agencies that just paste docs inline.
+const DOCUMENT_BODY_RE = /(protected message|sent you a (protected|secure|encrypted) message|please find (attached|the attached)|attached (are|please find|is) the (loan|signing|borrower|closing) (doc|package)|here are the (signing |loan )?documents|signing instructions|borrower(s)? are)/i;
 
 // Common signing-service / agency sender patterns. Useful as a hint that
 // "we got something from a real agency" even when the subject is generic.
 const KNOWN_NOTARY_AGENCY_DOMAINS = [
+  "pickfordescrow.com",  // Hakiel's primary escrow agency
   "snapdocs.com",
   "signingorder.com",
   "notarycafe.com",
@@ -84,30 +97,43 @@ function isFromKnownAgency(fromHeader: string): boolean {
 function classify(args: {
   fromHeader: string;
   subject: string;
+  body: string;
   hasAttachment: boolean;
 }): NotaryTier {
-  const { fromHeader, subject, hasAttachment } = args;
+  const { fromHeader, subject, body, hasAttachment } = args;
 
   if (isMarketing(subject)) return null;
   if (isReceipt(subject)) return null;
 
-  // Document tier: any email with a PDF/doc attachment from a non-noreply
-  // sender, OR a subject that strongly signals signing assignment.
-  const subjectSignalsDocs = DOCUMENT_SUBJECT_RE.test(subject);
-  if (hasAttachment && !isNoReply(fromHeader)) return "DOC";
-  if (subjectSignalsDocs) return "DOC";
+  const noReply = isNoReply(fromHeader);
+  const fromAgency = isFromKnownAgency(fromHeader);
 
-  // Availability tier: subject/body asks about availability + sender looks
-  // like a real human or a known agency mailbox.
-  if (AVAILABILITY_RE.test(subject)) {
-    if (!isNoReply(fromHeader) || isFromKnownAgency(fromHeader)) return "AVAIL";
-  }
+  // Strong DOC signals: explicit attachment, encrypted-portal delivery, or
+  // body language that reads "here are the docs". These win over availability
+  // language because by the time docs arrive the availability question is
+  // already settled.
+  if (hasAttachment && !noReply) return "DOC";
+  if (/\[encrypt(ed)?\]/i.test(subject)) return "DOC";
+  if (DOCUMENT_BODY_RE.test(body) && (!noReply || fromAgency)) return "DOC";
+
+  // Availability tier: question phrasing in EITHER subject or body. Sender
+  // must be a real human or a known agency mailbox (skip generic noreply
+  // newsletters that happen to contain the word "available").
+  const asksAvailability = AVAILABILITY_RE.test(subject) || AVAILABILITY_RE.test(body);
+  if (asksAvailability && (!noReply || fromAgency)) return "AVAIL";
+
+  // Weaker DOC signal: subject mentions signing-related keywords but body
+  // doesn't ask for availability. Common when an agency replies with the
+  // documents in the same thread as the original "are you available" subject
+  // and the encrypted-portal marker isn't present (rare but possible).
+  if (DOCUMENT_SUBJECT_RE.test(subject) && (!noReply || fromAgency)) return "DOC";
 
   return null;
 }
 
 // In-memory state
-const alerted: Map<string, number> = new Map();
+const alerted: Map<string, number> = new Map();        // msg ID -> ts
+const alertedThreadTier: Map<string, number> = new Map(); // `${threadId}:${tier}` -> ts
 let started_at = 0;
 let pollInFlight = false;
 
@@ -115,6 +141,9 @@ function pruneAlerted() {
   const cutoff = Date.now() - ALERTED_TTL_MS;
   for (const [id, ts] of alerted) {
     if (ts < cutoff) alerted.delete(id);
+  }
+  for (const [key, ts] of alertedThreadTier) {
+    if (ts < cutoff) alertedThreadTier.delete(key);
   }
 }
 
@@ -141,13 +170,20 @@ function snippetFromBody(body: string, limit = 220): string {
 
 function hasMeaningfulAttachment(payload: any): boolean {
   if (!payload) return false;
-  // Recursive check: any part with a non-empty filename + attachmentId,
-  // and the filename has a recognizable doc extension.
+  // Doc-like extensions only. Image extensions (.png/.jpg/.tif) are excluded
+  // intentionally - they're almost always inline signature graphics
+  // (cid:image001.png@... etc), not signing documents. Real signing packets
+  // are PDFs ~95% of the time, occasionally .doc/.docx/.zip.
   function walk(p: any): boolean {
     if (!p) return false;
     const filename = (p.filename || "").toLowerCase();
     const hasAtt = Boolean(p.body?.attachmentId);
-    if (filename && hasAtt && /\.(pdf|doc|docx|tif|tiff|jpg|jpeg|png|zip)$/.test(filename)) {
+    if (filename && hasAtt && /\.(pdf|doc|docx|zip)$/.test(filename)) {
+      // Also require Content-Disposition: attachment when present, to skip
+      // PDFs that are linked inline in HTML (rare but possible).
+      const headers = p.headers || [];
+      const disposition = headers.find((h: any) => h.name?.toLowerCase() === "content-disposition")?.value || "";
+      if (disposition && /inline/i.test(disposition)) return false;
       return true;
     }
     if (Array.isArray(p.parts)) {
@@ -225,14 +261,25 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     }
 
     const hasAttachment = hasMeaningfulAttachment(full.data.payload);
-    const tier = classify({ fromHeader, subject, hasAttachment });
+    const body = extractBody(full.data.payload);
+    const tier = classify({ fromHeader, subject, body, hasAttachment });
 
     if (!tier) {
       alerted.set(m.id, Date.now());
       continue;
     }
 
-    const body = extractBody(full.data.payload);
+    // Per-thread per-tier dedup: don't re-ping the same tier within an
+    // already-active thread. New tier on existing thread (e.g. AVAIL fired
+    // earlier, now DOC arrives) DOES ping - that's a real state change.
+    const threadId = full.data.threadId || m.id;
+    const threadTierKey = `${threadId}:${tier}`;
+    if (alertedThreadTier.has(threadTierKey)) {
+      console.log(`[notary-monitor] [${tier}] skip (thread already alerted at this tier) - ${subject}`);
+      alerted.set(m.id, Date.now());
+      continue;
+    }
+
     const snippet = snippetFromBody(body);
 
     const title = tier === "DOC"
@@ -245,6 +292,7 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     console.log(`[notary-monitor] [${tier}] ${fromHeader} - ${subject}`);
     await sendNtfy({ title, message, priority, tags });
     alerted.set(m.id, Date.now());
+    alertedThreadTier.set(threadTierKey, Date.now());
     alerts++;
   }
 
