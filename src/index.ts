@@ -51,6 +51,7 @@ import { agentRollUpLogs } from "./tools/local.js";
 import { xactListAssignments, xactGetAssignment, xactUpdateDates, xactUpdateWorkflowStatus, xactAddNote, xactGetNotes, xactDeleteNote, xactSetPlannedInspectionDate, xactFindAssignmentByClaim, xactFindAssignmentByName } from "./tools/xactanalysis.js";
 import { qbFindCustomer, qbCreateCustomer, qbUpdateCustomer, qbFindVendor, qbCreateVendor, qbFindInvoice, qbCreateInvoice, qbSendInvoice, qbVoidInvoice, qbUpdateInvoice, qbCreateExpense, qbFindExpenses, qbCreatePayment, qbFindPayments, qbProfitAndLoss, qbCashFlow, qbBalanceSheet } from "./tools/quickbooks.js";
 import { voiceListThreads, voiceGetThread, voiceDumpHtml, voiceSearchMessages, voiceGetVoicemails, voiceSendSms } from "./tools/voice.js";
+import { buildNowPayload } from "./util/now.js";
 
 // ─── Tool Definitions ──────────────────────────────────────────────────────────
 
@@ -487,6 +488,15 @@ if (PORT) {
   });
 
   app.get("/health", (_req, res) => res.json({ status: "ok", tools: TOOLS.length }));
+
+  // Public time endpoint. No auth, no DB, no background work — just a clock.
+  // Used by Dispatch (via http_request) when its bash sandbox is unavailable
+  // and it cannot run `date` itself. See src/util/now.ts.
+  app.get("/now", (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cache-Control", "no-store");
+    res.json(buildNowPayload());
+  });
 
   // QuickBooks OAuth callback — used during production auth flow
   app.get("/qb-callback", async (req, res) => {

@@ -67,3 +67,28 @@ Use the `http_request` tool for any REST API:
 ```
 
 For persistent custom integrations, add a new file in `src/tools/` and register it in `src/index.ts`.
+
+---
+
+## Endpoints
+
+When deployed in HTTP mode (Railway), the server exposes a few public HTTP routes alongside the MCP `/sse` + `/messages` transport:
+
+```
+GET /now
+  Returns current time + date in UTC + Pacific.
+  Public, no auth. Used by Dispatch when its bash sandbox is unavailable.
+
+GET /health
+  Returns { status: "ok", tools: <count> }. Liveness probe.
+
+GET /diagnose
+  Reports which auth env vars are set and whether Google + Notary Gmail
+  clients can reach the API. Public; values are presence-only, not secrets.
+
+GET /qb-callback
+  QuickBooks OAuth redirect target. Used during the initial auth flow only.
+```
+
+The deployed base URL is `https://mcp-automation-production.up.railway.app`.
+
