@@ -53,6 +53,17 @@ function getAspCredentials(companyIndex?: number): { aspBase: string; aspCookies
   if (perCompany?.aspBase && perCompany?.aspCookies) {
     return { aspBase: perCompany.aspBase, aspCookies: perCompany.aspCookies };
   }
+  // SAFETY (2026-05-18): only fall back to the top-level session for the
+  // DEFAULT/Premier case (companyIndex undefined or 1). For any explicitly
+  // requested non-Premier company we must NOT hand back Premier's host —
+  // doing so silently posted USCS (company 3) notes to claims.filetrac.net
+  // (Premier) and made verify-after-write read the wrong company's diary.
+  // FileTrac notes are permanent + client-visible, so a wrong-company write
+  // is unrecoverable. Return empty so callers error loudly ("run
+  // filetrac_refresh_session with company_index=N") rather than mis-post.
+  if (companyIndex !== undefined && companyIndex !== 1) {
+    return { aspBase: "", aspCookies: "" };
+  }
   // Fall back to top-level (Premier Claims / company 1)
   return {
     aspBase: session.aspBase ?? "",
@@ -587,9 +598,11 @@ export async function filetracGetClaim(args: {
   const claimPath = `/system/claimView.asp?claimID=${args.claim_id}`;
 
   // ── Fast path: use cached ASP session cookie (skips 30s browser flow) ──
-  const session = loadSession();
-  if (session.aspBase && session.aspCookies) {
-    const html = await fetchAspPage(session.aspBase, session.aspCookies, claimPath);
+  // Must resolve PER-COMPANY (was using raw session.aspBase = always Premier,
+  // ignoring company_index — the USCS misrouting bug).
+  const { aspBase: fcAspBase, aspCookies: fcAspCookies } = getAspCredentials(args.company_index);
+  if (fcAspBase && fcAspCookies) {
+    const html = await fetchAspPage(fcAspBase, fcAspCookies, claimPath);
     // Require at least 2 of 4 claim-specific markers — single marker can appear on nav/error pages
     const claimMarkers = [
       html?.includes("claimFileID"),
@@ -740,10 +753,12 @@ export async function filetracAddNote(args: {
   // If only claim_id provided, look up the file number
   let fileNumber = args.file_number ?? "";
   if (!fileNumber && args.claim_id) {
-    // Fast path: fetch static HTML and search for claimFID= in navigation links
-    const session = loadSession();
-    if (session.aspBase && session.aspCookies) {
-      const claimHtml = await fetchAspPage(session.aspBase, session.aspCookies,
+    // Fast path: fetch static HTML and search for claimFID= in navigation
+    // links. Must use the PER-COMPANY host (was raw session.aspBase = always
+    // Premier — looked up the USCS claim's file number on the wrong backend).
+    const { aspBase: lkAspBase, aspCookies: lkAspCookies } = getAspCredentials(args.company_index);
+    if (lkAspBase && lkAspCookies) {
+      const claimHtml = await fetchAspPage(lkAspBase, lkAspCookies,
         `/system/claimView.asp?claimID=${args.claim_id}`);
       if (claimHtml) fileNumber = extractFileNumber(claimHtml);
     }
