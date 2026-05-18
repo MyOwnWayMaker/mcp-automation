@@ -49,6 +49,12 @@ const HIGH_PRIORITY_SENDERS = new Set([
 const HIGH_PRIORITY_DOMAINS = [
   "@usclaimsolutions.co",
   "@straightlineglobal.com",
+  // IANet (IA Network). New assignments come from Assignments@ianetwork.net
+  // with subject "New IAnet Assignment File ID: … | Claim Number: … |
+  // Carrier: …". Captured from File ID 1395132 / claim R23723743 on
+  // 2026-05-18. Sender-based so it fires [NEW] regardless of subject phrasing
+  // (HIGH_RE's "new (claim )?assignment" does NOT match "New IAnet Assignment").
+  "@ianetwork.net",
 ];
 
 // HIGH_RE (formerly HIGH_SUBJECT_RE) is now applied to subject+body via
