@@ -32,6 +32,9 @@ import { getMatchableText } from "../util/email_text.js";
 const POLL_INTERVAL_MS = 60_000;
 const NTFY_TOPIC = process.env.CLAIM_MONITOR_NTFY_TOPIC || "dino-claims-alerts-fpx";
 const NTFY_SERVER = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+// The monitored mailbox itself. Outbound mail (sent items, drafts) from this
+// address must never produce an alert — alerts are for INBOUND only.
+const SELF_ADDRESS = (process.env.CLAIM_MONITOR_SELF_ADDRESS || "hakiel.mcqueen@erseville.com").toLowerCase();
 const ALERTED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ── Filter rules (mirror scripts/claim-monitor.mjs — keep these in sync) ────
@@ -57,6 +60,16 @@ const HIGH_RE = /(^|\n)\s*(re:\s*)?new (claim )?assignment\b|\bnew claim\b|\bfir
 const HIGH_XACTWARE_RE = /^new .+ claim/i; // sender-specific, kept subject-only
 const SUPPLEMENT_RE = /\bsupplement(al)?\s+(request|payment)\b|\bcan you supplement\b|\bsupplemental? (claim|estimate|needed|required)\b|\bneed (a |another )?supplement\b/i;
 
+// An XA "Assignment Note Has Been Added" carrying a contractor/reconstruction
+// estimate with a request to revise the carrier estimate is a SUPPLEMENT in
+// Hakiel's taxonomy (it produces a supplement deliverable + a (supplement)
+// Drive folder) — NOT a generic CORRECTION. CORRECTION_KEYWORD_RE matches the
+// bare word "revise" and is checked first, so without this the Grove-type
+// note (2026-05-15, claim KWSKWS26030053) silently tiered as [CORRECTION].
+// This pattern is estimate-specific so it does NOT swallow genuine
+// "revise the report/photos/narrative" corrections on a submitted report.
+const SUPP_ESTIMATE_RE = /\b(revise|review and revise|adjust|update)\b[^.\n]{0,40}\bestimate\b|\b(reconstruction|contractor'?s?|reconstruction repair) estimate\b|\bapproval of the attached\b[^.\n]{0,60}\bestimate\b|\bnotes? from the contractor\b/i;
+
 // Re-inspection: examiner advisory variant ("re-inspection necessary"), or
 // explicit reinspection-request phrasing. Note the optional hyphen/space.
 const REINSP_RE = /\bre[\s-]?inspection (necessary|needed|required|requested)\b|\bre[\s-]?inspect (the|this|that)\b|\bif a re[\s-]?inspection\b|\brequest(ing)? (a |another )?re[\s-]?inspection\b/i;
@@ -80,6 +93,14 @@ export function classify(args: {
   const { fromHeader, subject, matchableText } = args;
   const fromLower = (fromHeader || "").toLowerCase();
   const senderEmail = (fromLower.match(/<([^>]+)>/) || [null, fromLower])[1] as string;
+
+  // Supplemental-estimate requests (contractor/reconstruction estimate +
+  // "revise the estimate") are SUPP, not CORRECTION — checked first so the
+  // broad "revise" in CORRECTION_KEYWORD_RE doesn't capture them. Still
+  // gated on CLAIM_REF to avoid marketing false positives.
+  if (SUPP_ESTIMATE_RE.test(matchableText) && CLAIM_REF_RE.test(matchableText)) {
+    return "SUPP";
+  }
 
   // CORRECTION before everything else - "please revise" wins over "new
   // claim" if both phrases somehow co-occur.
@@ -187,9 +208,14 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
   const auth = await getGoogleAuthClient();
   const gmail = google.gmail({ version: "v1", auth });
 
+  // -in:sent -in:drafts -in:chats keeps outbound mail (Hakiel's own replies
+  // and unsent drafts) out of the scan entirely. Without this, gmail.list
+  // over userId:me returns SENT + DRAFT messages too, which is exactly how
+  // outbound replies were leaking into [CORRECTION]/[IMPORTANT] alerts and
+  // even getting auto-drafted replies. Mirrors notary_monitor's query.
   const list = await gmail.users.messages.list({
     userId: "me",
-    q: "newer_than:1d",
+    q: "newer_than:1d -in:sent -in:drafts -in:chats",
     maxResults: 30,
   });
   const messages = list.data.messages || [];
@@ -209,6 +235,15 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     // Skip emails older than the watcher's started_at (avoids backfilling old
     // inbox on first run / after a Railway redeploy).
     if (internalDate < started_at) {
+      alerted.set(m.id, Date.now());
+      continue;
+    }
+
+    // Belt-and-suspenders: even with -in:sent -in:drafts on the query, skip
+    // anything whose From is the monitored mailbox itself (loopback / send-to-
+    // self / list reflections). Outbound never alerts.
+    const senderAddr = (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).trim().toLowerCase();
+    if (senderAddr === SELF_ADDRESS) {
       alerted.set(m.id, Date.now());
       continue;
     }
