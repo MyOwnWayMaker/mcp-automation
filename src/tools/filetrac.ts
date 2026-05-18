@@ -894,10 +894,26 @@ export async function filetracAddNote(args: {
       // Step 3: post-write read (verification)
       // Run regardless of HTTP status — FileTrac returns 500 on successful commits.
       if (canVerify) {
-        const post = await fetchDiaryEntries(fastAspBase, aspCookies, args.claim_id!);
+        // Post-read WITH RETRY. FileTrac's comments.asp can lag a few seconds
+        // before a just-posted entry is indexed/rendered — reading once
+        // immediately produced a false "POST RETURNED BUT NOTE NOT FOUND"
+        // even though the note landed (Red Nova 4304750, USCS, 2026-05-18:
+        // diary 29→31, note present on explicit re-read). Re-reading is
+        // read-only and safe, so retry up to 4x with backoff before
+        // concluding anything. Stop as soon as the new entry is seen.
+        let post = await fetchDiaryEntries(fastAspBase, aspCookies, args.claim_id!);
         if (post.ok) {
-          const postMatchCount = findEntriesMatchingNote(post.entries, args.note).length;
-          const newMatches = postMatchCount - preMatchCount;
+          let postMatchCount = findEntriesMatchingNote(post.entries, args.note).length;
+          let newMatches = postMatchCount - preMatchCount;
+          for (let attempt = 2; attempt <= 4 && newMatches < 1; attempt++) {
+            await new Promise(r => setTimeout(r, 2000 * (attempt - 1))); // 2s, 4s, 6s
+            const retry = await fetchDiaryEntries(fastAspBase, aspCookies, args.claim_id!);
+            if (retry.ok) {
+              post = retry;
+              postMatchCount = findEntriesMatchingNote(post.entries, args.note).length;
+              newMatches = postMatchCount - preMatchCount;
+            }
+          }
           const httpStatusLine = `HTTP status: ${result.status}${result.ok && result.status < 400 ? " (success)" : " (note: FileTrac often returns 500 on successful commits)"}`;
 
           if (newMatches === 1) {
