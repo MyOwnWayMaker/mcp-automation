@@ -284,7 +284,20 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     const body = extractBody(full.data.payload);
     const tier = classify({ fromHeader, subject, body, hasAttachment });
 
-    if (!tier) {
+    // Primary agencies (Pickford today) get a distinctive prefix + star tag
+    // so they stand out in the lock-screen list. Other agencies use the
+    // generic [NOTARY-*] prefix.
+    const primary = primaryAgencyName(fromHeader);
+
+    // Primary-agency catch-all: Hakiel never wants to miss ANYTHING from his
+    // #1 client. If the email didn't classify as AVAIL/DOC but it's from a
+    // primary-agency domain (pickfordescrow.com), still alert under a generic
+    // "MSG" tier instead of silently dropping it. (This is why the 2026-05-15
+    // "Same Team, New Location" Pickford email was missed — it was neither an
+    // availability inquiry nor a doc delivery, so classify() returned null.)
+    // Non-primary senders keep the original selective behavior.
+    const effTier: string | null = tier ?? (primary ? "MSG" : null);
+    if (!effTier) {
       alerted.set(m.id, Date.now());
       continue;
     }
@@ -293,34 +306,33 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     // already-active thread. New tier on existing thread (e.g. AVAIL fired
     // earlier, now DOC arrives) DOES ping - that's a real state change.
     const threadId = full.data.threadId || m.id;
-    const threadTierKey = `${threadId}:${tier}`;
+    const threadTierKey = `${threadId}:${effTier}`;
     if (alertedThreadTier.has(threadTierKey)) {
-      console.log(`[notary-monitor] [${tier}] skip (thread already alerted at this tier) - ${subject}`);
+      console.log(`[notary-monitor] [${effTier}] skip (thread already alerted at this tier) - ${subject}`);
       alerted.set(m.id, Date.now());
       continue;
     }
 
     const snippet = snippetFromBody(body);
 
-    // Primary agencies (Pickford today) get a distinctive prefix + star tag
-    // so they stand out in the lock-screen list. Other agencies use the
-    // generic [NOTARY-*] prefix.
-    const primary = primaryAgencyName(fromHeader);
-    const tierPart = primary ? `${primary}-${tier}` : tier;
+    const tierPart = primary ? `${primary}-${effTier}` : effTier;
     const title = `[NOTARY-${tierPart}] ${subject}`;
     const message = `From: ${fromHeader}\n${hasAttachment ? "(has attachment)\n" : ""}\n${snippet}\n\n[id: ${m.id}]`;
-    // Always max priority for primary agencies regardless of tier - even
-    // their availability inquiries are time-sensitive ("can you do it
-    // tonight" loses value by morning).
-    const priority = primary ? 5 : (tier === "DOC" ? 5 : 4);
-    const baseTag = tier === "DOC" ? "page_facing_up" : "calendar";
+    // Primary-agency AVAIL/DOC stay max priority (time-sensitive — "can you
+    // do it tonight" loses value by morning). The MSG catch-all is priority 4
+    // (visible, not alarm) since it's general correspondence, not a job.
+    const priority = effTier === "MSG" ? 4 : (primary ? 5 : (effTier === "DOC" ? 5 : 4));
+    const baseTag = effTier === "DOC" ? "page_facing_up" : effTier === "MSG" ? "incoming_envelope" : "calendar";
     const tags = primary ? ["star", baseTag] : [baseTag];
 
     // For Pickford, fire the auto-drafter alongside the alert. The drafter
     // creates a Gmail draft on this thread that Hakiel reviews + sends
     // manually. Ntfy gets a draft-status line so he knows what landed.
+    // Auto-drafter only runs for real AVAIL/DOC jobs — never for the MSG
+    // catch-all (it can't extract a date/time from a relocation notice, and
+    // createPickfordDraft's tier param is "AVAIL"|"DOC" only).
     let draftLine = "";
-    if (primary === "PICKFORD") {
+    if (primary === "PICKFORD" && (tier === "AVAIL" || tier === "DOC")) {
       const messageIdHeader = get("Message-ID") || get("Message-Id") || get("message-id");
       const ccHeader = get("Cc");
       const receivedIso = new Date(internalDate).toISOString();
