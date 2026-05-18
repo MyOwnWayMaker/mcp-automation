@@ -19,7 +19,7 @@ import {
 import express from "express";
 
 // Tool implementations
-import { gmailSendEmail, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
+import { gmailSendEmail, gmailCreateDraft, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
 import { startClaimMonitor } from "./watchers/claim_monitor.js";
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
@@ -58,6 +58,7 @@ import { buildNowPayload } from "./util/now.js";
 const TOOLS: Tool[] = [
   // Gmail
   { name: "gmail_send_email", description: "Send an email via Gmail", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" } }, required: ["to", "subject", "body"] } },
+  { name: "gmail_create_draft", description: "Create a Gmail DRAFT (does NOT send) so Hakiel can review/edit in his Gmail compose window before sending. Same params as gmail_send_email plus optional bcc. Returns the draft ID, message ID, and a deep link to open the draft in the Gmail web UI. Use this instead of gmail_send_email whenever a human should review before send.", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" }, bcc: { type: "string" } }, required: ["to", "subject", "body"] } },
   { name: "gmail_find_email", description: "Search for emails using Gmail search syntax", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
   { name: "gmail_get_email", description: "Get full content of an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "gmail_reply_to_email", description: "Reply to an existing email thread", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
@@ -261,6 +262,7 @@ const TOOLS: Tool[] = [
 async function callTool(name: string, args: Record<string, unknown>) {
   switch (name) {
     case "gmail_send_email": return gmailSendEmail(args as any);
+    case "gmail_create_draft": return gmailCreateDraft(args as any);
     case "gmail_find_email": return gmailFindEmail(args as any);
     case "gmail_get_email": return gmailGetEmail(args as any);
     case "gmail_reply_to_email": return gmailReplyToEmail(args as any);

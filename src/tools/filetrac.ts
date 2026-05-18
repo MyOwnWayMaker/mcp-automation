@@ -1410,7 +1410,15 @@ export async function filetracGetNotes(args: {
     }
 
     // ── Step 2: Direct URL patterns using the established browser session ──
-    const diaryUrls: string[] = [];
+    // comments.asp?claimID= is the canonical diary URL — identical path across
+    // ALL FileTrac backends (claims.filetrac.net AND data.filetrac.net/USCS),
+    // keyed on claimID not the file number. It was only tried on the fast
+    // path; on non-Premier companies the fast path is (correctly) skipped, so
+    // the browser path MUST try it too or USCS diary reads return 0 notes and
+    // verify-after-write silently breaks. Tried first as the known-good URL.
+    const diaryUrls: string[] = [
+      `${aspBase}/system/comments.asp?claimID=${args.claim_id}`,
+    ];
     if (browserFileNum) {
       diaryUrls.push(
         `${aspBase}/system/quickNotes.asp?claimFID=${browserFileNum}`,

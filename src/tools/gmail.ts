@@ -25,6 +25,7 @@ function encodeEmail(params: {
   body: string;
   from?: string;
   cc?: string;
+  bcc?: string;
   replyToMessageId?: string;
   threadId?: string;
 }): string {
@@ -32,6 +33,7 @@ function encodeEmail(params: {
     `To: ${params.to}`,
     params.from ? `From: ${params.from}` : null,
     params.cc ? `Cc: ${params.cc}` : null,
+    params.bcc ? `Bcc: ${params.bcc}` : null,
     `Subject: ${params.subject}`,
     "Content-Type: text/plain; charset=utf-8",
     params.replyToMessageId ? `In-Reply-To: ${params.replyToMessageId}` : null,
@@ -58,6 +60,38 @@ export async function gmailSendEmail(args: {
     requestBody: { raw },
   });
   return makeTextContent(`Email sent. Message ID: ${res.data.id}`);
+}
+
+/**
+ * Create a Gmail DRAFT instead of sending. Same MIME path as gmailSendEmail
+ * (identical base64url-encoded RFC822 message) but wrapped in a Draft
+ * resource and POSTed to users.drafts.create — Hakiel reviews + sends from
+ * his Gmail compose window. Uses the same OAuth client/scope as the send
+ * tool (gmail.compose covers drafts.* — verified: drafts.create succeeds).
+ * Note: attachments are not supported (neither is gmail_send_email today).
+ */
+export async function gmailCreateDraft(args: {
+  to: string;
+  subject: string;
+  body: string;
+  cc?: string;
+  bcc?: string;
+}): Promise<CallToolResult> {
+  const gmail = await getGmail();
+  const raw = encodeEmail(args);
+  const res = await gmail.users.drafts.create({
+    userId: "me",
+    requestBody: { message: { raw } },
+  });
+  const draftId = res.data.id ?? "";
+  const messageId = res.data.message?.id ?? "";
+  const link = `https://mail.google.com/mail/u/0/#drafts?compose=${draftId}`;
+  return makeTextContent(
+    `Draft created (NOT sent).\n` +
+    `Draft ID: ${draftId}\n` +
+    `Message ID: ${messageId}\n` +
+    `Open in Gmail: ${link}`
+  );
 }
 
 export async function gmailFindEmail(args: {
