@@ -75,7 +75,13 @@ const SUPP_ESTIMATE_RE = /\b(revise|review and revise|adjust|update)\b[^.\n]{0,4
 const REINSP_RE = /\bre[\s-]?inspection (necessary|needed|required|requested)\b|\bre[\s-]?inspect (the|this|that)\b|\bif a re[\s-]?inspection\b|\brequest(ing)? (a |another )?re[\s-]?inspection\b/i;
 
 const CORRECTION_KEYWORD_RE = /\b(correction|revis(e|ion|ed|ing)|clarif(y|ication|ied)|rework|redo and resubmit|kindly correct|please correct|please update|asked (us )?to (revise|redo|correct))\b/i;
-const CLAIM_REF_RE = /\b(claim|file)\s*[#:]?\s*[\w-]{4,}\b/i;
+// Was /\b(claim|file)\s*[#:]?\s*[\w-]{4,}\b/i — the single optional [#:]?
+// could not span XactAnalysis's "Claim #:" (both '#' AND ':' plus spaces),
+// so XA assignment-note emails NEVER satisfied CLAIM_REF and always fell
+// through SUPP/CORRECTION to MEDIUM/[STATUS]. That is the true reason the
+// Grove supplement (2026-05-15) silently fell through. Now tolerates
+// "Claim #:", "Claim#", "File No.:", "File Number -", etc.
+const CLAIM_REF_RE = /\b(claim|file)\s*(?:no\.?|number)?[\s#:.\-]*[\w-]{4,}\b/i;
 
 const MEDIUM_XACTWARE_RE = /(Status Has Been Updated|Note Has Been Added|Reviewed with Exceptions)/i;
 const MEDIUM_SLG_RE = /^re:\s*an assignment note/i;
