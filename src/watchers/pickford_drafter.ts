@@ -155,7 +155,7 @@ async function extractAppointment(args: {
   const genAI = getGenAI();
   if (!genAI) return null;
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash",
     generationConfig: { temperature: 0.1 },
   });
   const prompt = `Extract notary signing appointment details from the email below.
@@ -252,7 +252,7 @@ async function draftReplyForAvail(args: {
   const genAI = getGenAI();
   if (!genAI) return null;
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash",
     generationConfig: { temperature: 0.3 },
   });
 

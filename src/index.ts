@@ -147,7 +147,7 @@ const TOOLS: Tool[] = [
   { name: "hubspot_create_note", description: "Create a note in HubSpot, optionally linked to a contact or deal", inputSchema: { type: "object", properties: { body: { type: "string" }, contact_id: { type: "string" }, deal_id: { type: "string" } }, required: ["body"] } },
 
   // Gemini
-  { name: "gemini_send_prompt", description: "Send a prompt to Google Gemini and get a response", inputSchema: { type: "object", properties: { prompt: { type: "string" }, model: { type: "string", description: "Model to use (default: gemini-2.0-flash)" }, system_instruction: { type: "string" } }, required: ["prompt"] } },
+  { name: "gemini_send_prompt", description: "Send a prompt to Google Gemini and get a response", inputSchema: { type: "object", properties: { prompt: { type: "string" }, model: { type: "string", description: "Model to use (default: gemini-2.5-flash)" }, system_instruction: { type: "string" } }, required: ["prompt"] } },
   { name: "gemini_chat", description: "Have a multi-turn conversation with Google Gemini", inputSchema: { type: "object", properties: { messages: { type: "array", items: { type: "object", properties: { role: { type: "string", enum: ["user", "model"] }, content: { type: "string" } }, required: ["role", "content"] } }, model: { type: "string" }, system_instruction: { type: "string" } }, required: ["messages"] } },
   { name: "gemini_analyze_text", description: "Ask Gemini to analyze or transform a piece of text", inputSchema: { type: "object", properties: { text: { type: "string" }, task: { type: "string", description: "What to do with the text (e.g. 'summarize', 'translate to Spanish', 'extract action items')" }, model: { type: "string" } }, required: ["text", "task"] } },
 

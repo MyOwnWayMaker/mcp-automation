@@ -18,7 +18,7 @@ export async function geminiSendPrompt(args: {
 }): Promise<CallToolResult> {
   const genAI = getClient();
   const model = genAI.getGenerativeModel({
-    model: args.model ?? "gemini-2.0-flash",
+    model: args.model ?? "gemini-2.5-flash",
     ...(args.system_instruction && { systemInstruction: args.system_instruction }),
   });
 
@@ -33,7 +33,7 @@ export async function geminiChat(args: {
 }): Promise<CallToolResult> {
   const genAI = getClient();
   const model = genAI.getGenerativeModel({
-    model: args.model ?? "gemini-2.0-flash",
+    model: args.model ?? "gemini-2.5-flash",
     ...(args.system_instruction && { systemInstruction: args.system_instruction }),
   });
 
@@ -54,7 +54,7 @@ export async function geminiAnalyzeText(args: {
   model?: string;
 }): Promise<CallToolResult> {
   const genAI = getClient();
-  const model = genAI.getGenerativeModel({ model: args.model ?? "gemini-2.0-flash" });
+  const model = genAI.getGenerativeModel({ model: args.model ?? "gemini-2.5-flash" });
 
   const prompt = `${args.task}\n\nText to analyze:\n${args.text}`;
   const result = await model.generateContent(prompt);
