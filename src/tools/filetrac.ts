@@ -529,6 +529,40 @@ async function getFiletracPage(companyIndex = 0): Promise<{
   return { browser, page, aspBase };
 }
 
+/**
+ * Resolve per-company ASP creds for the HTTP fast path. Tries the cached
+ * session first (getAspCredentials). If a NON-Premier company has no cached
+ * creds (the Railway persistence gap — refresh_session writes a local file
+ * but loadSession reads the env var, so per-company creds never persist in
+ * prod), fall back to launching a live browser session for that company,
+ * capturing its aspBase + cookies in-process, and returning them. This lets
+ * the existing read-write-read POST sandwich operate on the CORRECT backend
+ * (e.g. data.filetrac.net for USCS) without depending on persisted creds.
+ * Returns empty only if even the live capture fails.
+ */
+async function resolveAspCredentials(companyIndex?: number): Promise<{ aspBase: string; aspCookies: string }> {
+  const cached = getAspCredentials(companyIndex);
+  if (cached.aspBase && cached.aspCookies) return cached;
+  // Premier / default already covered by getAspCredentials' top-level fallback.
+  if (companyIndex === undefined || companyIndex === 1) return cached;
+  // Non-Premier with no cached creds → capture live from the browser session.
+  let browser: Browser | undefined;
+  try {
+    const live = await getFiletracPage(companyIndex);
+    browser = live.browser;
+    const cookies = await live.page.context().cookies();
+    const aspCookies = cookies
+      .filter(c => c.domain.includes(new URL(live.aspBase).hostname))
+      .map(c => `${c.name}=${c.value}`)
+      .join("; ");
+    return { aspBase: live.aspBase, aspCookies };
+  } catch {
+    return { aspBase: "", aspCookies: "" };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
 export async function filetracListClaims(args: {
   company_index?: number;
   max_results?: number;
@@ -756,7 +790,7 @@ export async function filetracAddNote(args: {
     // Fast path: fetch static HTML and search for claimFID= in navigation
     // links. Must use the PER-COMPANY host (was raw session.aspBase = always
     // Premier — looked up the USCS claim's file number on the wrong backend).
-    const { aspBase: lkAspBase, aspCookies: lkAspCookies } = getAspCredentials(args.company_index);
+    const { aspBase: lkAspBase, aspCookies: lkAspCookies } = await resolveAspCredentials(args.company_index);
     if (lkAspBase && lkAspCookies) {
       const claimHtml = await fetchAspPage(lkAspBase, lkAspCookies,
         `/system/claimView.asp?claimID=${args.claim_id}`);
@@ -802,7 +836,7 @@ export async function filetracAddNote(args: {
   //      diary. HTTP status alone is unreliable (FileTrac frequently returns 500
   //      on commits that succeeded server-side).
   try {
-    const { aspBase: fastAspBase, aspCookies } = getAspCredentials(args.company_index);
+    const { aspBase: fastAspBase, aspCookies } = await resolveAspCredentials(args.company_index);
     if (fastAspBase && aspCookies) {
       const noteSnippet = args.note.substring(0, 120) + (args.note.length > 120 ? "..." : "");
       const canVerify = !args.skip_verify && !args.dry_run && !!args.claim_id;

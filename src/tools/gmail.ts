@@ -69,7 +69,46 @@ export async function gmailSendEmail(args: {
  * his Gmail compose window. Uses the same OAuth client/scope as the send
  * tool (gmail.compose covers drafts.* — verified: drafts.create succeeds).
  * Note: attachments are not supported (neither is gmail_send_email today).
+ *
+ * Snapshot-approval (Hakiel rule 2026-05-18): after creating the draft we
+ * READ IT BACK via users.drafts.get and push that exact stored content to
+ * Hakiel's phone (ntfy) so he can confirm the composed email actually
+ * contains what it should before he sends — third-party drafts have
+ * sometimes come out missing content for unclear reasons. The tool response
+ * also carries the verified snapshot. We snapshot the SERVER-STORED draft,
+ * not our inputs, so a silent encode/store drop is caught.
  */
+function decodeDraftBody(payload: any): string {
+  if (!payload) return "";
+  if (payload.body?.data) return Buffer.from(payload.body.data, "base64url").toString("utf-8");
+  if (Array.isArray(payload.parts)) {
+    const plain = payload.parts.find((p: any) => p.mimeType === "text/plain");
+    if (plain?.body?.data) return Buffer.from(plain.body.data, "base64url").toString("utf-8");
+    return payload.parts.map(decodeDraftBody).filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+async function pushDraftSnapshotNtfy(snapshot: string, subject: string): Promise<string> {
+  const topic = process.env.CLAIM_MONITOR_NTFY_TOPIC || "dino-claims-alerts-fpx";
+  const server = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+  try {
+    const res = await fetch(`${server}/${encodeURIComponent(topic)}`, {
+      method: "POST",
+      headers: {
+        "Title": `[DRAFT] Review before sending — ${subject}`.replace(/[^\x00-\x7F]/g, "").slice(0, 120) || "[DRAFT] Review",
+        "Priority": "4",
+        "Tags": "memo",
+        "Content-Type": "text/plain; charset=utf-8",
+      },
+      body: snapshot.slice(0, 3500),
+    });
+    return res.ok ? "sent" : `ntfy HTTP ${res.status}`;
+  } catch (e: any) {
+    return `ntfy error: ${e?.message || e}`;
+  }
+}
+
 export async function gmailCreateDraft(args: {
   to: string;
   subject: string;
@@ -86,11 +125,35 @@ export async function gmailCreateDraft(args: {
   const draftId = res.data.id ?? "";
   const messageId = res.data.message?.id ?? "";
   const link = `https://mail.google.com/mail/u/0/#drafts?compose=${draftId}`;
+
+  // Read the draft BACK from Gmail (verify what was actually stored).
+  let snapBody = "(could not read draft back)";
+  let snapHeaders = "";
+  try {
+    const got = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
+    const payload = got.data.message?.payload;
+    const headers = payload?.headers ?? [];
+    const h = (n: string) => headers.find((x) => (x.name ?? "").toLowerCase() === n)?.value ?? "";
+    snapHeaders =
+      `To: ${h("to")}\n` +
+      (h("cc") ? `Cc: ${h("cc")}\n` : "") +
+      (h("bcc") ? `Bcc: ${h("bcc")}\n` : "") +
+      `Subject: ${h("subject")}`;
+    snapBody = decodeDraftBody(payload).trim() || "(BODY EMPTY IN STORED DRAFT — check before sending)";
+  } catch (e: any) {
+    snapBody = `(drafts.get failed: ${e?.message || e})`;
+  }
+
+  const snapshot =
+    `DRAFT SNAPSHOT (read back from Gmail — approve before sending):\n\n` +
+    `${snapHeaders}\n\n${snapBody}\n\n` +
+    `Open in Gmail: ${link}`;
+  const ntfyStatus = await pushDraftSnapshotNtfy(snapshot, args.subject);
+
   return makeTextContent(
-    `Draft created (NOT sent).\n` +
-    `Draft ID: ${draftId}\n` +
-    `Message ID: ${messageId}\n` +
-    `Open in Gmail: ${link}`
+    `Draft created (NOT sent). Snapshot pushed to ntfy: ${ntfyStatus}\n` +
+    `Draft ID: ${draftId}\nMessage ID: ${messageId}\nOpen in Gmail: ${link}\n\n` +
+    `--- VERIFIED SNAPSHOT (server-stored draft) ---\n${snapHeaders}\n\n${snapBody}`
   );
 }
 
