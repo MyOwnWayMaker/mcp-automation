@@ -25,6 +25,12 @@ const files = {
   FILETRAC_SESSION_JSON:     path.join(root, "filetrac_session.json"),
   XACTANALYSIS_SESSION_JSON: path.join(root, "xactanalysis_session.json"),
   GOOGLE_NOTARY_TOKEN_JSON:  path.join(root, "token_notary.json"),
+  // Voice: prefer the compacted file (Railway 32KB env-var cap); fall back
+  // to the raw session if compact wasn't generated. Missing files are
+  // skipped by the loop below, so this is safe even on a fresh checkout.
+  VOICE_SESSION_JSON:        fs.existsSync(path.join(root, "voice_session.compact.json"))
+                               ? path.join(root, "voice_session.compact.json")
+                               : path.join(root, "voice_session.json"),
 };
 
 // ── Resolve auth token + project IDs ────────────────────────────────────────
