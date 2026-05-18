@@ -2,14 +2,23 @@
  * FileTrac auth script — opens visible browser, you complete MFA manually,
  * then session is saved automatically.
  *
- * Run: node /Users/hakielmcqueen/mcp-automation/scripts/auth-filetrac.mjs
+ * Run from the repo root: node scripts/auth-filetrac.mjs
  */
 import { chromium } from "playwright";
 import fs from "fs";
+import path from "path";
 import dotenv from "dotenv";
-dotenv.config({ path: "/Users/hakielmcqueen/mcp-automation/.env" });
 
-const SESSION_PATH = "/Users/hakielmcqueen/mcp-automation/filetrac_session.json";
+// Path-portable: resolve everything off the cwd (repo root), like
+// auth-xactanalysis.mjs. No hardcoded /Users/<name> — works on any machine
+// (macOS, the old Windows VM, CI) as long as you run it from the repo root.
+const REPO_ROOT = process.cwd();
+const ENV_PATH = path.resolve(REPO_ROOT, ".env");
+if (fs.existsSync(ENV_PATH)) {
+  dotenv.config({ path: ENV_PATH });
+}
+
+const SESSION_PATH = path.resolve(REPO_ROOT, "filetrac_session.json");
 
 const browser = await chromium.launch({ headless: false, slowMo: 500 });
 const context = await browser.newContext({
