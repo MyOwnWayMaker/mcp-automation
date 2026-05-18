@@ -16,10 +16,11 @@ export type SenderKind =
   | "xactware_xa"         // donotreply@xactware.com (XactAnalysis-driven)
   | "aan_portal"          // noreply@app.associatedadjusting.com
   | "straightline"        // claims@straightlineglobal.com (forwards)
+  | "ianet"               // assignments@ianetwork.net (IA Network portal)
   | "personal"            // human senders (crr2day@gmail.com)
   | "unknown";
 
-export type Platform = "filetrac" | "xactanalysis" | "aan" | "manual";
+export type Platform = "filetrac" | "xactanalysis" | "aan" | "ianet" | "manual";
 
 export type ParsedAddress = {
   street?: string;
@@ -324,6 +325,110 @@ function parsePersonalEmail(args: {
   };
 }
 
+/**
+ * IANet (IA Network) assignment — assignments@ianetwork.net. HTML <table>;
+ * each <tr> holds "Label:" / value <td> pairs (often two pairs per row).
+ * Duplicate labels carry positional meaning: the FIRST "Address:" /
+ * "City, State, Zip:" pair is the carrier's PO-BOX mailing address; the LAST
+ * is the loss / owner location. Sections: Claim Information, Claimant,
+ * Location Contact, then Instructions / Assignment Comments / Carrier
+ * Instructions. Subject: "New IAnet Assignment File ID: <id> | Claim Number:
+ * <claim> | Carrier: <carrier>". IANet claims are mostly claimant/liability.
+ */
+function parseIANetEmail(args: {
+  subject: string;
+  body: string;
+  from: string;
+}): ParseAssignmentEmailResult {
+  // Ordered plain-text of every table cell.
+  const cells: string[] = [];
+  const cellRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  let mm: RegExpExecArray | null;
+  while ((mm = cellRe.exec(args.body)) !== null) {
+    cells.push(stripHtml(mm[1]).replace(/\s+/g, " ").trim());
+  }
+
+  const isLabel = (s: string) => /:\s*$/.test(s) && s.trim().length <= 40;
+  const norm = (s: string) => s.replace(/:\s*$/, "").trim().toLowerCase();
+
+  // label -> [values] (labels repeat: carrier vs loss address, etc.)
+  const map = new Map<string, string[]>();
+  for (let i = 0; i < cells.length; i++) {
+    if (!isLabel(cells[i])) continue;
+    let v = "";
+    for (let j = i + 1; j < cells.length; j++) {
+      if (cells[j] === "") continue;
+      if (isLabel(cells[j])) break;   // empty value — next cell is another label
+      v = cells[j];
+      break;
+    }
+    const key = norm(cells[i]);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(v);
+  }
+  const first = (k: string) => map.get(k)?.find(x => x.length) || undefined;
+  const last = (k: string) => {
+    const a = map.get(k)?.filter(x => x.length);
+    return a && a.length ? a[a.length - 1] : undefined;
+  };
+
+  // Subject fallback fields.
+  const subFile = args.subject.match(/File ID:\s*([A-Za-z0-9-]+)/i)?.[1];
+  const subClaim = args.subject.match(/Claim Number:\s*([A-Za-z0-9-]+)/i)?.[1];
+  const subCarrier = args.subject.match(/Carrier:\s*(.+?)\s*$/i)?.[1]?.trim();
+
+  // Loss/inspection address. The "Address:" / "City, State, Zip:" labels are
+  // ALL carrier-side here (PO-BOX mailing + branch) — never the loss. The
+  // real inspection location is the "Location:" field (full single string,
+  // e.g. "14102 Lemoli Avenue Hawthorne, CA, 90250"), with "Owner Address:"
+  // as fallback ("14102 Lemoli Ave Hawthorne CA 90250"). Geocoding handles a
+  // free-form string, so keep the whole thing as `street` and best-effort
+  // pull state+zip; don't risk a Frankenstein street/city/state mix.
+  const locRaw = first("location") || first("owner address");
+  let loss_address: ParsedAddress | undefined;
+  if (locRaw) {
+    const m =
+      locRaw.match(/^(.*?),?\s*([A-Z]{2}),?\s*(\d{5})(?:-\d{4})?\s*$/) ||
+      locRaw.match(/^(.*?)\s+([A-Z]{2})\s+(\d{5})(?:-\d{4})?\s*$/);
+    loss_address = m
+      ? { street: m[1].replace(/,\s*$/, "").trim(), state: m[2], zip: m[3] }
+      : { street: locRaw };
+  }
+
+  const adjuster = first("adjuster");
+  const primaryPhone =
+    first("cell phone #") || first("home phone #") || first("mobile phone") ||
+    first("home phone") || first("work phone #");
+  let altPhone = first("owner phone 2") || first("work phone #") || first("work phone");
+  if (altPhone && altPhone === primaryPhone) altPhone = undefined;  // IANet repeats one number across fields
+
+  return {
+    ok: true,
+    sender_kind: "ianet",
+    email_kind: "new_assignment",
+    platform: "ianet",
+    claim_number: first("ianet file #") || subFile,             // IANet portal id
+    carrier_claim_number: first("carrier claim #") || subClaim,  // carrier-side
+    carrier: first("carrier") || subCarrier,
+    // IANet liability claims are claimant-centric; "Insured Name" is often
+    // blank — fall back to the claimant/owner so folder naming has a name.
+    insured_name: first("insured name") || first("claimant name") || first("owner name"),
+    insured_phone: primaryPhone,
+    insured_alt_phone: altPhone,
+    loss_address,
+    claimant_name: first("claimant name") || first("owner name"),
+    date_of_loss: first("dol") || first("date of loss"),
+    loss_type: first("claim type"),
+    loss_description:
+      first("assignment comments") || first("area of damage") ||
+      first("instructions") || first("carrier instructions"),
+    desk_adjuster: adjuster ? { name: adjuster } : undefined,
+    raw_subject: args.subject,
+    raw_from: args.from,
+    notes: "IANet: mostly claimant/liability. Accept/Reject + photos via the Scout Claims App; inspection-date changes happen in the IANet portal (isys2.ianetwork.net). Field map verified on 1 sample (RCS rental) — re-check on the next IANet assignment.",
+  };
+}
+
 // ─── Dispatcher ────────────────────────────────────────────────────────────────
 
 export function parseAssignmentEmail(args: {
@@ -364,6 +469,9 @@ export function parseAssignmentEmail(args: {
   }
   if (sender === "claims@straightlineglobal.com") {
     return parseStraightlineEmail(args);
+  }
+  if (sender === "assignments@ianetwork.net" || sender.endsWith("@ianetwork.net")) {
+    return parseIANetEmail(args);
   }
   if (sender === "crr2day@gmail.com") {
     return parsePersonalEmail(args);
