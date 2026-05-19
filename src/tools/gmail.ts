@@ -89,19 +89,61 @@ function decodeDraftBody(payload: any): string {
   return "";
 }
 
-async function pushDraftSnapshotNtfy(snapshot: string, subject: string): Promise<string> {
+// Short, lock-screen-friendly recipient label: display name if the To has
+// one ("Jane Doe <j@x.com>" -> "Jane Doe"), else the local-part ("j@x.com"
+// -> "j"). First recipient only.
+function shortRecipient(to: string): string {
+  const first = (to || "").split(",")[0].trim();
+  const named = first.match(/^"?([^"<]+?)"?\s*<[^>]+>$/);
+  if (named) return named[1].trim();
+  const at = first.indexOf("@");
+  return (at > 0 ? first.slice(0, at) : first) || "recipient";
+}
+
+/**
+ * Push the FULL draft to Hakiel's phone so he can approve/edit/drop while
+ * mobile WITHOUT opening Dispatch. Triage line (ntfy title) always carries
+ * subject + recipient; the body leads with the actual composed content
+ * (To/Subject then full body), truncating only if it would exceed ntfy's
+ * ~4KB cap.
+ */
+async function pushDraftSnapshotNtfy(args: {
+  to: string; subject: string; body: string; cc?: string; bcc?: string; link: string;
+}): Promise<string> {
   const topic = process.env.CLAIM_MONITOR_NTFY_TOPIC || "dino-claims-alerts-fpx";
   const server = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+
+  const subjShort = (args.subject || "(no subject)").slice(0, 80);
+  const title =
+    `[DRAFT] ${subjShort} -> ${shortRecipient(args.to)}`
+      .replace(/[^\x00-\x7F]/g, "").trim().slice(0, 120) || "[DRAFT] review draft";
+
+  const head =
+    `To: ${args.to}\n` +
+    (args.cc ? `Cc: ${args.cc}\n` : "") +
+    (args.bcc ? `Bcc: ${args.bcc}\n` : "") +
+    `Subject: ${args.subject}\n\n`;
+  const LIMIT = 3800;                       // safely under ntfy's ~4096B cap
+  const linkLine = `\n\n— open/edit/send: ${args.link}`;
+  let msg: string;
+  if ((head + args.body + linkLine).length <= LIMIT) {
+    msg = head + args.body + linkLine;
+  } else {
+    const room = LIMIT - head.length - linkLine.length - 40;
+    msg = head + args.body.slice(0, Math.max(0, room)) +
+      `\n\n…[truncated — open Gmail for full draft]` + linkLine;
+  }
+
   try {
     const res = await fetch(`${server}/${encodeURIComponent(topic)}`, {
       method: "POST",
       headers: {
-        "Title": `[DRAFT] Review before sending — ${subject}`.replace(/[^\x00-\x7F]/g, "").slice(0, 120) || "[DRAFT] Review",
+        "Title": title,
         "Priority": "4",
         "Tags": "memo",
         "Content-Type": "text/plain; charset=utf-8",
       },
-      body: snapshot.slice(0, 3500),
+      body: msg,
     });
     return res.ok ? "sent" : `ntfy HTTP ${res.status}`;
   } catch (e: any) {
@@ -126,29 +168,34 @@ export async function gmailCreateDraft(args: {
   const messageId = res.data.message?.id ?? "";
   const link = `https://mail.google.com/mail/u/0/#drafts?compose=${draftId}`;
 
-  // Read the draft BACK from Gmail (verify what was actually stored).
+  // Read the draft BACK from Gmail (verify what was actually stored — the
+  // ntfy snapshot must reflect the SERVER draft, not our inputs).
   let snapBody = "(could not read draft back)";
   let snapHeaders = "";
+  let snapTo = args.to, snapSubject = args.subject;
+  let snapCc: string | undefined = args.cc, snapBcc: string | undefined = args.bcc;
   try {
     const got = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
     const payload = got.data.message?.payload;
     const headers = payload?.headers ?? [];
     const h = (n: string) => headers.find((x) => (x.name ?? "").toLowerCase() === n)?.value ?? "";
+    snapTo = h("to") || args.to;
+    snapSubject = h("subject") || args.subject;
+    snapCc = h("cc") || undefined;
+    snapBcc = h("bcc") || undefined;
     snapHeaders =
-      `To: ${h("to")}\n` +
-      (h("cc") ? `Cc: ${h("cc")}\n` : "") +
-      (h("bcc") ? `Bcc: ${h("bcc")}\n` : "") +
-      `Subject: ${h("subject")}`;
+      `To: ${snapTo}\n` +
+      (snapCc ? `Cc: ${snapCc}\n` : "") +
+      (snapBcc ? `Bcc: ${snapBcc}\n` : "") +
+      `Subject: ${snapSubject}`;
     snapBody = decodeDraftBody(payload).trim() || "(BODY EMPTY IN STORED DRAFT — check before sending)";
   } catch (e: any) {
     snapBody = `(drafts.get failed: ${e?.message || e})`;
   }
 
-  const snapshot =
-    `DRAFT SNAPSHOT (read back from Gmail — approve before sending):\n\n` +
-    `${snapHeaders}\n\n${snapBody}\n\n` +
-    `Open in Gmail: ${link}`;
-  const ntfyStatus = await pushDraftSnapshotNtfy(snapshot, args.subject);
+  const ntfyStatus = await pushDraftSnapshotNtfy({
+    to: snapTo, subject: snapSubject, body: snapBody, cc: snapCc, bcc: snapBcc, link,
+  });
 
   return makeTextContent(
     `Draft created (NOT sent). Snapshot pushed to ntfy: ${ntfyStatus}\n` +
