@@ -141,6 +141,13 @@ async function pushDraftSnapshotNtfy(args: {
         "Title": title,
         "Priority": "4",
         "Tags": "memo",
+        // Tapping the notification body opens the draft directly (no need to
+        // find/select a URL in the text — solves the lock-screen problem).
+        "Click": args.link,
+        // Plus an explicit tappable button. ntfy simple Actions format:
+        // "<action>, <label>, <url>". The Gmail link has no commas so this
+        // is safe unquoted.
+        "Actions": `view, Open draft, ${args.link}`,
         "Content-Type": "text/plain; charset=utf-8",
       },
       body: msg,
