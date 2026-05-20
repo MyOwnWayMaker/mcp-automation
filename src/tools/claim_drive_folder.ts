@@ -76,6 +76,23 @@ function deriveTreeLabels(requestDateIso: string): {
   };
 }
 
+// Ordinal suffix for repeat work-type folders. 1 → "" (no ordinal, plain
+// `(supplement)`), 2 → "2nd ", 3 → "3rd ", etc. so the rendered folder
+// becomes `(2nd supplement)`, `(3rd supplement)`, … per the 2026-05-19
+// session-handoff explicit requirement.
+function ordinalPrefix(n: number): string {
+  if (n <= 1) return "";
+  const lastTwo = n % 100;
+  const last = n % 10;
+  let suffix: string;
+  if (lastTwo >= 11 && lastTwo <= 13) suffix = "th";
+  else if (last === 1) suffix = "st";
+  else if (last === 2) suffix = "nd";
+  else if (last === 3) suffix = "rd";
+  else suffix = "th";
+  return `${n}${suffix} `;
+}
+
 /**
  * Build the claim-folder name per locked 2026-05-04 convention:
  *   {YYYY-MM-DD}_(work-type) Insured_Client_Carrier_LossType
@@ -83,6 +100,12 @@ function deriveTreeLabels(requestDateIso: string): {
  *   2026-05-04_Raymond Rodriguez_PCAS_DBI_Water
  * Supplements / reinspections / reopens — parenthetical BEFORE name:
  *   2026-04-21_(supplement) Cheryl Groves_SLG_NARS_Water
+ * Repeat supplements use an ordinal:
+ *   (2nd supplement), (3rd supplement), ... up to (Nth supplement).
+ * Pass ordinal=N (≥1) for the Nth supplement on the same claim; default
+ * is 1 which keeps the legacy bare `(supplement)` name. Resolving N at
+ * the caller (find-the-next-unused-ordinal) lives in createClaimDriveFolder
+ * — see resolveSupplementOrdinal below.
  */
 function buildClaimFolderName(args: {
   request_date: string;
@@ -91,10 +114,35 @@ function buildClaimFolderName(args: {
   carrier_short: string;
   loss_type: string;
   work_type?: "supplement" | "reinspection" | "reopen";
+  ordinal?: number;
 }): string {
   const labels = deriveTreeLabels(args.request_date);
-  const wt = args.work_type ? `(${args.work_type}) ` : "";
+  const ord = ordinalPrefix(args.ordinal ?? 1);
+  const wt = args.work_type ? `(${ord}${args.work_type}) ` : "";
   return `${labels.yearMonthDay}_${wt}${args.insured_name}_${args.client_short}_${args.carrier_short}_${args.loss_type}`;
+}
+
+// Drive search to count existing (Nth-)work_type folders for the same claim
+// in the same month folder. We probe candidate names in ascending ordinal
+// (no-prefix → 2nd → 3rd → …) and return the FIRST unused ordinal so the
+// new folder lands at the next-available slot. Caps at 25 to avoid runaway.
+async function resolveWorkTypeOrdinal(args: {
+  monthFolderId: string;
+  request_date: string;
+  insured_name: string;
+  client_short: string;
+  carrier_short: string;
+  loss_type: string;
+  work_type: "supplement" | "reinspection" | "reopen";
+}): Promise<number> {
+  for (let n = 1; n <= 25; n++) {
+    const probe = buildClaimFolderName({ ...args, ordinal: n });
+    const existing = await findFolderByNameInParent(args.monthFolderId, probe);
+    if (!existing) return n;
+  }
+  // 25+ supplements on one claim is implausibly high — default to 1 (legacy)
+  // and let the caller's idempotent find-or-create handle the collision.
+  return 1;
 }
 
 // ─── Find-or-create helper ───────────────────────────────────────────────
@@ -201,6 +249,24 @@ export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): 
     const quarterFolder = await findOrCreateFolder(yearFolder.id, labels.quarter);
     const monthFolder = await findOrCreateFolder(quarterFolder.id, labels.monthYearMonth);
 
+    // Resolve the ordinal for repeat-work-type folders (e.g. 2nd, 3rd
+    // supplement) so the new folder lands at the next-unused slot rather
+    // than colliding with the original `(supplement)` and being treated as
+    // "already exists." Only matters when a work_type is set; original new
+    // assignments have no parenthetical so they don't need this.
+    let ordinal = 1;
+    if (args.work_type) {
+      ordinal = await resolveWorkTypeOrdinal({
+        monthFolderId: monthFolder.id,
+        request_date: args.request_date,
+        insured_name: args.insured_name,
+        client_short: args.client_short,
+        carrier_short: args.carrier_short,
+        loss_type: args.loss_type,
+        work_type: args.work_type,
+      });
+    }
+
     const claimFolderName = buildClaimFolderName({
       request_date: args.request_date,
       insured_name: args.insured_name,
@@ -208,6 +274,7 @@ export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): 
       carrier_short: args.carrier_short,
       loss_type: args.loss_type,
       work_type: args.work_type,
+      ordinal,
     });
     const claimFolder = await findOrCreateFolder(monthFolder.id, claimFolderName);
 
