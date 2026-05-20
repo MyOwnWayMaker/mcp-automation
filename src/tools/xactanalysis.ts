@@ -5,6 +5,13 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const SESSION_PATH = process.env.XACTANALYSIS_SESSION_PATH
   ?? path.resolve(process.cwd(), "xactanalysis_session.json");
+// Live session file — written after every tool call so the next call starts
+// with rotated cookies (Incapsula, AWSALB, refreshed auth tokens). Survives
+// across tool invocations within a worker lifetime; lost on worker restart,
+// at which point we fall back to env var / disk. Path is overridable for
+// tests; defaults to /tmp on Railway (ephemeral but per-worker-process).
+const LIVE_SESSION_PATH = process.env.XACTANALYSIS_LIVE_SESSION_PATH
+  ?? "/tmp/xactanalysis_session.live.json";
 const BASE = "https://www.xactanalysis.com/apps";
 
 // Tab name → XA's internal d_<tabid> identifier
@@ -43,6 +50,18 @@ function fmt(date: string): string {
 }
 
 function loadSession(): { cookies: unknown[]; localStorage: Record<string, string> } {
+  // Prefer the live file written by persistCookies after the previous call.
+  // It has rotated Incapsula/AWS/auth cookies that the env-var snapshot lacks.
+  if (fs.existsSync(LIVE_SESSION_PATH)) {
+    try {
+      const ageMs = Date.now() - fs.statSync(LIVE_SESSION_PATH).mtimeMs;
+      // 30-day cap — beyond that the rotated cookies are stale enough that
+      // we'd rather fall back to the freshly-captured env var.
+      if (ageMs < 30 * 24 * 60 * 60 * 1000) {
+        return JSON.parse(fs.readFileSync(LIVE_SESSION_PATH, "utf-8"));
+      }
+    } catch { /* fall through to env var / disk */ }
+  }
   if (process.env.XACTANALYSIS_SESSION_JSON) {
     return JSON.parse(process.env.XACTANALYSIS_SESSION_JSON);
   }
@@ -55,7 +74,38 @@ function loadSession(): { cookies: unknown[]; localStorage: Record<string, strin
   );
 }
 
-async function getPage(): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
+async function persistCookies(
+  context: BrowserContext,
+  baseSession: { cookies: unknown[]; localStorage: Record<string, string> },
+): Promise<void> {
+  // Best-effort: capture rotated cookies (Incapsula, AWSALB, refreshed auth)
+  // and write to the live session path. Never throws into the caller; a
+  // failure here just means the next call reuses slightly older cookies.
+  try {
+    const cookies = await context.cookies();
+    fs.writeFileSync(
+      LIVE_SESSION_PATH,
+      JSON.stringify(
+        {
+          cookies,
+          localStorage: baseSession.localStorage ?? {},
+          _persistedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
+  } catch {
+    // intentionally swallowed
+  }
+}
+
+async function getPage(): Promise<{
+  browser: Browser;
+  context: BrowserContext;
+  page: Page;
+  close: () => Promise<void>;
+}> {
   const session = loadSession();
 
   const browser = await chromium.launch({ headless: true });
@@ -73,10 +123,18 @@ async function getPage(): Promise<{ browser: Browser; context: BrowserContext; p
 
   if (page.url().includes("identity.verisk") || page.url().includes("/auth/")) {
     await browser.close();
+    // If we just loaded from the live file, drop it so the next call falls
+    // back to the env-var snapshot (which may still be valid).
+    try { if (fs.existsSync(LIVE_SESSION_PATH)) fs.unlinkSync(LIVE_SESSION_PATH); } catch { /* ignore */ }
     throw new Error("XactAnalysis session expired. Re-run auth-xactanalysis.mjs and update XACTANALYSIS_SESSION_JSON.");
   }
 
-  return { browser, context, page };
+  const close = async () => {
+    await persistCookies(context, session);
+    await browser.close();
+  };
+
+  return { browser, context, page, close };
 }
 
 export async function xactListAssignments(args: {
@@ -85,7 +143,7 @@ export async function xactListAssignments(args: {
   since_date?: string;   // YYYY-MM-DD — show assignments received on/after this date
   include_all?: boolean; // remove date window entirely (shows all time)
 }): Promise<CallToolResult> {
-  const { browser, page } = await getPage();
+  const { browser, page, close } = await getPage();
 
   try {
     const statusType = args.status === "returned" ? "returned" :
@@ -156,7 +214,7 @@ export async function xactListAssignments(args: {
 
     return ok(`XactAnalysis Assignments (${args.status ?? "in_progress"}):\n\n${assignments.join("\n---\n")}\n\n=== Full List ===\n${tableText.substring(0, 2000)}`);
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
@@ -365,7 +423,7 @@ export async function xactGetAssignment(args: {
     return ok(`Unknown tab: ${tabName}. Valid: ${Object.keys(TAB_IDS).join(", ")}`);
   }
 
-  const { browser, page } = await getPage();
+  const { browser, page, close } = await getPage();
 
   try {
     await navigateToTab(page, args.mfn, tabId);
@@ -476,7 +534,7 @@ export async function xactGetAssignment(args: {
       rawText.substring(0, 4000)
     );
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
@@ -773,7 +831,7 @@ export async function xactUpdateDates(args: {
   site_inspected_date?: string;
   note?: string;
 }): Promise<CallToolResult> {
-  const { browser, context, page } = await getPage();
+  const { browser, context, page, close } = await getPage();
 
   try {
     const results: string[] = [];
@@ -794,7 +852,7 @@ export async function xactUpdateDates(args: {
 
     return ok(`XactAnalysis assignment ${args.mfn} updated:\n${results.join("\n")}`);
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
@@ -805,7 +863,7 @@ export async function xactUpdateWorkflowStatus(args: {
   time?: string; // HH:MM (24h), defaults to 09:00
   note?: string;
 }): Promise<CallToolResult> {
-  const { browser, context, page } = await getPage();
+  const { browser, context, page, close } = await getPage();
 
   try {
     const statusCode = STATUS_CODES[args.status];
@@ -820,7 +878,7 @@ export async function xactUpdateWorkflowStatus(args: {
 
     return ok(`✅ XactAnalysis ${args.mfn}: "${args.status}" set to ${date}`);
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
@@ -828,7 +886,7 @@ export async function xactAddNote(args: {
   mfn: string;
   note: string;
 }): Promise<CallToolResult> {
-  const { browser, page } = await getPage();
+  const { browser, page, close } = await getPage();
 
   try {
     await page.goto(`${BASE}/cxa/detail.jsp?mfn=${args.mfn}&src=ip`);
@@ -933,7 +991,7 @@ export async function xactAddNote(args: {
       `=== Clickable elements in #d_notes ===\n${clickableInNotes}`
     );
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
@@ -965,7 +1023,7 @@ async function setSearchType(page: Page, mode: "claim" | "quick"): Promise<void>
 export async function xactFindAssignmentByClaim(args: {
   claim_number: string;
 }): Promise<CallToolResult> {
-  const { browser, page } = await getPage();
+  const { browser, page, close } = await getPage();
 
   try {
     // Switch top search bar to "Claim #" mode (searches all years, not just recent 20)
@@ -1016,14 +1074,14 @@ export async function xactFindAssignmentByClaim(args: {
       .split("\n").filter(l => l.trim()).slice(0, 20).join("\n");
     return ok(`No assignment found for claim "${args.claim_number}".\nPage snapshot:\n${bodySnippet}`);
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
 export async function xactFindAssignmentByName(args: {
   name_query: string;
 }): Promise<CallToolResult> {
-  const { browser, page } = await getPage();
+  const { browser, page, close } = await getPage();
 
   try {
     // Switch top search bar to "Quick search" mode (searches by policyholder name)
@@ -1067,14 +1125,14 @@ export async function xactFindAssignmentByName(args: {
     }
     return ok(`Found ${results.length} candidate(s) for "${args.name_query}":\n\n${results.join("\n---\n")}`);
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
 export async function xactGetNotes(args: {
   mfn: string;
 }): Promise<CallToolResult> {
-  const { browser, page } = await getPage();
+  const { browser, page, close } = await getPage();
 
   try {
     await page.goto(`${BASE}/cxa/detail.jsp?mfn=${args.mfn}&src=ip`);
@@ -1092,7 +1150,7 @@ export async function xactGetNotes(args: {
     const notesSection = notesIdx >= 0 ? bodyText.slice(notesIdx) : bodyText;
     return ok(`Notes for assignment ${args.mfn}:\n\n${notesSection.substring(0, 3000)}`);
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
@@ -1109,7 +1167,7 @@ export async function xactDeleteNote(args: {
     return ok("Provide either note_id or note_text_match.");
   }
 
-  const { browser, page } = await getPage();
+  const { browser, page, close } = await getPage();
 
   try {
     await navigateToTab(page, args.mfn, "d_notes");
@@ -1173,7 +1231,7 @@ export async function xactDeleteNote(args: {
       noteSnapshot.map((r, i) => `[${i}] ${r.tag}: ${r.text}\nHTML: ${r.html}`).join("\n\n---\n\n")
     );
   } finally {
-    await browser.close();
+    await close();
   }
 }
 
@@ -1235,7 +1293,7 @@ export async function xactSetPlannedInspectionDate(args: {
   dry_run?: boolean;  // when true, capture form state + dismiss without submit (no XA writes)
 }): Promise<CallToolResult> {
   const dateIso = fmt(args.date);
-  const { browser, context, page } = await getPage();
+  const { browser, context, page, close } = await getPage();
 
   try {
     // Idempotency guard: read the current value first. If XA already shows
@@ -1315,6 +1373,6 @@ export async function xactSetPlannedInspectionDate(args: {
       },
     }, null, 2));
   } finally {
-    await browser.close();
+    await close();
   }
 }
