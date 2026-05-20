@@ -150,6 +150,44 @@ function digitsOnly(s: string): string {
   return s.replace(/\D/g, "");
 }
 
+// Capture a screenshot + ntfy alert when voice_send_sms hits a failure return.
+// Stage tag becomes part of the filename so a series of failures over time
+// builds a labeled visual record of where Voice's UI shifted. Returns the
+// screenshot path so failure JSON payloads can surface it.
+async function captureSendSmsFailure(args: {
+  page: Page;
+  stage: string;
+  error: string;
+}): Promise<string | null> {
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const fname = `/tmp/voice-send-fail-${args.stage}-${ts}.png`;
+  let screenshotPath: string | null = null;
+  try {
+    await args.page.screenshot({ path: fname, fullPage: true });
+    screenshotPath = fname;
+  } catch {
+    // best-effort
+  }
+  // ntfy alert so a stuck Voice send surfaces immediately instead of being
+  // buried in a tool-call JSON payload that nobody reads.
+  try {
+    const topic = process.env.VOICE_SEND_NTFY_TOPIC || "hakiel-mac-mini-voice";
+    await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
+      method: "POST",
+      headers: {
+        "Title": `[VOICE SEND FAIL] ${args.stage}`,
+        "Priority": "5",
+        "Tags": "warning",
+        "Content-Type": "text/plain; charset=utf-8",
+      },
+      body: `${args.error}\n\nScreenshot: ${screenshotPath || "(capture failed)"}\nURL: ${args.page.url()}`,
+    });
+  } catch {
+    // best-effort
+  }
+  return screenshotPath;
+}
+
 // ─── voice_list_threads ────────────────────────────────────────────────────
 // Returns recent threads from the inbox. Selectors are best-effort; voice's
 // DOM is dynamic and may need adjusting after first run. The diagnostic dump
@@ -789,9 +827,12 @@ export async function voiceSendSms(args: {
             })),
           };
         });
+        const errMsg = "Could not find messages-recipient input on /messages?action=new — none of the To/Send-to/recipient selectors matched";
+        const shot = await captureSendSmsFailure({ page, stage: "recipient-input-not-found", error: errMsg });
         return ok(JSON.stringify({
           ok: false,
-          error: "Could not find messages-recipient input on /messages?action=new — none of the To/Send-to/recipient selectors matched",
+          error: errMsg,
+          screenshot: shot,
           fab_clicked: fabClicked,
           pick_result: pickResult,
           debug,
@@ -879,9 +920,12 @@ export async function voiceSendSms(args: {
               outerHTML_head: (el as HTMLElement).outerHTML.substring(0, 200),
             }));
         });
+        const errMsg = "Typed number but couldn't find the 'Send message' option in the dial-pad dropdown. Voice may have shipped new markup — see dropdown_debug to add a matching selector.";
+        const shot = await captureSendSmsFailure({ page, stage: "send-message-option-missing", error: errMsg });
         return ok(JSON.stringify({
           ok: false,
-          error: "Typed number but couldn't find the 'Send message' option in the dial-pad dropdown. Voice may have shipped new markup — see dropdown_debug to add a matching selector.",
+          error: errMsg,
+          screenshot: shot,
           dropdown_debug: dropdownDebug,
           pick_result: pickResult,
         }, null, 2));
@@ -937,9 +981,12 @@ export async function voiceSendSms(args: {
       });
 
       if (composeRecipient.pickedIdx === null) {
+        const errMsg = "Clicked 'Send a message' option but could not find the compose-dialog 'To' input afterwards. Compose may not have rendered.";
+        const shot = await captureSendSmsFailure({ page, stage: "compose-to-input-missing", error: errMsg });
         return ok(JSON.stringify({
           ok: false,
-          error: "Clicked 'Send a message' option but could not find the compose-dialog 'To' input afterwards. Compose may not have rendered.",
+          error: errMsg,
+          screenshot: shot,
           stage: "post_message_option_click",
           compose_recipient_debug: composeRecipient,
           pick_result: pickResult,
@@ -1052,6 +1099,21 @@ export async function voiceSendSms(args: {
             await page.locator('[data-mcp-suggest="1"]').first().click({ timeout: 3000 }).catch(() => {});
             autocompleteClicked = true;
             suggestionDebug = found.candidates;
+            // Belt-and-suspenders: occasionally the click registers on the
+            // tile but Voice's picker doesn't commit a chip. Pressing Enter
+            // with the suggestion highlighted is the alternate commit path.
+            // No-op if a chip already exists.
+            await page.waitForTimeout(400);
+            const chipAlready = await page.evaluate((sel) => {
+              const inp = document.querySelector(sel) as HTMLInputElement | null;
+              // After commit, Voice clears the input AND renders a chip pill
+              // adjacent to it. Empty value is the easiest signal.
+              return inp ? inp.value === "" : false;
+            }, `[data-mcp-pick2="${composeRecipient.pickedIdx}"]`);
+            if (!chipAlready) {
+              await page.keyboard.press("Enter").catch(() => {});
+              await page.waitForTimeout(400);
+            }
             break;
           }
           if (i === 11) suggestionDebug = found.candidates;
@@ -1084,9 +1146,12 @@ export async function voiceSendSms(args: {
             url: location.href,
             body_preview: (document.body.innerText || "").substring(0, 1500),
           }));
+          const errMsg = "Compose To field accepted the number but no recipient chip committed.";
+          const shot = await captureSendSmsFailure({ page, stage: "chip-not-committed", error: errMsg });
           return ok(JSON.stringify({
             ok: false,
-            error: "Compose To field accepted the number but no recipient chip committed.",
+            error: errMsg,
+            screenshot: shot,
             stage: "compose_chip_verify",
             autocomplete_clicked: autocompleteClicked,
             native_set_result: nativeSetResult,
