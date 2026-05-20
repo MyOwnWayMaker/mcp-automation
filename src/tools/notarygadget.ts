@@ -1178,3 +1178,243 @@ export async function notarygadgetDeleteSigning(args: {
     await browser.close();
   }
 }
+
+// NotaryGadget calls customers "Contacts" internally. Edit form fields:
+// #txtCompany, #txtAddress1, #txtAddress2, #txtCity, #txtState (select),
+// #txtZip, #txtFirst, #txtLast, #txtTitle, #txtEmail, #txtOffice, #txtCell,
+// #txtFax, #txtWebsite, #txtInvEmail, #txtInstructions, #txtNotes.
+// Save fn: SaveContact(<numericId>).
+export async function notarygadgetUpdateCustomer(args: {
+  customer_id?: string;
+  customer_name?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  company?: string;
+  first?: string;
+  last?: string;
+  title?: string;
+  email?: string;
+  office?: string;
+  cell?: string;
+  fax?: string;
+  website?: string;
+  invoice_email?: string;
+  notes?: string;
+  instructions?: string;
+}): Promise<CallToolResult> {
+  if (!args.customer_id && !args.customer_name) {
+    return ok("❌ Must provide either customer_id or customer_name.");
+  }
+
+  const { browser, page } = await getPage();
+  const log: string[] = [];
+  const ms = () => `[+${Math.round(performance.now() / 1000)}s]`;
+
+  try {
+    await page.evaluate(() => (window as any).SelectPage("Contacts"));
+    await page.waitForTimeout(4000);
+    log.push(`${ms()} on Contacts page`);
+
+    // ─── Resolve customer_id ───────────────────────────────────────────────
+    let customerId = args.customer_id;
+    let resolvedFromSearch = false;
+
+    if (!customerId) {
+      const term = (args.customer_name ?? "").trim();
+      log.push(`${ms()} searching for "${term}"`);
+      await page.fill("#txtSearchValue", term);
+      await page.locator("#txtSearchValue").press("Enter").catch(() => {});
+      await page.waitForTimeout(2500);
+
+      const matches = await page.evaluate(() => {
+        const out: { id: string; text: string }[] = [];
+        document.querySelectorAll("tr[onclick*='GetContactData']").forEach((el) => {
+          const oc = el.getAttribute("onclick") ?? "";
+          const m = oc.match(/GetContactData\((\d+)\)/);
+          if (!m) return;
+          const txt = ((el as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+          out.push({ id: m[1], text: txt });
+        });
+        return out;
+      });
+
+      log.push(`${ms()} search returned ${matches.length} match(es)`);
+      if (matches.length === 0) {
+        await browser.close();
+        return ok(`❌ No customer matching "${term}".\nLog:\n${log.join("\n")}`);
+      }
+      if (matches.length > 1) {
+        await browser.close();
+        const listing = matches.map((m) => `  • ID ${m.id} → ${m.text.substring(0, 120)}`).join("\n");
+        return ok(
+          `❌ Multiple customers match "${term}". Pass customer_id explicitly.\n${listing}\nLog:\n${log.join("\n")}`,
+        );
+      }
+      customerId = matches[0].id;
+      resolvedFromSearch = true;
+      log.push(`${ms()} resolved ${term} → ID ${customerId}`);
+    }
+
+    // ─── Load contact data into in-memory state, then open edit form ──────
+    // EditContact crashes if the contact isn't already in CONTACTS[]
+    await page.evaluate((cid) => (window as any).GetContactData(parseInt(cid, 10)), customerId);
+    await page.waitForTimeout(2500);
+    log.push(`${ms()} GetContactData(${customerId}) loaded`);
+
+    await page.evaluate((cid) => (window as any).EditContact(cid), customerId);
+    await page.waitForTimeout(2500);
+    log.push(`${ms()} EditContact opened`);
+
+    // Confirm the edit form is rendered for the right contact
+    await page.waitForSelector("#txtCompany", { timeout: 10000 });
+    const formCompany = (await page.locator("#txtCompany").inputValue().catch(() => "")) || "";
+    log.push(`${ms()} edit form for company="${formCompany}"`);
+
+    // Capture current values for the diff report
+    const before = await page.evaluate(() => ({
+      company: (document.getElementById("txtCompany") as HTMLInputElement)?.value ?? "",
+      address1: (document.getElementById("txtAddress1") as HTMLInputElement)?.value ?? "",
+      address2: (document.getElementById("txtAddress2") as HTMLInputElement)?.value ?? "",
+      city: (document.getElementById("txtCity") as HTMLInputElement)?.value ?? "",
+      state: (document.getElementById("txtState") as HTMLSelectElement)?.value ?? "",
+      zip: (document.getElementById("txtZip") as HTMLInputElement)?.value ?? "",
+      first: (document.getElementById("txtFirst") as HTMLInputElement)?.value ?? "",
+      last: (document.getElementById("txtLast") as HTMLInputElement)?.value ?? "",
+      title: (document.getElementById("txtTitle") as HTMLInputElement)?.value ?? "",
+      email: (document.getElementById("txtEmail") as HTMLInputElement)?.value ?? "",
+      office: (document.getElementById("txtOffice") as HTMLInputElement)?.value ?? "",
+      cell: (document.getElementById("txtCell") as HTMLInputElement)?.value ?? "",
+      fax: (document.getElementById("txtFax") as HTMLInputElement)?.value ?? "",
+      website: (document.getElementById("txtWebsite") as HTMLInputElement)?.value ?? "",
+      invEmail: (document.getElementById("txtInvEmail") as HTMLInputElement)?.value ?? "",
+      notes: (document.getElementById("txtNotes") as HTMLTextAreaElement)?.value ?? "",
+      instructions: (document.getElementById("txtInstructions") as HTMLTextAreaElement)?.value ?? "",
+    }));
+
+    // ─── Fill provided fields ─────────────────────────────────────────────
+    const fieldMap: [keyof typeof args, string, "text" | "select" | "textarea"][] = [
+      ["company", "#txtCompany", "text"],
+      ["address1", "#txtAddress1", "text"],
+      ["address2", "#txtAddress2", "text"],
+      ["city", "#txtCity", "text"],
+      ["state", "#txtState", "select"],
+      ["zip", "#txtZip", "text"],
+      ["first", "#txtFirst", "text"],
+      ["last", "#txtLast", "text"],
+      ["title", "#txtTitle", "text"],
+      ["email", "#txtEmail", "text"],
+      ["office", "#txtOffice", "text"],
+      ["cell", "#txtCell", "text"],
+      ["fax", "#txtFax", "text"],
+      ["website", "#txtWebsite", "text"],
+      ["invoice_email", "#txtInvEmail", "text"],
+      ["notes", "#txtNotes", "textarea"],
+      ["instructions", "#txtInstructions", "textarea"],
+    ];
+
+    const changed: string[] = [];
+    for (const [key, selector, kind] of fieldMap) {
+      const val = args[key];
+      if (val === undefined || val === null) continue;
+      if (kind === "select") {
+        await page.selectOption(selector, String(val)).catch(() => {});
+      } else {
+        await page.fill(selector, String(val)).catch(() => {});
+      }
+      changed.push(`${key}=${val}`);
+    }
+    log.push(`${ms()} filled ${changed.length} field(s): ${changed.join(" | ")}`);
+
+    if (changed.length === 0) {
+      await page.evaluate(() => (window as any).CloseOperationWindow && (window as any).CloseOperationWindow());
+      await browser.close();
+      return ok(`⚠️ No fields to update were provided. Current values:\n${JSON.stringify(before, null, 2)}`);
+    }
+
+    // ─── Save ─────────────────────────────────────────────────────────────
+    await page.evaluate((cid) => (window as any).SaveContact(parseInt(cid, 10)), customerId);
+    await page.waitForTimeout(4000);
+    log.push(`${ms()} SaveContact(${customerId}) fired`);
+
+    // Re-open the contact to verify saved values
+    await page.evaluate((cid) => (window as any).GetContactData(parseInt(cid, 10)), customerId);
+    await page.waitForTimeout(2500);
+    await page.evaluate((cid) => (window as any).EditContact(cid), customerId);
+    await page.waitForTimeout(2500);
+    await page.waitForSelector("#txtCompany", { timeout: 10000 });
+
+    const after = await page.evaluate(() => ({
+      company: (document.getElementById("txtCompany") as HTMLInputElement)?.value ?? "",
+      address1: (document.getElementById("txtAddress1") as HTMLInputElement)?.value ?? "",
+      address2: (document.getElementById("txtAddress2") as HTMLInputElement)?.value ?? "",
+      city: (document.getElementById("txtCity") as HTMLInputElement)?.value ?? "",
+      state: (document.getElementById("txtState") as HTMLSelectElement)?.value ?? "",
+      zip: (document.getElementById("txtZip") as HTMLInputElement)?.value ?? "",
+      first: (document.getElementById("txtFirst") as HTMLInputElement)?.value ?? "",
+      last: (document.getElementById("txtLast") as HTMLInputElement)?.value ?? "",
+      title: (document.getElementById("txtTitle") as HTMLInputElement)?.value ?? "",
+      email: (document.getElementById("txtEmail") as HTMLInputElement)?.value ?? "",
+      office: (document.getElementById("txtOffice") as HTMLInputElement)?.value ?? "",
+      cell: (document.getElementById("txtCell") as HTMLInputElement)?.value ?? "",
+      fax: (document.getElementById("txtFax") as HTMLInputElement)?.value ?? "",
+      website: (document.getElementById("txtWebsite") as HTMLInputElement)?.value ?? "",
+      invEmail: (document.getElementById("txtInvEmail") as HTMLInputElement)?.value ?? "",
+      notes: (document.getElementById("txtNotes") as HTMLTextAreaElement)?.value ?? "",
+      instructions: (document.getElementById("txtInstructions") as HTMLTextAreaElement)?.value ?? "",
+    }));
+
+    // Build diff for the fields we changed
+    const diffLines: string[] = [];
+    const verifyFailures: string[] = [];
+    const argKeyToFieldKey: Record<string, keyof typeof after> = {
+      company: "company",
+      address1: "address1",
+      address2: "address2",
+      city: "city",
+      state: "state",
+      zip: "zip",
+      first: "first",
+      last: "last",
+      title: "title",
+      email: "email",
+      office: "office",
+      cell: "cell",
+      fax: "fax",
+      website: "website",
+      invoice_email: "invEmail",
+      notes: "notes",
+      instructions: "instructions",
+    };
+    for (const [argKey, _sel, _kind] of fieldMap) {
+      const provided = args[argKey];
+      if (provided === undefined || provided === null) continue;
+      const fk = argKeyToFieldKey[argKey as string];
+      const beforeVal = (before as any)[fk] ?? "";
+      const afterVal = (after as any)[fk] ?? "";
+      diffLines.push(`  ${argKey}: "${beforeVal}" → "${afterVal}"`);
+      if (String(afterVal).trim() !== String(provided).trim()) {
+        verifyFailures.push(`${argKey} expected="${provided}" actual="${afterVal}"`);
+      }
+    }
+
+    await page.evaluate(() => (window as any).CloseOperationWindow && (window as any).CloseOperationWindow());
+
+    const header =
+      verifyFailures.length === 0
+        ? `✅ Customer updated and verified (NG ID ${customerId})`
+        : `⚠️ Customer save returned but ${verifyFailures.length} field(s) did not persist as expected`;
+    const summary =
+      `${header}\n` +
+      `Company: ${after.company || "(empty)"}\n` +
+      `Resolved via: ${resolvedFromSearch ? "search" : "direct id"}\n\n` +
+      `Changes:\n${diffLines.join("\n")}` +
+      (verifyFailures.length > 0 ? `\n\nVerify failures:\n  ${verifyFailures.join("\n  ")}` : "");
+
+    return ok(summary);
+  } finally {
+    await browser.close();
+  }
+}
