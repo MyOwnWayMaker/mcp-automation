@@ -37,6 +37,20 @@ const NTFY_SERVER = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
 const SELF_ADDRESS = (process.env.CLAIM_MONITOR_SELF_ADDRESS || "hakiel.mcqueen@erseville.com").toLowerCase();
 const ALERTED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Per-call timeout for every external API the poll loop touches (Gmail,
+// Gemini, ntfy, draft creation). 90s is forgiving for a slow Gemini call
+// and still well under the 60s polling interval × 3 = 180s stall budget.
+const EXTERNAL_CALL_TIMEOUT_MS = 90_000;
+// Hard ceiling on pollInFlight. If a cycle hangs past this, the watchdog
+// forcibly releases the guard so the next tick can proceed. Anything
+// genuinely longer than this is a bug; the silent-5h-hang on 2026-05-19
+// would have surfaced after 3 min instead of 5.5 hours.
+const POLL_INFLIGHT_MAX_MS = 3 * 60 * 1000;
+// Watchdog stall threshold: alert if no successful cycle in this long.
+const WATCHDOG_STALL_MS = 3 * 60 * 1000;
+// Throttle for repeated stall alerts so a long hang doesn't spam ntfy.
+const WATCHDOG_REPEAT_MS = 30 * 60 * 1000;
+
 // ── Filter rules (mirror scripts/claim-monitor.mjs — keep these in sync) ────
 
 const HIGH_PRIORITY_SENDERS = new Set([
@@ -153,6 +167,27 @@ export function classify(args: {
 const alerted: Map<string, number> = new Map(); // msg ID -> timestamp
 let started_at = 0;
 let pollInFlight = false;
+let pollInFlightSince = 0;
+let lastSuccessfulCycleAt = 0;
+let lastStallAlertAt = 0;
+
+// ── External-call timeout helper ────────────────────────────────────────────
+
+// Race a promise against a hard timeout. On timeout, the original promise is
+// not actually cancelled (we can't reach into googleapis to kill the in-flight
+// request), but the await unblocks so pollInFlight gets released. The dangling
+// promise then resolves into the void without harm. This is the smallest fix
+// that eliminates the silent-hang failure mode without rewriting every caller
+// to thread AbortControllers through.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`Timeout ${ms}ms in ${label}`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
 
 function pruneAlerted() {
   const cutoff = Date.now() - ALERTED_TTL_MS;
@@ -193,16 +228,20 @@ async function sendNtfy(args: { title: string; message: string; priority?: numbe
   const url = `${NTFY_SERVER}/${encodeURIComponent(NTFY_TOPIC)}`;
   const safeTitle = asciiSafe(args.title) || "Alert";
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Title": safeTitle,
-        "Priority": String(args.priority ?? 3),
-        "Tags": (args.tags ?? []).map(asciiSafe).filter(Boolean).join(","),
-        "Content-Type": "text/plain; charset=utf-8",
-      },
-      body: `${args.title}\n\n${args.message}`,
-    });
+    const res = await withTimeout(
+      fetch(url, {
+        method: "POST",
+        headers: {
+          "Title": safeTitle,
+          "Priority": String(args.priority ?? 3),
+          "Tags": (args.tags ?? []).map(asciiSafe).filter(Boolean).join(","),
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+        body: `${args.title}\n\n${args.message}`,
+      }),
+      EXTERNAL_CALL_TIMEOUT_MS,
+      "ntfy.POST",
+    );
     if (!res.ok) {
       console.error(`[claim-monitor] ntfy POST failed: HTTP ${res.status}`);
     }
@@ -225,11 +264,15 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
   // over userId:me returns SENT + DRAFT messages too, which is exactly how
   // outbound replies were leaking into [CORRECTION]/[IMPORTANT] alerts and
   // even getting auto-drafted replies. Mirrors notary_monitor's query.
-  const list = await gmail.users.messages.list({
-    userId: "me",
-    q: "newer_than:1d -in:sent -in:drafts -in:chats",
-    maxResults: 30,
-  });
+  const list = await withTimeout(
+    gmail.users.messages.list({
+      userId: "me",
+      q: "newer_than:1d -in:sent -in:drafts -in:chats",
+      maxResults: 30,
+    }),
+    EXTERNAL_CALL_TIMEOUT_MS,
+    "gmail.messages.list",
+  );
   const messages = list.data.messages || [];
 
   for (const m of messages) {
@@ -237,7 +280,11 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     if (alerted.has(m.id)) continue;
     scanned++;
 
-    const full = await gmail.users.messages.get({ userId: "me", id: m.id, format: "full" });
+    const full = await withTimeout(
+      gmail.users.messages.get({ userId: "me", id: m.id, format: "full" }),
+      EXTERNAL_CALL_TIMEOUT_MS,
+      `gmail.messages.get(${m.id})`,
+    );
     const headers = full.data.payload?.headers || [];
     const get = (name: string) => headers.find(h => h.name === name)?.value || "";
     const fromHeader = get("From");
@@ -274,13 +321,17 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
       const ccHeader = get("Cc");
       const hasUnsubscribe = headers.some(h => /^list-unsubscribe$/i.test(h.name || ""));
       try {
-        const verdict = await classifyImportant({
-          from: fromHeader,
-          subject,
-          date: dateHeader,
-          body,
-          has_unsubscribe: hasUnsubscribe,
-        });
+        const verdict = await withTimeout(
+          classifyImportant({
+            from: fromHeader,
+            subject,
+            date: dateHeader,
+            body,
+            has_unsubscribe: hasUnsubscribe,
+          }),
+          EXTERNAL_CALL_TIMEOUT_MS,
+          "classifyImportant",
+        );
         if (verdict) {
           // Try to draft a Gmail reply (skipped if Hakiel replied recently or
           // the LLM returned no reply text). Best-effort — never block the alert.
@@ -292,16 +343,20 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
             draft_status = "no_reply_text";
           } else if (full.data.threadId && messageIdHeader) {
             try {
-              const result = await createImportantDraft({
-                thread_id: full.data.threadId,
-                in_reply_to_message_id: messageIdHeader,
-                reply_to_address: fromHeader,
-                cc_addresses: ccHeader || undefined,
-                original_subject: subject,
-                reply_body: replyText,
-                category: verdict.category,
-                source_email_id: m.id,
-              });
+              const result = await withTimeout(
+                createImportantDraft({
+                  thread_id: full.data.threadId,
+                  in_reply_to_message_id: messageIdHeader,
+                  reply_to_address: fromHeader,
+                  cc_addresses: ccHeader || undefined,
+                  original_subject: subject,
+                  reply_body: replyText,
+                  category: verdict.category,
+                  source_email_id: m.id,
+                }),
+                EXTERNAL_CALL_TIMEOUT_MS,
+                "createImportantDraft",
+              );
               draft_status = result.status;
               draft_reason = result.reason;
             } catch (e: any) {
@@ -403,19 +458,152 @@ export function startClaimMonitor() {
     tags: ["white_check_mark"],
   }).catch(() => { /* swallow startup ping errors */ });
 
-  // Run pollOnce on a setInterval. Single-fire reentrancy guard via
-  // pollInFlight to prevent overlap if a poll takes >60s (unlikely but safe).
+  lastSuccessfulCycleAt = started_at;
+
+  // Run pollOnce on a setInterval. Reentrancy guard via pollInFlight + a hard
+  // ceiling (POLL_INFLIGHT_MAX_MS) so a single hung cycle can never lock the
+  // watcher out for hours like it did on 2026-05-19 (5.5h silent silence
+  // after a hung Gmail/Gemini call).
   setInterval(async () => {
+    // Hard re-entrancy ceiling: if a cycle has been "in flight" for too long
+    // it's almost certainly stuck on an external call that never resolved.
+    // Force-release the guard so the next tick can proceed (the old await
+    // may still be hanging out somewhere but that's not our problem now).
+    if (pollInFlight && pollInFlightSince > 0 && Date.now() - pollInFlightSince > POLL_INFLIGHT_MAX_MS) {
+      console.error(`[claim-monitor] re-entrancy ceiling hit: cycle has been in-flight ${(Date.now() - pollInFlightSince) / 1000}s — force-releasing guard`);
+      pollInFlight = false;
+      pollInFlightSince = 0;
+    }
     if (pollInFlight) return;
     pollInFlight = true;
+    pollInFlightSince = Date.now();
     try {
       const { scanned, alerted: a } = await pollOnce();
       if (a > 0) console.log(`[claim-monitor] cycle: scanned=${scanned}, alerted=${a}`);
       pruneAlerted();
+      lastSuccessfulCycleAt = Date.now();
     } catch (e: any) {
       console.error(`[claim-monitor] poll error: ${e?.message || e}`);
     } finally {
       pollInFlight = false;
+      pollInFlightSince = 0;
     }
   }, POLL_INTERVAL_MS);
+
+  // Watchdog: independent timer that fires a [STALL] ntfy if no successful
+  // cycle completed within WATCHDOG_STALL_MS. Throttled to one alert per
+  // WATCHDOG_REPEAT_MS so a long hang doesn't spam.
+  setInterval(() => {
+    const gap = Date.now() - lastSuccessfulCycleAt;
+    if (gap < WATCHDOG_STALL_MS) return;
+    if (Date.now() - lastStallAlertAt < WATCHDOG_REPEAT_MS) return;
+    lastStallAlertAt = Date.now();
+    const minutes = Math.round(gap / 60000);
+    console.error(`[claim-monitor] WATCHDOG STALL: no successful cycle in ${minutes}m (pollInFlight=${pollInFlight})`);
+    sendNtfy({
+      title: "[STALL] claim-monitor watchdog",
+      message: `No successful cycle in ${minutes} minutes. pollInFlight=${pollInFlight}. Check Railway logs for hung external calls.`,
+      priority: 5,
+      tags: ["warning"],
+    }).catch(() => { /* swallow */ });
+  }, 60_000);
+
+  // Daily reconciliation: at 23:55 PT (06:55 UTC) check the inbox for HIGH-
+  // tier emails received in the last 24h and surface any that aren't in the
+  // alerted set. Independent of the live polling — if the watcher itself was
+  // broken, this is the safety net.
+  scheduleDailyReconciliation();
+}
+
+// ── Daily reconciliation ────────────────────────────────────────────────────
+
+function nextReconcileDelayMs(): number {
+  // Fire at 23:55 PT = 06:55 UTC the next day.
+  const now = new Date();
+  const target = new Date(now);
+  target.setUTCHours(6, 55, 0, 0);
+  if (target.getTime() <= now.getTime()) {
+    target.setUTCDate(target.getUTCDate() + 1);
+  }
+  return target.getTime() - now.getTime();
+}
+
+async function runDailyReconciliation(): Promise<void> {
+  try {
+    console.log("[claim-monitor] daily reconciliation starting");
+    const auth = await getGoogleAuthClient();
+    const gmail = google.gmail({ version: "v1", auth });
+
+    const list = await withTimeout(
+      gmail.users.messages.list({
+        userId: "me",
+        q: "newer_than:1d -in:sent -in:drafts -in:chats",
+        maxResults: 100,
+      }),
+      EXTERNAL_CALL_TIMEOUT_MS,
+      "reconcile.gmail.list",
+    );
+    const messages = list.data.messages || [];
+
+    type Miss = { from: string; subject: string; id: string; receivedAt: string };
+    const misses: Miss[] = [];
+
+    for (const m of messages) {
+      if (!m.id) continue;
+      if (alerted.has(m.id)) continue;
+      const full = await withTimeout(
+        gmail.users.messages.get({ userId: "me", id: m.id, format: "metadata", metadataHeaders: ["From", "Subject", "Date"] }),
+        EXTERNAL_CALL_TIMEOUT_MS,
+        `reconcile.gmail.get(${m.id})`,
+      );
+      const headers = full.data.payload?.headers || [];
+      const get = (name: string) => headers.find(h => h.name === name)?.value || "";
+      const fromHeader = get("From");
+      const subject = get("Subject");
+      const senderEmail = (fromHeader.toLowerCase().match(/<([^>]+)>/) || [null, fromHeader.toLowerCase()])[1] as string;
+
+      const isHigh =
+        HIGH_PRIORITY_SENDERS.has(senderEmail) ||
+        HIGH_PRIORITY_DOMAINS.some(d => senderEmail.endsWith(d));
+      if (!isHigh) continue;
+      if (senderEmail === SELF_ADDRESS) continue;
+
+      const internalDate = parseInt(full.data.internalDate || "0", 10);
+      misses.push({
+        from: fromHeader,
+        subject,
+        id: m.id,
+        receivedAt: new Date(internalDate).toISOString(),
+      });
+    }
+
+    if (misses.length === 0) {
+      console.log("[claim-monitor] daily reconciliation: 0 missed HIGH emails in last 24h ✓");
+      return;
+    }
+
+    console.log(`[claim-monitor] daily reconciliation: ${misses.length} missed HIGH email(s)`);
+    const lines = misses.map(m => `• ${m.receivedAt} ${m.from} — ${m.subject} [id:${m.id}]`);
+    await sendNtfy({
+      title: `[MISSED] ${misses.length} HIGH email(s) not alerted`,
+      message: `Reconciliation found HIGH-tier emails in the last 24h that never fired a [NEW] alert:\n\n${lines.join("\n")}\n\nLikely watcher was stalled during their arrival.`,
+      priority: 5,
+      tags: ["mag_right"],
+    });
+  } catch (e: any) {
+    console.error(`[claim-monitor] daily reconciliation error: ${e?.message || e}`);
+  }
+}
+
+function scheduleDailyReconciliation() {
+  const delay = nextReconcileDelayMs();
+  console.log(`[claim-monitor] daily reconciliation scheduled in ${Math.round(delay / 60000)}m (next 23:55 PT)`);
+  setTimeout(() => {
+    runDailyReconciliation().finally(() => {
+      // Reschedule for the next 24h cycle.
+      setInterval(() => {
+        runDailyReconciliation().catch(() => { /* swallow */ });
+      }, 24 * 60 * 60 * 1000);
+    });
+  }, delay);
 }
