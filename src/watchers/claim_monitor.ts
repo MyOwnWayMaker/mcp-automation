@@ -198,6 +198,59 @@ function pruneAlerted() {
 
 // ── Body extraction ─────────────────────────────────────────────────────────
 
+// XactAnalysis-style notification emails ALWAYS arrive from
+// donotreply@xactware.com but quote the actual human sender + CCs in the body
+// using forward-style headers ("From: ...", "Cc: ...", etc.). Replying to
+// donotreply@ bounces, so for these emails we surface the real sender so the
+// drafter can reply to the human directly via regular Gmail.
+function extractEmbeddedFrom(body: string): { from: string | null; cc: string | null } {
+  // Use only the first 4 KB of body — the embedded headers are at the top.
+  const head = body.slice(0, 4000);
+  const fromMatch = head.match(/^\s*From:\s*(.+?)\s*$/im);
+  const ccMatch = head.match(/^\s*Cc:\s*(.+?)\s*$/im);
+  const fromValue = fromMatch ? fromMatch[1].trim() : null;
+  const ccValue = ccMatch ? ccMatch[1].trim() : null;
+  return { from: fromValue, cc: ccValue };
+}
+
+// Build a Reply-All cc list: original Cc + original To addresses minus self.
+// Returns comma-separated string or null if nothing.
+function buildReplyAllCc(args: {
+  originalTo: string;
+  originalCc: string;
+  self: string;
+  primaryRecipient: string; // the address we're putting in `To:` (excluded from Cc)
+}): string | null {
+  const { originalTo, originalCc, self, primaryRecipient } = args;
+  const selfLower = (self || "").toLowerCase();
+  const primaryLower = (primaryRecipient || "").toLowerCase();
+  const primaryEmail = (primaryLower.match(/<([^>]+)>/) || [null, primaryLower])[1] as string;
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const collect = (raw: string) => {
+    if (!raw) return;
+    // Split on commas but be tolerant of "Name, Lastname <addr>" patterns by
+    // also looking for the "<addr>" form. Simpler: split on commas + trim.
+    for (const part of raw.split(",")) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      const email = ((trimmed.match(/<([^>]+)>/) || [null, trimmed])[1] as string).toLowerCase().trim();
+      if (!email) continue;
+      if (email === selfLower) continue;
+      if (email === primaryEmail) continue;
+      if (seen.has(email)) continue;
+      seen.add(email);
+      out.push(trimmed);
+    }
+  };
+
+  collect(originalTo);
+  collect(originalCc);
+  return out.length ? out.join(", ") : null;
+}
+
 function extractBody(payload: any): string {
   if (!payload) return "";
   if (payload.body?.data) {
@@ -318,8 +371,34 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     if (!tier) {
       const dateHeader = get("Date");
       const messageIdHeader = get("Message-ID") || get("Message-Id") || get("message-id");
+      const toHeader = get("To");
       const ccHeader = get("Cc");
       const hasUnsubscribe = headers.some(h => /^list-unsubscribe$/i.test(h.name || ""));
+
+      // XA notification emails are sent from donotreply@xactware.com but the
+      // ACTUAL human author is in the body's forward-style "From:" line.
+      // Replying to donotreply@ bounces — we need the real person.
+      let primaryRecipient = fromHeader;
+      let extraCcFromBody: string | null = null;
+      if (senderAddr === "donotreply@xactware.com") {
+        const embedded = extractEmbeddedFrom(body);
+        if (embedded.from) {
+          primaryRecipient = embedded.from;
+          extraCcFromBody = embedded.cc;
+          console.log(`[claim-monitor] xactware notification — replying to embedded sender ${embedded.from}`);
+        }
+      }
+
+      // Reply-All by default: take original To + Cc (and any embedded Cc from
+      // XA-style notifications), remove self + the primary reply target, and
+      // CC the rest. Matches Hakiel's "always reply-all" rule.
+      const replyAllCc = buildReplyAllCc({
+        originalTo: toHeader,
+        originalCc: [ccHeader, extraCcFromBody].filter(Boolean).join(", "),
+        self: SELF_ADDRESS,
+        primaryRecipient,
+      });
+
       try {
         const verdict = await withTimeout(
           classifyImportant({
@@ -347,8 +426,8 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
                 createImportantDraft({
                   thread_id: full.data.threadId,
                   in_reply_to_message_id: messageIdHeader,
-                  reply_to_address: fromHeader,
-                  cc_addresses: ccHeader || undefined,
+                  reply_to_address: primaryRecipient,
+                  cc_addresses: replyAllCc || undefined,
                   original_subject: subject,
                   reply_body: replyText,
                   category: verdict.category,

@@ -28,7 +28,7 @@
 
 import fs from "fs";
 import path from "path";
-import { getGmailClient } from "../tools/gmail.js";
+import { getGmailClient, pushDraftSnapshotNtfy } from "../tools/gmail.js";
 
 // ── Hakiel's primary email (used for "did Hakiel reply recently" check) ─────
 // Pulled from sendAs.isPrimary detection at runtime; cached.
@@ -71,6 +71,16 @@ async function getReplySignatureHtml(): Promise<string | null> {
     console.error(`[important-drafter] signature fetch failed: ${e?.message || e}`);
     return null;
   }
+}
+
+// Hakiel doesn't use em-dashes (auto-reply-draft-style memory). Strip any
+// LLM-produced em-dash and en-dash, replacing with a standard hyphen flanked
+// by spaces. Other style normalizations live here too as they accrue.
+function applyVoiceNormalization(body: string): string {
+  return body
+    .replace(/—/g, " - ") // em-dash → " - "
+    .replace(/–/g, " - ") // en-dash → " - "
+    .replace(/[ ]{2,}/g, " ");
 }
 
 // Strip HTML tags + decode common entities for plain-text alternative.
@@ -187,8 +197,6 @@ const REPO_ROOT = (() => {
   return path.resolve(here, "../..");
 })();
 const AUDIT_LOG_PATH = path.join(REPO_ROOT, "logs", "important_drafts_audit.jsonl");
-const AUDIT_VERBOSE_LIMIT = 5;
-let _auditCount = 0;
 
 function appendAuditLog(entry: Record<string, any>) {
   try {
@@ -238,13 +246,15 @@ export async function createImportantDraft(req: DraftRequest): Promise<DraftResu
     ? req.original_subject
     : `Re: ${req.original_subject}`;
 
+  const replyBody = applyVoiceNormalization(req.reply_body);
+
   const bodyText = signature_html
-    ? `${req.reply_body}\n\n${htmlToPlain(signature_html)}`
-    : req.reply_body;
+    ? `${replyBody}\n\n${htmlToPlain(signature_html)}`
+    : replyBody;
 
   const bodyHtml = signature_html
-    ? `${plainToHtmlSafe(req.reply_body)}<br><br>${signature_html}`
-    : plainToHtmlSafe(req.reply_body);
+    ? `${plainToHtmlSafe(replyBody)}<br><br>${signature_html}`
+    : plainToHtmlSafe(replyBody);
 
   const mime = buildMimeMessage({
     to: req.reply_to_address,
@@ -272,22 +282,38 @@ export async function createImportantDraft(req: DraftRequest): Promise<DraftResu
     });
     const draftId = res.data.id || "(unknown)";
 
-    if (_auditCount < AUDIT_VERBOSE_LIMIT) {
-      _auditCount++;
-      appendAuditLog({
-        timestamp: new Date().toISOString(),
-        draft_id: draftId,
-        thread_id: req.thread_id,
-        from_orig: req.reply_to_address,
-        subject_orig: req.original_subject,
-        category: req.category,
-        classifier_body_chars: req.reply_body.length,
-        signature_appended,
-        signature_source: signature_html ? "sendAs.signature" : null,
-        signature_chars: signature_html ? signature_html.length : 0,
-        source_email_id: req.source_email_id,
-      });
-    }
+    // Always-on audit log (no 5-entry cap). Captures the LLM-drafted body so
+    // a later "what did Hakiel actually send" diff (separate sweep, TBD) can
+    // learn his voice over time.
+    appendAuditLog({
+      timestamp: new Date().toISOString(),
+      draft_id: draftId,
+      thread_id: req.thread_id,
+      from_orig: req.reply_to_address,
+      to_actual: req.reply_to_address,
+      cc_actual: req.cc_addresses || null,
+      subject_orig: req.original_subject,
+      category: req.category,
+      classifier_body_chars: req.reply_body.length,
+      draft_body_at_create: req.reply_body,
+      signature_appended,
+      signature_source: signature_html ? "sendAs.signature" : null,
+      signature_chars: signature_html ? signature_html.length : 0,
+      source_email_id: req.source_email_id,
+    });
+
+    // Push the full draft snapshot to ntfy (subject + To/Cc + body + tap-to-
+    // open link). Matches the rich format gmail_create_draft emits, fixing the
+    // 2026-05-19 complaint that auto-drafts fired silently with only a
+    // "Draft ready" status line instead of the actual composed text.
+    const link = `https://mail.google.com/mail/u/0/#drafts?compose=${draftId}`;
+    pushDraftSnapshotNtfy({
+      to: req.reply_to_address,
+      cc: req.cc_addresses,
+      subject,
+      body: bodyText,
+      link,
+    }).catch(() => { /* best-effort, never block the return */ });
 
     return { status: "drafted", draft_id: draftId, signature_appended };
   } catch (e: any) {

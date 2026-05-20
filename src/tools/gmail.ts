@@ -107,7 +107,7 @@ function shortRecipient(to: string): string {
  * (To/Subject then full body), truncating only if it would exceed ntfy's
  * ~4KB cap.
  */
-async function pushDraftSnapshotNtfy(args: {
+export async function pushDraftSnapshotNtfy(args: {
   to: string; subject: string; body: string; cc?: string; bcc?: string; link: string;
 }): Promise<string> {
   const topic = process.env.CLAIM_MONITOR_NTFY_TOPIC || "dino-claims-alerts-fpx";
