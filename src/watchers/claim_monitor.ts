@@ -25,6 +25,7 @@ import { google } from "googleapis";
 import { getGoogleAuthClient } from "../auth/google.js";
 import { classifyImportant, buildImportantNtfyPayload } from "./important_classifier.js";
 import { createImportantDraft } from "./important_drafter.js";
+import { runOrchestrator } from "./assignment_orchestrator.js";
 import { getMatchableText } from "../util/email_text.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -509,6 +510,27 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
 
     console.log(`[claim-monitor] [${tier}] ${fromHeader} - ${subject}`);
     await sendNtfy({ title, message, priority, tags });
+
+    // Fire the orchestrator scaffold for new assignments / supplements /
+    // reinspections. Fire-and-forget — never blocks the alert path, never
+    // throws into the caller. Inside it parses metadata, creates the Drive
+    // folder (idempotent), geocodes + classifies the loss address, and
+    // pushes a second "[ORCH][...]" ntfy with all the details Hakiel needs
+    // to act. CORRECTION + MEDIUM tiers don't trigger the orchestrator —
+    // they're already-existing claims being updated, not new work.
+    if (tier === "HIGH" || tier === "SUPP" || tier === "REINSP") {
+      runOrchestrator({
+        tier,
+        fromHeader,
+        subject,
+        body,
+        msgId: m.id,
+        threadId: full.data.threadId ?? undefined,
+      }).catch((e: any) => {
+        console.error(`[orchestrator] runOrchestrator threw: ${e?.message || e}`);
+      });
+    }
+
     alerted.set(m.id, Date.now());
     alerts++;
   }
