@@ -1,21 +1,39 @@
 /**
  * XactAnalysis auth script — Windows/Railway-portable.
  *
- * Drives Verisk SSO with email + password, clicks email-MFA option,
- * polls the user's primary Gmail inbox for the OTP, types it in,
- * and saves the resulting session.
+ * Drives Verisk SSO with email + password, picks SMS MFA by default
+ * (per Hakiel's xa-reauth-prefs), waits for the SMS OTP to arrive via
+ * one of: env var, supply file, or live stdin. Auto-fills, submits,
+ * saves the session, pushes to Railway.
  *
  * Run from repo root:
  *   node scripts/auth-xactanalysis.mjs
  *
- * Reads from env vars (or falls back to local files at the repo root):
+ * Required env (or .env file at repo root):
+ *   - XACTANALYSIS_EMAIL      Verisk SSO email
+ *   - XACTANALYSIS_PASSWORD   Verisk SSO password
+ *
+ * Optional env:
+ *   - MFA_METHOD              "sms" (default) | "email"
+ *   - XACTANALYSIS_SMS_OTP    Pre-supplied SMS OTP; if set, skips the wait
+ *   - XACTANALYSIS_OTP_FILE   Path the script polls for the OTP (default
+ *                             /tmp/xactanalysis-otp.txt). When the cron
+ *                             runs unattended, Hakiel writes the texted
+ *                             OTP to this file (e.g. `echo 123456 >`),
+ *                             the script reads it and deletes it.
+ *   - XACTANALYSIS_OTP_WAIT_MS  How long to wait for the OTP before
+ *                             timing out. Default 300000 (5 min).
+ *   - XA_OTP_NTFY_TOPIC       ntfy topic for "OTP needed" alerts.
+ *                             Default `hakiel-mac-mini-xa-reauth`.
+ *   - SKIP_RAILWAY_PUSH       "1" to skip the post-auth Railway push.
+ *
+ * Required only when MFA_METHOD=email:
  *   - GOOGLE_CREDENTIALS_JSON or credentials.json
  *   - GOOGLE_TOKEN_JSON       or token.json
- *   - XACTANALYSIS_EMAIL      (required — Verisk SSO email)
- *   - XACTANALYSIS_PASSWORD   (required — Verisk SSO password)
  *
  * Writes:
  *   - xactanalysis_session.json (full session, repo root)
+ *   - XACTANALYSIS_SESSION_JSON on Railway (via update-railway-sessions)
  */
 import { chromium } from "playwright";
 import { google } from "googleapis";
@@ -69,6 +87,113 @@ function buildGmailClient() {
   const oauth2 = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
   oauth2.setCredentials(token);
   return google.gmail({ version: "v1", auth: oauth2 });
+}
+
+// ── SMS OTP supply ──────────────────────────────────────────────────────────
+//
+// Three supply paths, checked in priority order:
+//   (1) XACTANALYSIS_SMS_OTP env var — pre-supplied, fastest, used by tests.
+//   (2) OTP file at XACTANALYSIS_OTP_FILE — polled every 3s. Hakiel writes
+//       the texted OTP to this file from any shell (`echo 123456 > <path>`)
+//       and the script picks it up. File is deleted after read for single-
+//       use safety. This is the path the launchd cron uses.
+//   (3) Live stdin — only when running with a TTY. Hakiel types the OTP at
+//       the prompt.
+
+const OTP_FILE_PATH = process.env.XACTANALYSIS_OTP_FILE
+  ?? "/tmp/xactanalysis-otp.txt";
+const OTP_WAIT_MS = parseInt(process.env.XACTANALYSIS_OTP_WAIT_MS || "300000", 10);
+const OTP_NTFY_TOPIC = process.env.XA_OTP_NTFY_TOPIC || "hakiel-mac-mini-xa-reauth";
+
+async function notifyOtpNeeded() {
+  const url = `https://ntfy.sh/${encodeURIComponent(OTP_NTFY_TOPIC)}`;
+  const body = `XA needs the SMS OTP. Write the code to ${OTP_FILE_PATH}:\n  echo 123456 > ${OTP_FILE_PATH}\nWaits up to ${Math.round(OTP_WAIT_MS / 1000)}s.`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        "Title": "[XA re-auth] need SMS OTP",
+        "Priority": "5",
+        "Tags": "key,sms",
+        "Content-Type": "text/plain; charset=utf-8",
+      },
+      body,
+    });
+    console.log(`>>> ntfy alert sent to topic "${OTP_NTFY_TOPIC}"`);
+  } catch (e) {
+    console.log("  (ntfy alert failed, continuing):", e.message);
+  }
+}
+
+function readOtpFromFile() {
+  try {
+    if (!fs.existsSync(OTP_FILE_PATH)) return null;
+    const raw = fs.readFileSync(OTP_FILE_PATH, "utf8");
+    const m = raw.match(/\b(\d{4,8})\b/);
+    if (!m) return null;
+    // Single-use: delete the file after reading. Prevents stale OTPs from
+    // a previous run polluting the next.
+    try { fs.unlinkSync(OTP_FILE_PATH); } catch { /* ignore */ }
+    return m[1];
+  } catch {
+    return null;
+  }
+}
+
+async function readOtpFromStdin() {
+  if (!process.stdin.isTTY) return null;
+  return new Promise((resolve) => {
+    process.stdout.write(`>>> Enter the SMS OTP (or write it to ${OTP_FILE_PATH} from another shell): `);
+    const onData = (chunk) => {
+      const line = String(chunk).trim();
+      const m = line.match(/\b(\d{4,8})\b/);
+      if (m) {
+        process.stdin.removeListener("data", onData);
+        process.stdin.pause();
+        resolve(m[1]);
+      }
+    };
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", onData);
+    process.stdin.resume();
+  });
+}
+
+async function fetchOtpForSms() {
+  // Path 1: env var — used in tests and pre-supplied flows.
+  const fromEnv = (process.env.XACTANALYSIS_SMS_OTP || "").trim();
+  if (/^\d{4,8}$/.test(fromEnv)) {
+    console.log(`✅ OTP supplied via XACTANALYSIS_SMS_OTP env var`);
+    return fromEnv;
+  }
+
+  // Wipe any stale OTP file from a previous run before we start polling.
+  try { fs.unlinkSync(OTP_FILE_PATH); } catch { /* not there, fine */ }
+
+  await notifyOtpNeeded();
+  console.log(`>>> Waiting up to ${Math.round(OTP_WAIT_MS / 1000)}s for SMS OTP via file ${OTP_FILE_PATH} or stdin`);
+
+  // Path 2 (file polling) and Path 3 (stdin) raced together. Whichever
+  // resolves first wins; the loser is left dangling but it's a one-shot
+  // script so process exit will reap it.
+  const filePoll = (async () => {
+    const deadline = Date.now() + OTP_WAIT_MS;
+    while (Date.now() < deadline) {
+      const otp = readOtpFromFile();
+      if (otp) {
+        console.log(`✅ OTP read from ${OTP_FILE_PATH}`);
+        return otp;
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    return null;
+  })();
+
+  const stdinPath = readOtpFromStdin();
+
+  const otp = await Promise.race([filePoll, stdinPath]);
+  if (!otp) throw new Error(`Timed out after ${Math.round(OTP_WAIT_MS / 1000)}s waiting for SMS OTP.`);
+  return otp;
 }
 
 async function fetchOtpFromGmail(afterMs, timeoutMs = 90000) {
@@ -151,10 +276,12 @@ if (await pwdField.count() > 0) {
   await page.waitForTimeout(4000);
 }
 
-// Step 3: MFA — choose method based on MFA_METHOD env var (default "email").
+// Step 3: MFA — choose method based on MFA_METHOD env var.
+// Default is now "sms" per Hakiel's xa-reauth-prefs (SMS, not email).
+// "sms"   → click second SELECT (SMS to phone), wait for OTP via env var,
+//           file (XACTANALYSIS_OTP_FILE), or stdin — then auto-fill.
 // "email" → click first SELECT (email) and poll Gmail for the OTP.
-// "sms"   → click second SELECT (SMS to phone) and read the OTP from stdin.
-const MFA_METHOD = (process.env.MFA_METHOD || "email").toLowerCase();
+const MFA_METHOD = (process.env.MFA_METHOD || "sms").toLowerCase();
 console.log(`\n>>> Waiting for MFA screen... (method=${MFA_METHOD})`);
 const mfaTriggeredAt = Date.now();
 
@@ -167,10 +294,8 @@ try {
   if (MFA_METHOD === "sms") {
     await selectButtons.nth(1).click();
     console.log("✅ Clicked second SELECT (SMS / text option)");
-    console.log(">>> SMS code will arrive on your phone — please type it directly into the browser's OTP field. Script will wait for the dashboard to load.");
     await page.waitForTimeout(2000);
-    // Skip auto-fill; user enters code in the visible browser. The dashboard
-    // wait at the bottom of this script handles the post-OTP redirect.
+    otp = await fetchOtpForSms();
   } else {
     await selectButtons.first().click();
     console.log("✅ Clicked first SELECT (email option)");
