@@ -47,19 +47,98 @@ function encodeEmail(params: {
   return Buffer.from(lines).toString("base64url");
 }
 
+// Domains Hakiel controls / treats as internal. Sends to these bypass the
+// strict-send guardrail because they don't carry the same out-the-door risk
+// as third-party recipients (no client-facing reputation hit if something
+// goes wrong; he can immediately retract via Gmail's own UI if needed).
+const INTERNAL_SEND_DOMAINS = new Set(
+  (process.env.GMAIL_INTERNAL_DOMAINS || "erseville.com").split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
+);
+
+function extractRecipientDomains(...fields: (string | undefined)[]): string[] {
+  const domains: string[] = [];
+  for (const f of fields) {
+    if (!f) continue;
+    for (const part of f.split(",")) {
+      const m = part.match(/<([^>]+)>/) || [null, part.trim()];
+      const addr = (m[1] || "").trim().toLowerCase();
+      const at = addr.indexOf("@");
+      if (at > 0 && at < addr.length - 1) domains.push(addr.slice(at + 1));
+    }
+  }
+  return domains;
+}
+
+function allRecipientsInternal(...fields: (string | undefined)[]): boolean {
+  const domains = extractRecipientDomains(...fields);
+  if (domains.length === 0) return false; // no parseable recipient → not internal-only
+  return domains.every(d => INTERNAL_SEND_DOMAINS.has(d));
+}
+
+/**
+ * Send an email via Gmail. To prevent another direct-send bypass (the Paul
+ * Kuhr incident on 2026-05-19 where a third-party email shipped without
+ * draft review), this tool enforces a strict-send guardrail when ANY
+ * recipient is on an external domain:
+ *
+ *   - Either pass `draft_id` (preferred) — sends an existing draft Hakiel
+ *     reviewed; the tool internally promotes to gmail_send_draft semantics.
+ *   - Or pass `approved_at_iso_timestamp` (ISO-8601 string, must be within
+ *     the last 15 min so a stale approval can't be replayed) AND
+ *     `force_send: true` as an explicit override. Used for time-sensitive
+ *     sends where Hakiel approved verbally / via ntfy.
+ *
+ * Sends with ALL recipients on internal domains (GMAIL_INTERNAL_DOMAINS env
+ * var, default "erseville.com") bypass the check — internal sends are
+ * low-risk and the friction isn't worth it.
+ */
 export async function gmailSendEmail(args: {
   to: string;
   subject: string;
   body: string;
   cc?: string;
+  bcc?: string;
+  draft_id?: string;
+  approved_at_iso_timestamp?: string;
+  force_send?: boolean;
 }): Promise<CallToolResult> {
+  // If a draft_id is given, route through send-draft semantics — that's the
+  // happy path (reviewed draft → ship).
+  if (args.draft_id) {
+    return gmailSendDraft({ draft_id: args.draft_id });
+  }
+
+  // Strict-send guardrail for third-party recipients.
+  const internalOnly = allRecipientsInternal(args.to, args.cc, args.bcc);
+  if (!internalOnly) {
+    const approvedAt = (args.approved_at_iso_timestamp || "").trim();
+    const approvedMs = approvedAt ? Date.parse(approvedAt) : NaN;
+    const ageMs = Number.isFinite(approvedMs) ? Date.now() - approvedMs : NaN;
+    const approvalFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 15 * 60 * 1000;
+
+    if (!args.force_send || !approvalFresh) {
+      return makeTextContent(
+        "❌ gmail_send_email REFUSED: third-party recipient(s) detected and no valid pre-send approval.\n\n" +
+        `Recipients: to=${args.to}${args.cc ? ` | cc=${args.cc}` : ""}${args.bcc ? ` | bcc=${args.bcc}` : ""}\n` +
+        `Internal domains (no-check): ${[...INTERNAL_SEND_DOMAINS].join(", ") || "(none)"}\n\n` +
+        "Choose one of:\n" +
+        "  (1) gmail_create_draft + (Hakiel reviews) + gmail_send_draft(draft_id=...) — preferred.\n" +
+        "  (2) Re-call with draft_id of an existing reviewed draft.\n" +
+        "  (3) Re-call with approved_at_iso_timestamp=<ISO-8601 within last 15 min> AND force_send=true — only when an explicit Hakiel approval has just been received."
+      );
+    }
+  }
+
   const gmail = await getGmail();
   const raw = encodeEmail(args);
   const res = await gmail.users.messages.send({
     userId: "me",
     requestBody: { raw },
   });
-  return makeTextContent(`Email sent. Message ID: ${res.data.id}`);
+  return makeTextContent(
+    `✅ Email sent. Message ID: ${res.data.id}\n` +
+    `Path: ${internalOnly ? "internal-only (guardrail skipped)" : "force_send with fresh approval"}`
+  );
 }
 
 /**
@@ -209,6 +288,87 @@ export async function gmailCreateDraft(args: {
     `Draft ID: ${draftId}\nMessage ID: ${messageId}\nOpen in Gmail: ${link}\n\n` +
     `--- VERIFIED SNAPSHOT (server-stored draft) ---\n${snapHeaders}\n\n${snapBody}`
   );
+}
+
+/**
+ * Permanently delete a Gmail draft by ID. Useful when a draft was created in
+ * error or has been superseded — Gmail's UI doesn't expose batch-delete from
+ * the drafts folder cleanly, but the API does. Returns success/failure plus
+ * the (brief) snapshot we had of the deleted draft for the audit trail.
+ */
+export async function gmailDeleteDraft(args: { draft_id: string }): Promise<CallToolResult> {
+  if (!args.draft_id) return makeTextContent("❌ draft_id is required.");
+  const gmail = await getGmail();
+  // Capture a small audit snapshot before deletion so we can surface what
+  // disappeared. Best-effort; deletion proceeds even if the snapshot fails
+  // (e.g., draft already gone).
+  let snapshot = "(could not read draft before delete)";
+  try {
+    const got = await gmail.users.drafts.get({
+      userId: "me",
+      id: args.draft_id,
+      format: "metadata",
+    });
+    const headers = got.data.message?.payload?.headers ?? [];
+    const h = (n: string) => headers.find((x) => (x.name ?? "").toLowerCase() === n)?.value ?? "";
+    snapshot = `To: ${h("to")}${h("cc") ? ` | Cc: ${h("cc")}` : ""} | Subject: ${h("subject")}`;
+  } catch { /* ignore */ }
+
+  try {
+    await gmail.users.drafts.delete({ userId: "me", id: args.draft_id });
+    return makeTextContent(`✅ Draft ${args.draft_id} deleted.\nDeleted draft snapshot: ${snapshot}`);
+  } catch (e: any) {
+    return makeTextContent(`❌ Failed to delete draft ${args.draft_id}: ${e?.message || e}`);
+  }
+}
+
+/**
+ * Send an existing Gmail draft and remove it from the drafts folder in one
+ * API call (users.drafts.send). This is the right tool when a draft was
+ * created via gmail_create_draft (or in the Gmail UI), reviewed, and is
+ * ready to ship — sending via gmail_send_email would orphan the draft.
+ *
+ * Reads the draft back BEFORE send so we have a verified snapshot of what
+ * actually got sent for the audit trail. Returns the resulting message+
+ * thread IDs and the snapshot.
+ */
+export async function gmailSendDraft(args: { draft_id: string }): Promise<CallToolResult> {
+  if (!args.draft_id) return makeTextContent("❌ draft_id is required.");
+  const gmail = await getGmail();
+
+  // Snapshot before send — same pattern as gmail_create_draft uses post-create.
+  let snapHeaders = "";
+  let snapBody = "(could not read draft before send)";
+  try {
+    const got = await gmail.users.drafts.get({ userId: "me", id: args.draft_id, format: "full" });
+    const payload = got.data.message?.payload;
+    const headers = payload?.headers ?? [];
+    const h = (n: string) => headers.find((x) => (x.name ?? "").toLowerCase() === n)?.value ?? "";
+    snapHeaders =
+      `To: ${h("to")}\n` +
+      (h("cc") ? `Cc: ${h("cc")}\n` : "") +
+      (h("bcc") ? `Bcc: ${h("bcc")}\n` : "") +
+      `Subject: ${h("subject")}`;
+    snapBody = decodeDraftBody(payload).trim() || "(BODY EMPTY IN STORED DRAFT)";
+  } catch (e: any) {
+    snapBody = `(drafts.get failed: ${e?.message || e})`;
+  }
+
+  try {
+    const res = await gmail.users.drafts.send({
+      userId: "me",
+      requestBody: { id: args.draft_id },
+    });
+    const messageId = res.data.id ?? "";
+    const threadId = res.data.threadId ?? "";
+    return makeTextContent(
+      `✅ Draft ${args.draft_id} sent (and removed from Drafts).\n` +
+      `Sent Message ID: ${messageId}\nThread ID: ${threadId}\n\n` +
+      `--- SENT SNAPSHOT (was in the draft we just sent) ---\n${snapHeaders}\n\n${snapBody}`
+    );
+  } catch (e: any) {
+    return makeTextContent(`❌ Failed to send draft ${args.draft_id}: ${e?.message || e}`);
+  }
 }
 
 export async function gmailFindEmail(args: {

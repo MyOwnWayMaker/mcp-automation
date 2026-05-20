@@ -19,7 +19,7 @@ import {
 import express from "express";
 
 // Tool implementations
-import { gmailSendEmail, gmailCreateDraft, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
+import { gmailSendEmail, gmailCreateDraft, gmailDeleteDraft, gmailSendDraft, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
 import { startClaimMonitor } from "./watchers/claim_monitor.js";
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
@@ -57,8 +57,10 @@ import { buildNowPayload } from "./util/now.js";
 
 const TOOLS: Tool[] = [
   // Gmail
-  { name: "gmail_send_email", description: "Send an email via Gmail", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" } }, required: ["to", "subject", "body"] } },
+  { name: "gmail_send_email", description: "Send an email via Gmail. STRICT-SEND GUARDRAIL: if ANY recipient is on a third-party domain (anything outside GMAIL_INTERNAL_DOMAINS — default erseville.com), the tool REFUSES unless either (a) draft_id is provided (preferred: a reviewed draft is sent via gmail_send_draft semantics), or (b) approved_at_iso_timestamp is within the last 15 min AND force_send=true. Sends to internal-only recipients bypass the check.", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" }, bcc: { type: "string" }, draft_id: { type: "string", description: "Send an existing reviewed draft instead of composing a new email. Bypasses the guardrail." }, approved_at_iso_timestamp: { type: "string", description: "ISO-8601 timestamp of explicit Hakiel approval for this third-party send. Must be within the last 15 minutes. Pair with force_send:true." }, force_send: { type: "boolean", description: "Set true alongside a fresh approved_at_iso_timestamp to bypass the strict-send guardrail for a one-off third-party send." } }, required: ["to", "subject", "body"] } },
   { name: "gmail_create_draft", description: "Create a Gmail DRAFT (does NOT send) so Hakiel can review/edit in his Gmail compose window before sending. Same params as gmail_send_email plus optional bcc. Returns the draft ID, message ID, and a deep link to open the draft in the Gmail web UI. Use this instead of gmail_send_email whenever a human should review before send.", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" }, bcc: { type: "string" } }, required: ["to", "subject", "body"] } },
+  { name: "gmail_delete_draft", description: "Permanently delete a Gmail draft by its draft ID. Captures a brief snapshot (To/Cc/Subject) before deletion for audit trail. Use when a draft was created in error or has been superseded by a newer version.", inputSchema: { type: "object", properties: { draft_id: { type: "string", description: "Numeric Gmail draft ID (from gmail_create_draft output or Gmail compose URL ?compose=<id>)" } }, required: ["draft_id"] } },
+  { name: "gmail_send_draft", description: "Send an existing Gmail draft and remove it from the Drafts folder in one API call. Reads the draft back BEFORE sending so the returned response carries the exact snapshot that was sent. Use this when a draft has been reviewed and is ready to ship — sending via gmail_send_email would orphan the draft.", inputSchema: { type: "object", properties: { draft_id: { type: "string", description: "Numeric Gmail draft ID (from gmail_create_draft output or Gmail compose URL ?compose=<id>)" } }, required: ["draft_id"] } },
   { name: "gmail_find_email", description: "Search for emails using Gmail search syntax", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
   { name: "gmail_get_email", description: "Get full content of an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "gmail_reply_to_email", description: "Reply to an existing email thread", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
@@ -264,6 +266,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
   switch (name) {
     case "gmail_send_email": return gmailSendEmail(args as any);
     case "gmail_create_draft": return gmailCreateDraft(args as any);
+    case "gmail_delete_draft": return gmailDeleteDraft(args as any);
+    case "gmail_send_draft": return gmailSendDraft(args as any);
     case "gmail_find_email": return gmailFindEmail(args as any);
     case "gmail_get_email": return gmailGetEmail(args as any);
     case "gmail_reply_to_email": return gmailReplyToEmail(args as any);
