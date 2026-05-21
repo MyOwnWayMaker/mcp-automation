@@ -19,7 +19,7 @@ const TAB_IDS: Record<string, string> = {
   details:       "d_assignment",     // assignment summary (current default)
   client_policy: "d_clientpolicy",
   notes:         "d_notes",
-  documents:     "d_documents",
+  documents:     "d_imgprint",   // XA's documents tab container is d_imgprint (NOT d_documents)
   map:           "d_map",
   action_items:  "d_actionitems",
   history:       "d_history",
@@ -1149,6 +1149,113 @@ export async function xactGetNotes(args: {
     const notesIdx = bodyText.indexOf("Add a Note");
     const notesSection = notesIdx >= 0 ? bodyText.slice(notesIdx) : bodyText;
     return ok(`Notes for assignment ${args.mfn}:\n\n${notesSection.substring(0, 3000)}`);
+  } finally {
+    await close();
+  }
+}
+
+// ── xact_list_documents ──────────────────────────────────────────────────────
+// Lists the DOCUMENTS tab as structured JSON. XA renders the doc list in the
+// d_imgprint container (NOT d_documents), and ONLY after the tab is *clicked*
+// (gotoDetailTab does not switch it — that's why the old wrapper returned the
+// page summary). Each row's onclick opens
+// CXAimgoutput.jsp?ddid=<mfn>&image_id=<id>; that image_id is the handle
+// xact_download_document uses to fetch the bytes.
+export async function xactListDocuments(args: { mfn: string }): Promise<CallToolResult> {
+  const { browser, page, close } = await getPage();
+  try {
+    await page.goto(`${BASE}/cxa/detail.jsp?mfn=${args.mfn}&src=ip`);
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(4000);
+    // Clicking the "Documents (N)" tab is what populates d_imgprint.
+    await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll("a, button, div, span, li, td"));
+      const tab = els.find(
+        (e) => /^Documents\s*\(\d+\)/i.test((e.textContent || "").trim()) && (e as HTMLElement).offsetParent !== null,
+      );
+      if (tab) (tab as HTMLElement).click();
+    });
+    await page.waitForTimeout(6000);
+    const docs = await page.evaluate(() => {
+      const seen = new Set<string>();
+      const out: { filename: string; image_id: string; date: string }[] = [];
+      const extRe = /\.(pdf|jpe?g|png|esx|xml|docx?|eml|msg|tiff?|zip|xlsx?|txt|csv)\b/i;
+      for (const tr of Array.from(document.querySelectorAll("tr"))) {
+        const oc = tr.getAttribute("onclick") || "";
+        const m = oc.match(/image_id=(\d+)/);
+        if (!m || seen.has(m[1])) continue;
+        seen.add(m[1]);
+        let filename = "";
+        const a = Array.from(tr.querySelectorAll("a")).find((x) => extRe.test((x.textContent || "").trim()));
+        if (a) filename = (a.textContent || "").trim();
+        else {
+          const t = (tr as HTMLElement).innerText.replace(/\s+/g, " ").trim();
+          const fm = t.match(/([^\s][^/\\]*?\.(?:pdf|jpe?g|png|esx|xml|docx?|eml|msg|tiff?|zip|xlsx?|txt|csv))\b/i);
+          filename = fm ? fm[1].trim() : t.slice(0, 80);
+        }
+        const dm = (tr as HTMLElement).innerText.match(/([A-Z][a-z]{2}\s+\d{1,2},\s*\d{4})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)?/);
+        out.push({ filename, image_id: m[1], date: dm ? dm[1] + (dm[2] ? " " + dm[2] : "") : "" });
+      }
+      return out;
+    });
+    return ok(JSON.stringify({ mfn: args.mfn, count: docs.length, documents: docs }, null, 2));
+  } finally {
+    await close();
+  }
+}
+
+// ── xact_download_document ───────────────────────────────────────────────────
+// Downloads a single document's bytes (base64) by image_id (from
+// xact_list_documents). Fetches CXAimgoutput.jsp through the authenticated
+// context request so the session cookies apply. Returns base64 ready to hand to
+// drive_upload_file(file_bytes_b64). If XA returns an HTML viewer wrapper
+// instead of the raw file, surfaces a diagnostic rather than garbage bytes.
+export async function xactDownloadDocument(args: {
+  mfn: string;
+  image_id: string;
+  filename?: string;
+}): Promise<CallToolResult> {
+  const { browser, context, page, close } = await getPage();
+  try {
+    await page.goto(`${BASE}/cxa/detail.jsp?mfn=${args.mfn}&src=ip`);
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(1500);
+    const origin = "https://www.xactanalysis.com";
+    const url = `${BASE}/cxa/CXAimgoutput.jsp?ddid=${args.mfn}&image_id=${args.image_id}&xlink=false&src=ip&filterTags=&display_header=N&isDialog=Y`;
+    let resp = await context.request.get(url, {
+      headers: { Referer: `${BASE}/cxa/detail.jsp?mfn=${args.mfn}&src=ip` },
+    });
+    let status = resp.status();
+    let ct = (resp.headers()["content-type"] || "").toLowerCase();
+    let buf = await resp.body();
+
+    // CXAimgoutput.jsp doesn't serve the file — it returns a tiny JS redirect
+    // (`<script>window.location = '/apps/shared/XNStreamFile?ddid=…&file=<id>.PDF'</script>`)
+    // to the actual stream endpoint. Follow that to get the real bytes.
+    const redir = buf.slice(0, 600).toString("utf-8").match(/window\.location\s*=\s*'([^']+)'/);
+    if (redir) {
+      const next = redir[1].startsWith("http") ? redir[1] : origin + redir[1];
+      resp = await context.request.get(next, { headers: { Referer: url } });
+      status = resp.status();
+      ct = (resp.headers()["content-type"] || "").toLowerCase();
+      buf = await resp.body();
+    }
+
+    const head = buf.slice(0, 64).toString("utf-8").toLowerCase();
+    const looksHtml = ct.includes("text/html") || head.includes("<!doctype") || head.includes("<html");
+    if (status !== 200 || looksHtml || buf.length === 0) {
+      return ok(JSON.stringify({
+        ok: false, status, content_type: ct, size_bytes: buf.length,
+        note: "Did not get a binary file (HTML viewer wrapper or error).",
+        preview: buf.slice(0, 400).toString("utf-8"),
+      }, null, 2));
+    }
+    return ok(JSON.stringify({
+      ok: true, mfn: args.mfn, image_id: args.image_id,
+      filename: args.filename || `${args.mfn}_${args.image_id}.bin`,
+      content_type: ct, size_bytes: buf.length,
+      base64: buf.toString("base64"),
+    }, null, 2));
   } finally {
     await close();
   }
