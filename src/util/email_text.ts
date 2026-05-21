@@ -127,18 +127,31 @@ export function stripQuotedReply(text: string): string {
   return out.join("\n");
 }
 
-// Final shape: subject + first BODY_CHAR_LIMIT chars of cleaned body.
-export function getMatchableText(args: {
-  subject: string;
-  payload?: any;        // raw Gmail message payload
-  plainBody?: string;   // pre-extracted plain text (used by tests + dry-run)
-}): string {
+// Final shape: subject + first `charLimit` chars of cleaned body.
+//
+// opts.stripQuotes (default true): drop quoted-reply blocks. Set FALSE for
+//   XactAnalysis "Assignment Note" notifications — their entire payload is the
+//   note, which is frequently a forwarded examiner thread ("From:/Sent:/On …
+//   wrote:"). Quote-stripping would delete the note itself, leaving only the
+//   generic subject and forcing every supplement note to fall to [STATUS].
+// opts.charLimit (default BODY_CHAR_LIMIT=1000): for the same XA notes the
+//   supplement signal can sit deep in the forwarded body, so callers raise it.
+export function getMatchableText(
+  args: {
+    subject: string;
+    payload?: any;        // raw Gmail message payload
+    plainBody?: string;   // pre-extracted plain text (used by tests + dry-run)
+  },
+  opts?: { stripQuotes?: boolean; charLimit?: number },
+): string {
+  const stripQuotes = opts?.stripQuotes ?? true;
+  const charLimit = opts?.charLimit ?? BODY_CHAR_LIMIT;
   const subject = args.subject || "";
   const raw = args.plainBody !== undefined ? args.plainBody : extractPlainTextBody(args.payload);
-  const cleaned = stripQuotedReply(raw)
+  const cleaned = (stripQuotes ? stripQuotedReply(raw) : raw)
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  const body = cleaned.substring(0, BODY_CHAR_LIMIT);
+  const body = cleaned.substring(0, charLimit);
   return body ? `${subject}\n\n${body}` : subject;
 }

@@ -118,7 +118,14 @@ function buildClaimFolderName(args: {
 }): string {
   const labels = deriveTreeLabels(args.request_date);
   const ord = ordinalPrefix(args.ordinal ?? 1);
-  const wt = args.work_type ? `(${ord}${args.work_type}) ` : "";
+  // Leading-cap the work-type word so the rendered folder reads
+  // "(Supplement)" / "(2nd Supplement)" / "(Reinspection)" — matching the
+  // existing convention (e.g. Cheryl Groves "(2nd Supplement)"). The enum
+  // value is lowercase; the ordinal prefix ("2nd ") stays lowercase.
+  const wtWord = args.work_type
+    ? args.work_type.charAt(0).toUpperCase() + args.work_type.slice(1)
+    : "";
+  const wt = args.work_type ? `(${ord}${wtWord}) ` : "";
   return `${labels.yearMonthDay}_${wt}${args.insured_name}_${args.client_short}_${args.carrier_short}_${args.loss_type}`;
 }
 

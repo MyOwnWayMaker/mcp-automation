@@ -89,7 +89,28 @@ const SUPPLEMENT_RE = /\bsupplement(al)?\s+(request|payment)\b|\bcan you supplem
 // note (2026-05-15, claim KWSKWS26030053) silently tiered as [CORRECTION].
 // This pattern is estimate-specific so it does NOT swallow genuine
 // "revise the report/photos/narrative" corrections on a submitted report.
-const SUPP_ESTIMATE_RE = /\b(revise|review and revise|adjust|update)\b[^.\n]{0,40}\bestimate\b|\b(reconstruction|contractor'?s?|reconstruction repair) estimate\b|\bapproval of the attached\b[^.\n]{0,60}\bestimate\b|\bnotes? from the contractor\b/i;
+// Note the apostrophe class ['’] so "contractor's estimate" matches whether the
+// body uses a straight (') or curly (’, from HTML &#8217;) apostrophe — XA
+// notes are HTML and decode to curly quotes, which a bare `'` would miss.
+const SUPP_ESTIMATE_RE = /\b(revise|review and revise|adjust|update)\b[^.\n]{0,40}\bestimate\b|\b(reconstruction|contractor['’]?s?|reconstruction repair) estimate\b|\bapproval of the attached\b[^.\n]{0,60}\bestimate\b|\bnotes? from the contractor\b/i;
+
+// Natural-language supplement variants the estimate-specific pattern misses.
+// XA "Assignment Note" emails describe supplements in plain prose that names
+// neither "contractor estimate" nor "supplement request". Seen on Sean Thomas
+// (2026-05-20, claim 12-1226000034): "I have received 2 estimates from insured
+// … in addition to the supplement you wrote for us. Can you please review and
+// advise." Covers: insured-submitted estimates, in-addition-to-a-prior-
+// supplement, additional/another supplement, and additional-scope/work/items.
+// Still gated on CLAIM_REF at the call site to avoid marketing false positives.
+const SUPP_VARIANT_RE = new RegExp([
+  /\bestimates?\b[^.\n]{0,30}\bfrom (the )?insured\b/.source,       // "estimates from insured"
+  /\binsured(?:['’]s)?\b[^.\n]{0,25}\bestimates?\b/.source,          // "insured's estimate(s)"
+  /\bin addition to\b[^.\n]{0,40}\bsupplement\b/.source,            // "in addition to the supplement"
+  /\bsupplement\b[^.\n]{0,25}\byou (wrote|sent|submitted|did|created)\b/.source, // "supplement you wrote"
+  /\b(additional|another|second|third|new|further)\b[^.\n]{0,20}\bsupplement\b/.source,
+  /\b(additional|added|new|extra|increased|supplemental)\b[^.\n]{0,20}\b(scope|work|items|line items|repairs?|estimate)\b/.source,
+  /\bscope\b[^.\n]{0,15}\b(addition|increase|change|added|expansion)\b/.source,
+].join("|"), "i");
 
 // Re-inspection: examiner advisory variant ("re-inspection necessary"), or
 // explicit reinspection-request phrasing. Note the optional hyphen/space.
@@ -125,7 +146,7 @@ export function classify(args: {
   // "revise the estimate") are SUPP, not CORRECTION — checked first so the
   // broad "revise" in CORRECTION_KEYWORD_RE doesn't capture them. Still
   // gated on CLAIM_REF to avoid marketing false positives.
-  if (SUPP_ESTIMATE_RE.test(matchableText) && CLAIM_REF_RE.test(matchableText)) {
+  if ((SUPP_ESTIMATE_RE.test(matchableText) || SUPP_VARIANT_RE.test(matchableText)) && CLAIM_REF_RE.test(matchableText)) {
     return "SUPP";
   }
 
@@ -362,7 +383,16 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
     }
 
     const body = extractBody(full.data.payload);
-    const matchableText = getMatchableText({ subject, payload: full.data.payload });
+    // XA "Assignment Note Has Been Added" emails carry the entire note (often a
+    // forwarded examiner thread) in the body. Quote-stripping would delete that
+    // note, and the 1000-char default can truncate before the supplement signal
+    // — both of which silently demoted real supplements to [STATUS]. For
+    // xactware notifications, scan the full note (no quote-strip, larger window).
+    const isXactware = senderAddr === "donotreply@xactware.com";
+    const matchableText = getMatchableText(
+      { subject, payload: full.data.payload },
+      isXactware ? { stripQuotes: false, charLimit: 4000 } : undefined,
+    );
     const tier = classify({ fromHeader, subject, matchableText });
 
     // If no adjuster-pattern match, try the general "outside the adjuster

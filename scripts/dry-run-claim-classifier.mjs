@@ -53,13 +53,54 @@ const cases = [
     body: "Please see attached.",
     expected: "SUPP",
   },
+  {
+    // Real regression: Sean Thomas 2026-05-20, claim 12-1226000034. XA note
+    // with natural-language supplement phrasing (insured-submitted estimates,
+    // "in addition to the supplement you wrote"). Pre-fix this fell to
+    // [STATUS] because the subject hits MEDIUM_XACTWARE_RE and the body matched
+    // no SUPP keyword. xactware opts (no quote-strip, 4000-char window) mirror
+    // the live claim_monitor path.
+    name: "XA note SUPP — insured estimates / in-addition-to-supplement (Sean Thomas)",
+    from: "donotreply@xactware.com",
+    subject: "An Assignment Note Has Been Added in XactAnalysis",
+    body:
+      "An assignment note was added\nClaim #: 12-1226000034\nNote:\n" +
+      "I have received 2 estimates from insured stating this work is completed " +
+      "and is in addition to the supplement you wrote for us.  Can you please " +
+      "review and advise.  I uploaded their email and both estimates submitted.\n" +
+      "Thank you,\nDiana\nDiana Vinson|Claims Analyst\nHarbor Claims, LLC",
+    opts: { stripQuotes: false, charLimit: 4000 },
+    expected: "SUPP",
+  },
+  {
+    // Real regression: Cheryl Groves 2026-05-15, claim KWSKWS26030053. XA note
+    // is a forwarded examiner thread; supplement signal ("notes from the
+    // contractor", "reconstruction estimate", curly-apostrophe "contractor’s
+    // estimate") sits deep in the body. Verifies both the no-quote-strip path
+    // and the curly-apostrophe fix.
+    name: "XA note SUPP — contractor/reconstruction estimate in forwarded thread (Groves)",
+    from: "donotreply@xactware.com",
+    subject: "An Assignment Note Has Been Added in XactAnalysis",
+    body:
+      "An assignment note was added\nClaim #: KWSKWS26030053\nNote:\n" +
+      "From: Claims <claims@straightlineglobal.com>\nDate: Friday, May 15, 2026 at 4:40 PM\n" +
+      "To: Nicholas Anderson <NAnderson@narisk.com>\nSubject: Re: KWSKWS26030053\n" +
+      "Good Afternoon Nicholas, Thank you for your email. We will be happy to review " +
+      "and revise accordingly. If possible, could you provide a copy of the contractor’s " +
+      "estimate for us to review?\n" +
+      "From: Nicholas Anderson <NAnderson@narisk.com>\nSubject: KWSKWS26030053\n" +
+      "Please see below notes from the contractor and revise estimate, if appliable. " +
+      "I would like to request approval of the attached reconstruction estimate totaling $7,823.98.",
+    opts: { stripQuotes: false, charLimit: 4000 },
+    expected: "SUPP",
+  },
 ];
 
 let pass = 0;
 let fail = 0;
 console.log(`\nRunning ${cases.length} test cases against the body-aware classifier:\n`);
 for (const c of cases) {
-  const matchable = getMatchableText({ subject: c.subject, plainBody: c.body });
+  const matchable = getMatchableText({ subject: c.subject, plainBody: c.body }, c.opts);
   const tier = classify({ fromHeader: c.from, subject: c.subject, matchableText: matchable });
   const ok = tier === c.expected;
   const symbol = ok ? "OK  " : "FAIL";
