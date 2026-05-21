@@ -351,22 +351,37 @@ try {
 }
 
 // Step 6: Wait for successful redirect
+let loginSucceeded = false;
 console.log("\n>>> Waiting up to 120 seconds for XactAnalysis dashboard...");
 try {
   await page.waitForURL(
     url => url.href.includes("xactanalysis.com") && !url.href.includes("identity.verisk"),
     { timeout: 120000 }
   );
+  loginSucceeded = true;
   console.log("✅ Login successful! URL:", page.url());
 } catch {
-  console.log("Timed out — saving whatever session exists...");
+  console.log("Timed out waiting for the authenticated dashboard.");
 }
 
-await page.waitForTimeout(3000);
+// Settle briefly so any post-login Set-Cookie writes land. GUARDED: if the
+// page/browser was closed (headful window dismissed, login stalled, launchd
+// killed it), do NOT let an uncaught waitForTimeout throw — that is exactly
+// what aborted the 2026-05-20 cron AFTER "Login successful" but BEFORE the
+// session was captured + pushed, leaving Railway on a stale snapshot.
+try { await page.waitForTimeout(3000); } catch { /* page/browser closed — capture what we can below */ }
 
-// Capture session
-const cookies = await context.cookies();
-const localStorageData = await page.evaluate(() => {
+// Capture session. Each step independently guarded so a partial failure still
+// saves what we have (and reports clearly) instead of crashing before the push.
+let cookies = [];
+let localStorageData = {};
+let sessionStorageData = {};
+try {
+  cookies = await context.cookies();
+} catch (e) {
+  console.error("⚠️  Could not read cookies (browser/context closed?):", e.message);
+}
+localStorageData = await page.evaluate(() => {
   const data = {};
   for (let i = 0; i < window.localStorage.length; i++) {
     const key = window.localStorage.key(i);
@@ -374,7 +389,7 @@ const localStorageData = await page.evaluate(() => {
   }
   return data;
 }).catch(() => ({}));
-const sessionStorageData = await page.evaluate(() => {
+sessionStorageData = await page.evaluate(() => {
   const data = {};
   for (let i = 0; i < window.sessionStorage.length; i++) {
     const key = window.sessionStorage.key(i);
@@ -386,6 +401,24 @@ const sessionStorageData = await page.evaluate(() => {
 console.log(`\nCookies: ${cookies.length}`);
 console.log(`localStorage keys: ${Object.keys(localStorageData).length}`);
 
+// Refuse to overwrite the good local file or push a non-authenticated session
+// to Railway. Gate on ACTUAL login success (reached the dashboard, not the
+// identity.verisk MFA screen) — NOT merely on cookie presence, because a
+// timed-out MFA still leaves pre-auth identity cookies behind. Pushing those
+// is what risked clobbering Railway with a dead session on 2026-05-21. Exit
+// non-zero so the cron wrapper's failure ntfy fires and Hakiel knows to retry.
+const onIdentityPage = (() => {
+  try { return /identity\.verisk|\/auth\//.test(page.url()); } catch { return true; }
+})();
+if (!loginSucceeded || onIdentityPage || !cookies || cookies.length === 0) {
+  console.error(
+    `❌ Login NOT confirmed (loginSucceeded=${loginSucceeded}, onIdentityPage=${onIdentityPage}, cookies=${cookies?.length ?? 0}) ` +
+    `— NOT saving or pushing. The OTP was likely not supplied in time. Re-run and enter the code at the prompt.`
+  );
+  try { await browser.close(); } catch { /* already closed */ }
+  process.exit(1);
+}
+
 fs.writeFileSync(SESSION_PATH, JSON.stringify({
   cookies,
   localStorage: localStorageData,
@@ -394,8 +427,8 @@ fs.writeFileSync(SESSION_PATH, JSON.stringify({
 console.log(`\n✅ Session saved to ${SESSION_PATH}`);
 console.log(`Size: ${(fs.statSync(SESSION_PATH).size / 1024).toFixed(1)} KB`);
 
-await page.waitForTimeout(2000);
-await browser.close();
+try { await page.waitForTimeout(2000); } catch { /* ignore */ }
+try { await browser.close(); } catch { /* ignore */ }
 
 // Auto-push the fresh session to Railway. Delegates to the
 // update-railway-sessions.mjs helper so the Railway-push logic
