@@ -28,6 +28,7 @@ function encodeEmail(params: {
   bcc?: string;
   replyToMessageId?: string;
   threadId?: string;
+  extraHeaders?: Record<string, string>;
 }): string {
   const lines = [
     `To: ${params.to}`,
@@ -38,6 +39,7 @@ function encodeEmail(params: {
     "Content-Type: text/plain; charset=utf-8",
     params.replyToMessageId ? `In-Reply-To: ${params.replyToMessageId}` : null,
     params.replyToMessageId ? `References: ${params.replyToMessageId}` : null,
+    ...Object.entries(params.extraHeaders ?? {}).map(([k, v]) => `${k}: ${v}`),
     "",
     params.body,
   ]
@@ -288,6 +290,190 @@ export async function gmailCreateDraft(args: {
     `Draft ID: ${draftId}\nMessage ID: ${messageId}\nOpen in Gmail: ${link}\n\n` +
     `--- VERIFIED SNAPSHOT (server-stored draft) ---\n${snapHeaders}\n\n${snapBody}`
   );
+}
+
+// ─── Scheduled send (queue #9) ────────────────────────────────────────────────
+//
+// Gmail's native "Schedule send" is NOT exposed by the Gmail API (verified
+// against googleapis v144 / gmail v1: no sendAt/scheduledSend field on Draft or
+// Message, no settings.scheduledSend resource). So we emulate it: persist a real
+// Gmail DRAFT tagged with a label + an X-Mcp-Scheduled-Send header, and arm an
+// in-process timer that calls drafts.send at send_at. The draft is durable in
+// Gmail (survives a Railway redeploy); recoverScheduledSends() re-arms timers
+// from the labeled drafts on boot.
+//
+// LIMITATION (by design, documented for the operator): the send fires only while
+// this server is running. If the process is down at the exact send_at, the email
+// goes out late on the next boot (recovery), not on time. True fire-while-offline
+// scheduling would need a different transport (SMTP relay) or Gmail's own UI.
+
+const SCHEDULED_LABEL = "MCP/Scheduled-Send";
+const SCHEDULED_HEADER = "X-Mcp-Scheduled-Send";
+const MAX_SCHEDULE_MS = 365 * 24 * 60 * 60 * 1000; // refuse > 1 year out
+const SETTIMEOUT_MAX = 2_147_483_647;              // setTimeout cap (~24.8 days)
+const armedSends = new Map<string, NodeJS.Timeout>();
+
+async function ensureScheduledLabel(gmail: any): Promise<string | undefined> {
+  try {
+    const list = await gmail.users.labels.list({ userId: "me" });
+    const found = (list.data.labels ?? []).find((l: any) => l.name === SCHEDULED_LABEL);
+    if (found?.id) return found.id;
+    const created = await gmail.users.labels.create({
+      userId: "me",
+      requestBody: { name: SCHEDULED_LABEL, labelListVisibility: "labelHide", messageListVisibility: "show" },
+    });
+    return created.data.id ?? undefined;
+  } catch (e: any) {
+    console.error(`[gmail-scheduled] ensureScheduledLabel failed: ${e?.message || e}`);
+    return undefined;
+  }
+}
+
+async function fireScheduledSend(draftId: string): Promise<void> {
+  armedSends.delete(draftId);
+  try {
+    const gmail = await getGmail();
+    await gmail.users.drafts.send({ userId: "me", requestBody: { id: draftId } });
+    console.log(`[gmail-scheduled] sent scheduled draft ${draftId}`);
+  } catch (e: any) {
+    console.error(`[gmail-scheduled] failed to send scheduled draft ${draftId}: ${e?.message || e}`);
+    const server = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+    const topic = process.env.CLAIM_MONITOR_NTFY_TOPIC || "dino-claims-alerts-fpx";
+    fetch(`${server}/${encodeURIComponent(topic)}`, {
+      method: "POST",
+      headers: { "Title": "[SCHED-SEND FAILED]", "Priority": "5", "Tags": "warning", "Content-Type": "text/plain; charset=utf-8" },
+      body: `Scheduled send of draft ${draftId} failed: ${e?.message || e}. The draft is still in Drafts — send it manually.`,
+    }).catch(() => { /* swallow */ });
+  }
+}
+
+// Arm a one-shot timer. setTimeout maxes out at ~24.8 days, so for longer
+// horizons we hop: sleep the max, then re-arm on the remaining time.
+function armScheduledSend(draftId: string, sendAtMs: number): void {
+  if (armedSends.has(draftId)) return;
+  const remaining = sendAtMs - Date.now();
+  const t = setTimeout(() => {
+    armedSends.delete(draftId);
+    if (Date.now() >= sendAtMs) {
+      fireScheduledSend(draftId).catch(() => { /* swallow */ });
+    } else {
+      armScheduledSend(draftId, sendAtMs); // next hop
+    }
+  }, Math.max(0, Math.min(remaining, SETTIMEOUT_MAX)));
+  armedSends.set(draftId, t);
+}
+
+/**
+ * Create a Gmail draft and auto-send it at `send_at` (ISO-8601). Because the
+ * send fires automatically, this enforces the SAME strict-send guardrail as
+ * gmail_send_email for third-party recipients (internal-only bypasses). Cancel
+ * before send_at with gmail_delete_draft(draft_id=...).
+ */
+export async function gmailCreateDraftScheduled(args: {
+  to: string;
+  subject: string;
+  body: string;
+  send_at: string;
+  cc?: string;
+  bcc?: string;
+  approved_at_iso_timestamp?: string;
+  force_send?: boolean;
+}): Promise<CallToolResult> {
+  const sendAtMs = Date.parse((args.send_at || "").trim());
+  if (!Number.isFinite(sendAtMs)) {
+    return makeTextContent(`❌ gmail_create_draft_scheduled: invalid send_at "${args.send_at}" (need ISO-8601).`);
+  }
+  if (sendAtMs <= Date.now()) {
+    return makeTextContent(`❌ gmail_create_draft_scheduled: send_at is in the past (${args.send_at}). Pick a future time.`);
+  }
+  if (sendAtMs - Date.now() > MAX_SCHEDULE_MS) {
+    return makeTextContent(`❌ gmail_create_draft_scheduled: send_at is more than 1 year out — refusing.`);
+  }
+
+  // Strict-send guardrail — a scheduled send auto-fires, so it needs the same
+  // approval as a direct send (matches gmail_send_email).
+  const internalOnly = allRecipientsInternal(args.to, args.cc, args.bcc);
+  if (!internalOnly) {
+    const approvedAt = (args.approved_at_iso_timestamp || "").trim();
+    const approvedMs = approvedAt ? Date.parse(approvedAt) : NaN;
+    const ageMs = Number.isFinite(approvedMs) ? Date.now() - approvedMs : NaN;
+    const approvalFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 15 * 60 * 1000;
+    if (!args.force_send || !approvalFresh) {
+      return makeTextContent(
+        "❌ gmail_create_draft_scheduled REFUSED: third-party recipient(s) and no valid pre-send approval.\n\n" +
+        `Recipients: to=${args.to}${args.cc ? ` | cc=${args.cc}` : ""}${args.bcc ? ` | bcc=${args.bcc}` : ""}\n` +
+        `Internal domains (no-check): ${[...INTERNAL_SEND_DOMAINS].join(", ") || "(none)"}\n\n` +
+        "A scheduled send auto-fires, so it needs the same approval as a direct send:\n" +
+        "  - Re-call with approved_at_iso_timestamp=<ISO-8601 within last 15 min> AND force_send=true, OR\n" +
+        "  - Use gmail_create_draft (no schedule) and send manually when ready."
+      );
+    }
+  }
+
+  const gmail = await getGmail();
+  const isoSendAt = new Date(sendAtMs).toISOString();
+  const raw = encodeEmail({ ...args, extraHeaders: { [SCHEDULED_HEADER]: isoSendAt } });
+  const created = await gmail.users.drafts.create({ userId: "me", requestBody: { message: { raw } } });
+  const draftId = created.data.id ?? "";
+  const messageId = created.data.message?.id ?? "";
+
+  // Label the draft message so recoverScheduledSends() can find it after a restart.
+  const labelId = await ensureScheduledLabel(gmail);
+  if (labelId && messageId) {
+    try {
+      await gmail.users.messages.modify({ userId: "me", id: messageId, requestBody: { addLabelIds: [labelId] } });
+    } catch (e: any) {
+      console.error(`[gmail-scheduled] label add failed for ${messageId}: ${e?.message || e}`);
+    }
+  }
+
+  armScheduledSend(draftId, sendAtMs);
+
+  const link = `https://mail.google.com/mail/u/0/#drafts?compose=${draftId}`;
+  const ntfyStatus = await pushDraftSnapshotNtfy({
+    to: args.to, subject: `[SCHEDULED ${isoSendAt}] ${args.subject}`, body: args.body, cc: args.cc, bcc: args.bcc, link,
+  });
+
+  return makeTextContent(
+    `✅ Scheduled draft created. Auto-sends at ${isoSendAt} (while the server is running).\n` +
+    `Draft ID: ${draftId}\nMessage ID: ${messageId}\nSnapshot ntfy: ${ntfyStatus}\nOpen in Gmail: ${link}\n\n` +
+    `To CANCEL: gmail_delete_draft(draft_id="${draftId}") before send_at.\n` +
+    `Note: native Gmail scheduling isn't API-exposed; if the server is down at send_at the email goes out on next boot, not on time.`
+  );
+}
+
+/**
+ * On boot, re-arm timers for any scheduled-send drafts still pending (the
+ * timers themselves are in-memory and lost on restart; the labeled drafts +
+ * X-Mcp-Scheduled-Send header are the durable record).
+ */
+export async function recoverScheduledSends(): Promise<void> {
+  try {
+    const gmail = await getGmail();
+    const labelId = await ensureScheduledLabel(gmail);
+    if (!labelId) return;
+    const list = await gmail.users.drafts.list({ userId: "me", maxResults: 100 });
+    const drafts = list.data.drafts ?? [];
+    let rearmed = 0;
+    for (const d of drafts) {
+      if (!d.id) continue;
+      try {
+        const got = await gmail.users.drafts.get({ userId: "me", id: d.id, format: "metadata" });
+        const msg = got.data.message;
+        if (!msg?.labelIds?.includes(labelId)) continue;
+        const headers = msg.payload?.headers ?? [];
+        const sched = headers.find((h: any) => (h.name ?? "").toLowerCase() === SCHEDULED_HEADER.toLowerCase())?.value;
+        if (!sched) continue;
+        const sendAtMs = Date.parse(sched);
+        if (!Number.isFinite(sendAtMs)) continue;
+        armScheduledSend(d.id, sendAtMs);
+        rearmed++;
+      } catch { /* skip this draft */ }
+    }
+    if (rearmed > 0) console.log(`[gmail-scheduled] recovered ${rearmed} scheduled send(s) on boot`);
+  } catch (e: any) {
+    console.error(`[gmail-scheduled] recoverScheduledSends failed: ${e?.message || e}`);
+  }
 }
 
 /**
