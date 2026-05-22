@@ -23,6 +23,7 @@ import { gmailSendEmail, gmailCreateDraft, gmailDeleteDraft, gmailSendDraft, gma
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
 import { startClaimMonitor, getClaimMonitorHealth } from "./watchers/claim_monitor.js";
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
+import { startFollowupScheduler } from "./watchers/followup_scheduler.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -670,6 +671,10 @@ if (PORT) {
     // availability inquiries + signing-document deliveries. See
     // src/watchers/notary_monitor.ts.
     startNotaryMonitor();
+    // Follow-up scheduler: arms the 3hr no-reply [FOLLOWUP] alert after an
+    // approved SMS is sent (handleClaimApproval registers entries). See
+    // src/watchers/followup_scheduler.ts.
+    startFollowupScheduler();
   });
   // Disable Nagle's algorithm so small SSE packets aren't buffered on localhost
   httpServer.on("connection", (socket) => socket.setNoDelay(true));

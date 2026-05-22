@@ -2,9 +2,41 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { voiceSendSms } from "./voice.js";
 import { calendarCreateEvent } from "./calendar.js";
 import { notionCreateDatabaseItem } from "./notion.js";
+import { scheduleFollowup } from "../watchers/followup_scheduler.js";
+
+const NTFY_SERVER = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+const NTFY_TOPIC = process.env.CLAIM_MONITOR_NTFY_TOPIC || "dino-claims-alerts-fpx";
 
 function ok(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
+}
+
+function asciiSafe(s: string): string {
+  return (s || "").replace(/[^\x00-\x7F]/g, "").trim();
+}
+
+// Voice send is known-flaky (recipient-picker bug, #20). When the auto-send
+// fails we must NOT silently drop the contact — fire an actionable ntfy so
+// Hakiel sends the SMS manually, with the exact text to paste.
+async function pushSendPendingNtfy(args: HandleApprovalArgs, error: string): Promise<void> {
+  try {
+    await fetch(`${NTFY_SERVER}/${encodeURIComponent(NTFY_TOPIC)}`, {
+      method: "POST",
+      headers: {
+        "Title": asciiSafe(`[SEND-PENDING] ${args.insured_name} — text manually`) || "[SEND-PENDING]",
+        "Priority": "5",
+        "Tags": "warning,phone",
+        "Content-Type": "text/plain; charset=utf-8",
+      },
+      body:
+        `Auto-send to ${args.insured_name} (${args.insured_phone}) FAILED — send the SMS manually.\n` +
+        `Claim #: ${args.claim_number}\n` +
+        `Reason: ${error}\n\n` +
+        `Message to send:\n${args.sms_text}`,
+    });
+  } catch (e: any) {
+    console.error(`[approval] send-pending ntfy failed: ${e?.message ?? e}`);
+  }
 }
 
 // MCP tools wrap their JSON output inside { content: [{ type: "text", text: "..." }] }.
@@ -121,6 +153,7 @@ export type HandleApprovalResult = {
  */
 export async function handleClaimApproval(args: HandleApprovalArgs): Promise<HandleApprovalResult> {
   const result: HandleApprovalResult = { ok: true };
+  const sentAt = new Date().toISOString();
 
   // ── 1. SMS ──────────────────────────────────────────────────────────────
   if (args.skip_sms) {
@@ -140,11 +173,25 @@ export async function handleClaimApproval(args: HandleApprovalArgs): Promise<Han
         sent: smsResult.sent ?? true,
         verified: smsResult.verified,
       };
+      // Arm the 3hr no-reply follow-up (D3). The scheduler owns "fire once"
+      // gating and drops the entry once the POC replies or the [FOLLOWUP]
+      // alert fires.
+      scheduleFollowup({
+        key: args.claim_number || args.insured_phone,
+        insured_name: args.insured_name,
+        insured_phone: args.insured_phone,
+        thread_id: args.voice_thread_id,
+        sent_at: sentAt,
+      });
     } else {
-      result.sms = { ok: false, error: smsResult.error ?? "voice_send_sms returned ok=false" };
+      const sendErr = smsResult.error ?? "voice_send_sms returned ok=false";
+      result.sms = { ok: false, error: sendErr };
       result.ok = false;
-      result.error = `SMS send failed: ${result.sms.error}`;
-      // Abort — no calendar / Notion for an SMS that didn't go.
+      result.error = `SMS send failed: ${sendErr}`;
+      // Surface a [SEND-PENDING] ntfy so the contact isn't lost, then abort —
+      // no calendar / Notion for an SMS that didn't go (the inspection isn't
+      // actually scheduled with the insured until they're contacted).
+      await pushSendPendingNtfy(args, sendErr);
       return result;
     }
   }
