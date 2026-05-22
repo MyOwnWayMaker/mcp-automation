@@ -193,6 +193,28 @@ let pollInFlightSince = 0;
 let lastSuccessfulCycleAt = 0;
 let lastStallAlertAt = 0;
 
+// Liveness snapshot for the /healthz endpoint. "healthy" = the watcher either
+// isn't running / is disabled, or it completed a poll cycle within the same
+// WATCHDOG_STALL_MS window the [STALL] watchdog uses.
+export function getClaimMonitorHealth() {
+  const now = Date.now();
+  const running = started_at > 0;
+  const disabled = process.env.CLAIM_MONITOR_DISABLED === "1";
+  const sinceLastCycleMs = lastSuccessfulCycleAt > 0 ? now - lastSuccessfulCycleAt : null;
+  const healthy = !running || disabled
+    ? true
+    : sinceLastCycleMs !== null && sinceLastCycleMs < WATCHDOG_STALL_MS;
+  return {
+    running,
+    disabled,
+    pollInFlight,
+    lastSuccessfulCycleAt: lastSuccessfulCycleAt > 0 ? new Date(lastSuccessfulCycleAt).toISOString() : null,
+    sinceLastCycleMs,
+    stallThresholdMs: WATCHDOG_STALL_MS,
+    healthy,
+  };
+}
+
 // ── External-call timeout helper ────────────────────────────────────────────
 
 // Race a promise against a hard timeout. On timeout, the original promise is

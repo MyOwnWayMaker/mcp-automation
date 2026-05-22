@@ -21,7 +21,7 @@ import express from "express";
 // Tool implementations
 import { gmailSendEmail, gmailCreateDraft, gmailDeleteDraft, gmailSendDraft, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
-import { startClaimMonitor } from "./watchers/claim_monitor.js";
+import { startClaimMonitor, getClaimMonitorHealth } from "./watchers/claim_monitor.js";
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
@@ -484,7 +484,21 @@ if (PORT) {
     const transport = new SSEServerTransport("/messages", res);
     transports.set(transport.sessionId, transport);
 
-    res.on("close", () => transports.delete(transport.sessionId));
+    // Keepalive: SSEServerTransport emits no heartbeats of its own, so an idle
+    // MCP stream looks dead to Railway's edge proxy, which idle-closes it after
+    // a few minutes. That deletes the session server-side with no reconnect, so
+    // the next client `POST /messages` 404s and the client surfaces it as
+    // "Session terminated" — silently wedging the claim pipeline. A comment ping
+    // every 20s (well under typical 60-120s proxy idle limits) keeps it open.
+    const keepAlive = setInterval(() => {
+      try { res.write(": ping\n\n"); } catch { /* socket gone; close handler cleans up */ }
+    }, 20_000);
+    const cleanup = () => {
+      clearInterval(keepAlive);
+      transports.delete(transport.sessionId);
+    };
+    res.on("close", cleanup);
+    res.on("error", cleanup);
 
     const server = createServer();
     await server.connect(transport);
@@ -498,6 +512,42 @@ if (PORT) {
   });
 
   app.get("/health", (_req, res) => res.json({ status: "ok", tools: TOOLS.length }));
+
+  // Liveness probe for Railway healthcheck / external uptime polling. Unlike
+  // /health (static "ok"), this reports the claim-monitor's real liveness plus
+  // the count of live SSE sessions, returns 503 when the watcher is wedged, and
+  // fires a throttled ntfy so a silent stall still surfaces even if nothing else
+  // polls it. (The [STALL] watchdog already alerts; the throttle here avoids
+  // double-spam when a healthcheck hammers /healthz during an outage.)
+  let lastHealthAlertAt = 0;
+  const HEALTH_ALERT_THROTTLE_MS = 10 * 60 * 1000;
+  app.get("/healthz", (_req, res) => {
+    const cm = getClaimMonitorHealth();
+    const ok = cm.healthy;
+    if (!ok && Date.now() - lastHealthAlertAt > HEALTH_ALERT_THROTTLE_MS) {
+      lastHealthAlertAt = Date.now();
+      const server = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+      const topic = process.env.HEALTH_NTFY_TOPIC || "hakiel-mac-mini-health";
+      const mins = Math.round((cm.sinceLastCycleMs ?? 0) / 60000);
+      fetch(`${server}/${encodeURIComponent(topic)}`, {
+        method: "POST",
+        headers: {
+          "Title": "[UNHEALTHY] mcp-automation",
+          "Priority": "5",
+          "Tags": "warning",
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+        body: `claim-monitor: no successful cycle in ${mins}m; live SSE sessions=${transports.size}. Check Railway.`,
+      }).catch(() => { /* swallow */ });
+    }
+    res.status(ok ? 200 : 503).json({
+      status: ok ? "ok" : "unhealthy",
+      uptimeSec: Math.round(process.uptime()),
+      activeSseSessions: transports.size,
+      tools: TOOLS.length,
+      claimMonitor: cm,
+    });
+  });
 
   // Public time endpoint. No auth, no DB, no background work — just a clock.
   // Used by Dispatch (via http_request) when its bash sandbox is unavailable
