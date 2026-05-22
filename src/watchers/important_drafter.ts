@@ -223,9 +223,23 @@ export type DraftRequest = {
   cc_addresses?: string;
   original_subject: string;
   reply_body: string;             // body-only, no greeting/closing/signature (per LLM contract)
+  reply_intent?: "docs_only" | "cta"; // docs_only -> fixed ack; cta -> "Hi <First>," + body. Defaults cta.
   category: string;               // for audit logging
   source_email_id: string;        // Gmail message ID (for audit log)
 };
+
+// Pull a usable first name from a From-style address for the "Hi <First>,"
+// CTA greeting. Handles `"Jane Doe" <jane@x.com>`, `Jane Doe <...>`, and bare
+// `jane.doe@x.com`. Returns "" if nothing human-looking is found (caller then
+// greets without a name).
+function firstNameFromAddress(addr: string): string {
+  const display = (addr.match(/^\s*"?([^"<]+?)"?\s*</) || [])[1]?.trim();
+  if (display && /[a-z]/i.test(display)) return display.split(/\s+/)[0];
+  const local = (addr.match(/<([^>]+)>/)?.[1] || addr).split("@")[0] || "";
+  const token = local.split(/[._-]+/)[0];
+  if (!token || !/[a-z]/i.test(token)) return "";
+  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+}
 
 export async function createImportantDraft(req: DraftRequest): Promise<DraftResult> {
   // Skip if Hakiel has been actively replying in this thread.
@@ -246,7 +260,19 @@ export async function createImportantDraft(req: DraftRequest): Promise<DraftResu
     ? req.original_subject
     : `Re: ${req.original_subject}`;
 
-  const replyBody = applyVoiceNormalization(req.reply_body);
+  // Reply template routing (auto-reply-draft-style rules 1 & 3):
+  //  - docs_only: fixed acknowledgement, no greeting, no preamble.
+  //  - cta: "Hi <First>," greeting + the LLM substance, no ack preamble.
+  const intent = req.reply_intent ?? "cta";
+  let replyBody: string;
+  if (intent === "docs_only") {
+    replyBody = "Received, thank you.";
+  } else {
+    const substance = applyVoiceNormalization((req.reply_body || "").trim());
+    const first = firstNameFromAddress(req.reply_to_address);
+    const greeting = first ? `Hi ${first},` : "Hi,";
+    replyBody = substance ? `${greeting}\n\n${substance}` : greeting;
+  }
 
   const bodyText = signature_html
     ? `${replyBody}\n\n${htmlToPlain(signature_html)}`
@@ -294,6 +320,7 @@ export async function createImportantDraft(req: DraftRequest): Promise<DraftResu
       cc_actual: req.cc_addresses || null,
       subject_orig: req.original_subject,
       category: req.category,
+      reply_intent: intent,
       classifier_body_chars: req.reply_body.length,
       draft_body_at_create: req.reply_body,
       signature_appended,

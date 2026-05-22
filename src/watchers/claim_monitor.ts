@@ -471,7 +471,9 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
           let draft_reason: string | undefined;
 
           const replyText = (verdict.suggested_reply || "").trim();
-          if (!replyText) {
+          // docs_only always drafts (the drafter forces "Received, thank you.");
+          // a cta with no substance no-ops so we never draft a bare greeting.
+          if (verdict.reply_intent !== "docs_only" && !replyText) {
             draft_status = "no_reply_text";
           } else if (full.data.threadId && messageIdHeader) {
             try {
@@ -483,6 +485,7 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
                   cc_addresses: replyAllCc || undefined,
                   original_subject: subject,
                   reply_body: replyText,
+                  reply_intent: verdict.reply_intent,
                   category: verdict.category,
                   source_email_id: m.id,
                 }),
