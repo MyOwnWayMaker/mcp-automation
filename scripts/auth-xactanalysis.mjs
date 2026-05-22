@@ -189,9 +189,14 @@ async function fetchOtpForSms() {
     return null;
   })();
 
-  const stdinPath = readOtpFromStdin();
+  // Only race stdin when attached to a TTY. In a non-TTY (cron/background)
+  // launch, readOtpFromStdin() returns null *immediately*, which would win
+  // the race and abort file-polling before the OTP file can be written —
+  // breaking the exact unattended path this is meant to support.
+  const racers = [filePoll];
+  if (process.stdin.isTTY) racers.push(readOtpFromStdin());
 
-  const otp = await Promise.race([filePoll, stdinPath]);
+  const otp = await Promise.race(racers);
   if (!otp) throw new Error(`Timed out after ${Math.round(OTP_WAIT_MS / 1000)}s waiting for SMS OTP.`);
   return otp;
 }
