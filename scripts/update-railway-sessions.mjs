@@ -96,6 +96,43 @@ function readRailwayConfig() {
   };
 }
 
+// ── Push-layer clobber guard for XA ─────────────────────────────────────────
+// Refuse to push a XACTANALYSIS_SESSION_JSON blob that isn't an AUTHENTICATED
+// app session. A failed-OTP / MFA-wall capture leaves only identity.verisk +
+// Incapsula cookies (~15, no app JSESSIONID); pushing that overwrites a good
+// Railway session with a dead one — the proven cause of the 2026-05-21 early
+// expiry (cron logs pushed 14KB then 4.9KB pre-auth blobs at 08:49 / 08:55).
+//
+// auth-xactanalysis.mjs already gates its own push (commit acfb0db), but this
+// guard sits at the PUSH layer so it protects EVERY caller — manual
+// `node scripts/update-railway-sessions.mjs` runs, future auth scripts, a
+// stale local xactanalysis_session.json — not just that one code path.
+//
+// Heuristic verified against live data (2026-05-21): a healthy session has ~33
+// cookies incl. a JSESSIONID scoped to the app host; a dead pre-auth blob has
+// ~15 and none. The >=20 floor + app-JSESSIONID requirement clears the healthy
+// blob with margin and rejects the dead one. Other session vars are left as-is
+// (their blob shapes aren't validated here) to avoid false-positive blocks.
+function isPushableSession(key, value) {
+  if (key !== "XACTANALYSIS_SESSION_JSON") return { ok: true };
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch (e) {
+    return { ok: false, reason: `not valid JSON (${e.message})` };
+  }
+  const cookies = Array.isArray(parsed.cookies) ? parsed.cookies : [];
+  const hasAppSession = cookies.some(
+    (c) => c && c.name === "JSESSIONID" && typeof c.domain === "string" && c.domain.includes("xactanalysis.com"),
+  );
+  if (cookies.length >= 20 && hasAppSession) return { ok: true };
+  return {
+    ok: false,
+    reason: `looks like a pre-auth / failed-OTP capture (cookies=${cookies.length}, ` +
+      `appJSESSIONID=${hasAppSession}) — refusing to clobber a good Railway session`,
+  };
+}
+
 // ── GraphQL: upsert one variable on Railway ─────────────────────────────────
 async function setVariable({ token, projectId, environmentId, serviceId }, name, value) {
   const query = `
@@ -154,6 +191,15 @@ for (const [key, filePath] of Object.entries(files)) {
 
   const value = fs.readFileSync(filePath, "utf8").trim();
   console.log(`Updating ${key} (${value.length} chars)...`);
+
+  const guard = isPushableSession(key, value);
+  if (!guard.ok) {
+    console.error(`⛔  ${key} NOT pushed — ${guard.reason}.`);
+    console.error(`    Source file: ${filePath}`);
+    console.error(`    Re-run a successful auth (reach the dashboard) before pushing.\n`);
+    failCount++;
+    continue;
+  }
 
   try {
     await setVariable(cfg, key, value);
