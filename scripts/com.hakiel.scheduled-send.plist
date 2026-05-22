@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ============================================================ -->
+<!-- UNINSTALLED TEMPLATE — this file is NOT loaded by launchd.   -->
+<!-- It lives in the repo (scripts/) on purpose. To activate it:  -->
+<!--                                                              -->
+<!--   cp scripts/com.hakiel.scheduled-send.plist \              -->
+<!--      ~/Library/LaunchAgents/com.hakiel.scheduled-send.plist  -->
+<!--   launchctl load ~/Library/LaunchAgents/com.hakiel.scheduled-send.plist -->
+<!--                                                              -->
+<!-- Prereqs before loading:                                      -->
+<!--   * `npm run build` in /Users/dino/mcp-automation (the cron  -->
+<!--     runs dist/tools/scheduled_send.js).                      -->
+<!--   * scripts/scheduled-send-cron.sh is executable.            -->
+<!--                                                              -->
+<!-- Verify / stop later:                                         -->
+<!--   launchctl list | grep scheduled-send                       -->
+<!--   launchctl unload ~/Library/LaunchAgents/com.hakiel.scheduled-send.plist -->
+<!-- ============================================================ -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hakiel.scheduled-send</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/dino/mcp-automation/scripts/scheduled-send-cron.sh</string>
+  </array>
+
+  <!-- Sweep every 5 minutes. The interval IS the worst-case send latency: a
+       send scheduled for 3:00pm fires by ~3:05pm. The sweep is idempotent and
+       cheap (a quick node start + a Gmail drafts.get/send only when something
+       matured), so a tight interval is fine on the always-on Mac mini. Lower
+       it for finer granularity, raise it to reduce wakeups.
+       NOTE: launchd does NOT catch up missed ticks if the Mac was asleep/off —
+       but RunAtLoad below fires a sweep at login/boot, so anything that came
+       due during downtime is picked up then. -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- Run a sweep immediately on load/login. Unlike the XA re-auth agent (which
+       must NOT auto-run its OTP flow), this sweep is safe to run at load: it
+       only acts on entries that are already past their send_at_iso, and that's
+       exactly the catch-up we want after downtime. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/dino/mcp-automation/logs/launchd.scheduled-send.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/dino/mcp-automation/logs/launchd.scheduled-send.stderr.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/dino</string>
+  </dict>
+</dict>
+</plist>

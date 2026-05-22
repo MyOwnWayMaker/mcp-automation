@@ -20,6 +20,7 @@ import express from "express";
 
 // Tool implementations
 import { gmailSendEmail, gmailCreateDraft, gmailDeleteDraft, gmailSendDraft, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
+import { gmailCreateDraftScheduled, gmailListScheduledSends, gmailCancelScheduledSend, gmailRunScheduledSweep } from "./tools/scheduled_send.js";
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
 import { startClaimMonitor } from "./watchers/claim_monitor.js";
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
@@ -61,6 +62,10 @@ const TOOLS: Tool[] = [
   { name: "gmail_create_draft", description: "Create a Gmail DRAFT (does NOT send) so Hakiel can review/edit in his Gmail compose window before sending. Same params as gmail_send_email plus optional bcc. Returns the draft ID, message ID, and a deep link to open the draft in the Gmail web UI. Use this instead of gmail_send_email whenever a human should review before send.", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" }, bcc: { type: "string" } }, required: ["to", "subject", "body"] } },
   { name: "gmail_delete_draft", description: "Permanently delete a Gmail draft by its draft ID. Captures a brief snapshot (To/Cc/Subject) before deletion for audit trail. Use when a draft was created in error or has been superseded by a newer version.", inputSchema: { type: "object", properties: { draft_id: { type: "string", description: "Numeric Gmail draft ID (from gmail_create_draft output or Gmail compose URL ?compose=<id>)" } }, required: ["draft_id"] } },
   { name: "gmail_send_draft", description: "Send an existing Gmail draft and remove it from the Drafts folder in one API call. Reads the draft back BEFORE sending so the returned response carries the exact snapshot that was sent. Use this when a draft has been reviewed and is ready to ship — sending via gmail_send_email would orphan the draft.", inputSchema: { type: "object", properties: { draft_id: { type: "string", description: "Numeric Gmail draft ID (from gmail_create_draft output or Gmail compose URL ?compose=<id>)" } }, required: ["draft_id"] } },
+  { name: "gmail_create_draft_scheduled", description: "Create a Gmail draft and SCHEDULE it to send at a future time (Gmail's API has no native scheduled-send, so this is local: the draft is recorded in scheduled_sends.json and a launchd sweep sends it at maturity). SEND POLICY mirrors the strict-send guardrail: if every recipient is internal (GMAIL_INTERNAL_DOMAINS, default erseville.com) the sweep AUTO-SENDS at the scheduled time; if ANY recipient is third-party the sweep does NOT auto-send — it surfaces the draft to ntfy for manual review/send. Requires the local Mac-mini server + launchd agent to share a filesystem.", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" }, bcc: { type: "string" }, send_at_iso: { type: "string", description: "When to send, ISO-8601 with offset or Z (e.g. 2026-05-22T15:00:00-07:00). Must be in the future." } }, required: ["to", "subject", "body", "send_at_iso"] } },
+  { name: "gmail_list_scheduled_sends", description: "List all queued scheduled sends (from scheduled_sends.json): scheduled time, auto vs manual policy, subject/recipient, and status (pending / due / surfaced-for-manual-send / error). Read-only.", inputSchema: { type: "object", properties: {} } },
+  { name: "gmail_cancel_scheduled_send", description: "Remove a queued scheduled send by its draft ID so the sweep won't act on it. Does NOT delete the underlying Gmail draft (use gmail_delete_draft for that).", inputSchema: { type: "object", properties: { draft_id: { type: "string", description: "Draft ID of the scheduled send to cancel" } }, required: ["draft_id"] } },
+  { name: "gmail_run_scheduled_sweep", description: "Run the scheduled-send sweep once on demand (the launchd agent runs this periodically): send any matured internal-only entries via send_draft, surface matured external entries to ntfy, drop entries whose draft no longer exists. Returns a summary. Useful to flush due sends immediately or to debug.", inputSchema: { type: "object", properties: {} } },
   { name: "gmail_find_email", description: "Search for emails using Gmail search syntax", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
   { name: "gmail_get_email", description: "Get full content of an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "gmail_reply_to_email", description: "Reply to an existing email thread", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
@@ -269,6 +274,10 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "gmail_create_draft": return gmailCreateDraft(args as any);
     case "gmail_delete_draft": return gmailDeleteDraft(args as any);
     case "gmail_send_draft": return gmailSendDraft(args as any);
+    case "gmail_create_draft_scheduled": return gmailCreateDraftScheduled(args as any);
+    case "gmail_list_scheduled_sends": return gmailListScheduledSends();
+    case "gmail_cancel_scheduled_send": return gmailCancelScheduledSend(args as any);
+    case "gmail_run_scheduled_sweep": return gmailRunScheduledSweep();
     case "gmail_find_email": return gmailFindEmail(args as any);
     case "gmail_get_email": return gmailGetEmail(args as any);
     case "gmail_reply_to_email": return gmailReplyToEmail(args as any);

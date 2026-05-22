@@ -14,3 +14,5 @@ voice_session.compact.json
 gh
 claim_monitor.log
 claim_monitor_state.json
+scheduled_sends.json
+scheduled_sends.json.tmp

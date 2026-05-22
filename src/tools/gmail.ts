@@ -51,11 +51,13 @@ function encodeEmail(params: {
 // strict-send guardrail because they don't carry the same out-the-door risk
 // as third-party recipients (no client-facing reputation hit if something
 // goes wrong; he can immediately retract via Gmail's own UI if needed).
-const INTERNAL_SEND_DOMAINS = new Set(
+// Exported so other tools (e.g. scheduled_send) classify recipients against
+// the SAME internal-domain set the strict-send guardrail uses — single source.
+export const INTERNAL_SEND_DOMAINS = new Set(
   (process.env.GMAIL_INTERNAL_DOMAINS || "erseville.com").split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
 );
 
-function extractRecipientDomains(...fields: (string | undefined)[]): string[] {
+export function extractRecipientDomains(...fields: (string | undefined)[]): string[] {
   const domains: string[] = [];
   for (const f of fields) {
     if (!f) continue;
@@ -69,7 +71,7 @@ function extractRecipientDomains(...fields: (string | undefined)[]): string[] {
   return domains;
 }
 
-function allRecipientsInternal(...fields: (string | undefined)[]): boolean {
+export function allRecipientsInternal(...fields: (string | undefined)[]): boolean {
   const domains = extractRecipientDomains(...fields);
   if (domains.length === 0) return false; // no parseable recipient → not internal-only
   return domains.every(d => INTERNAL_SEND_DOMAINS.has(d));
@@ -237,13 +239,30 @@ export async function pushDraftSnapshotNtfy(args: {
   }
 }
 
-export async function gmailCreateDraft(args: {
+// Structured result of creating a draft — used by gmailCreateDraft (which
+// formats it as a CallToolResult) AND by gmail_create_draft_scheduled (which
+// needs the draft_id + verified recipient snapshot to record a schedule
+// entry). The server-stored snapshot is the source of truth, not the inputs.
+export interface CreatedDraft {
+  draftId: string;
+  messageId: string;
+  link: string;
+  snapTo: string;
+  snapCc?: string;
+  snapBcc?: string;
+  snapSubject: string;
+  snapBody: string;
+  snapHeaders: string;
+  ntfyStatus: string;
+}
+
+export async function createDraftStructured(args: {
   to: string;
   subject: string;
   body: string;
   cc?: string;
   bcc?: string;
-}): Promise<CallToolResult> {
+}): Promise<CreatedDraft> {
   const gmail = await getGmail();
   const raw = encodeEmail(args);
   const res = await gmail.users.drafts.create({
@@ -283,10 +302,21 @@ export async function gmailCreateDraft(args: {
     to: snapTo, subject: snapSubject, body: snapBody, cc: snapCc, bcc: snapBcc, link,
   });
 
+  return { draftId, messageId, link, snapTo, snapCc, snapBcc, snapSubject, snapBody, snapHeaders, ntfyStatus };
+}
+
+export async function gmailCreateDraft(args: {
+  to: string;
+  subject: string;
+  body: string;
+  cc?: string;
+  bcc?: string;
+}): Promise<CallToolResult> {
+  const d = await createDraftStructured(args);
   return makeTextContent(
-    `Draft created (NOT sent). Snapshot pushed to ntfy: ${ntfyStatus}\n` +
-    `Draft ID: ${draftId}\nMessage ID: ${messageId}\nOpen in Gmail: ${link}\n\n` +
-    `--- VERIFIED SNAPSHOT (server-stored draft) ---\n${snapHeaders}\n\n${snapBody}`
+    `Draft created (NOT sent). Snapshot pushed to ntfy: ${d.ntfyStatus}\n` +
+    `Draft ID: ${d.draftId}\nMessage ID: ${d.messageId}\nOpen in Gmail: ${d.link}\n\n` +
+    `--- VERIFIED SNAPSHOT (server-stored draft) ---\n${d.snapHeaders}\n\n${d.snapBody}`
   );
 }
 
@@ -332,15 +362,33 @@ export async function gmailDeleteDraft(args: { draft_id: string }): Promise<Call
  * actually got sent for the audit trail. Returns the resulting message+
  * thread IDs and the snapshot.
  */
-export async function gmailSendDraft(args: { draft_id: string }): Promise<CallToolResult> {
-  if (!args.draft_id) return makeTextContent("❌ draft_id is required.");
+// Structured outcome of a draft send. `ok` lets callers (the scheduled-send
+// sweep) branch on success without parsing formatted text. `draftMissing` is
+// set true when the draft no longer exists (already sent / deleted out of
+// band) so a caller can drop a stale schedule entry instead of retrying.
+export interface SentDraftResult {
+  ok: boolean;
+  messageId?: string;
+  threadId?: string;
+  snapHeaders: string;
+  snapBody: string;
+  error?: string;
+  draftMissing?: boolean;
+}
+
+// Send an existing draft via users.drafts.send (NEVER users.messages.send) —
+// this is the single send-draft code path. Both gmail_send_draft and the
+// scheduled-send sweep go through here, so scheduled sends inherit the same
+// draft-first guarantee the strict-send guardrail relies on.
+export async function sendDraftStructured(draftId: string): Promise<SentDraftResult> {
   const gmail = await getGmail();
 
   // Snapshot before send — same pattern as gmail_create_draft uses post-create.
   let snapHeaders = "";
   let snapBody = "(could not read draft before send)";
+  let draftMissing = false;
   try {
-    const got = await gmail.users.drafts.get({ userId: "me", id: args.draft_id, format: "full" });
+    const got = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
     const payload = got.data.message?.payload;
     const headers = payload?.headers ?? [];
     const h = (n: string) => headers.find((x) => (x.name ?? "").toLowerCase() === n)?.value ?? "";
@@ -351,23 +399,75 @@ export async function gmailSendDraft(args: { draft_id: string }): Promise<CallTo
       `Subject: ${h("subject")}`;
     snapBody = decodeDraftBody(payload).trim() || "(BODY EMPTY IN STORED DRAFT)";
   } catch (e: any) {
+    if (e?.code === 404 || e?.response?.status === 404) draftMissing = true;
     snapBody = `(drafts.get failed: ${e?.message || e})`;
   }
 
   try {
     const res = await gmail.users.drafts.send({
       userId: "me",
-      requestBody: { id: args.draft_id },
+      requestBody: { id: draftId },
     });
-    const messageId = res.data.id ?? "";
-    const threadId = res.data.threadId ?? "";
+    return {
+      ok: true,
+      messageId: res.data.id ?? "",
+      threadId: res.data.threadId ?? "",
+      snapHeaders,
+      snapBody,
+    };
+  } catch (e: any) {
+    if (e?.code === 404 || e?.response?.status === 404) draftMissing = true;
+    return { ok: false, snapHeaders, snapBody, error: e?.message || String(e), draftMissing };
+  }
+}
+
+export async function gmailSendDraft(args: { draft_id: string }): Promise<CallToolResult> {
+  if (!args.draft_id) return makeTextContent("❌ draft_id is required.");
+  const r = await sendDraftStructured(args.draft_id);
+  if (r.ok) {
     return makeTextContent(
       `✅ Draft ${args.draft_id} sent (and removed from Drafts).\n` +
-      `Sent Message ID: ${messageId}\nThread ID: ${threadId}\n\n` +
-      `--- SENT SNAPSHOT (was in the draft we just sent) ---\n${snapHeaders}\n\n${snapBody}`
+      `Sent Message ID: ${r.messageId}\nThread ID: ${r.threadId}\n\n` +
+      `--- SENT SNAPSHOT (was in the draft we just sent) ---\n${r.snapHeaders}\n\n${r.snapBody}`
     );
-  } catch (e: any) {
-    return makeTextContent(`❌ Failed to send draft ${args.draft_id}: ${e?.message || e}`);
+  }
+  return makeTextContent(`❌ Failed to send draft ${args.draft_id}: ${r.error}`);
+}
+
+// Read-only snapshot of a draft (no send). Used by the scheduled-send sweep:
+// (a) to confirm a draft still exists before acting on a matured entry, and
+// (b) to fetch the CURRENT body/headers when surfacing an external send for
+// manual approval — so the ntfy push reflects any edits Hakiel made after
+// scheduling. `exists:false` means the draft was sent or deleted out of band.
+export interface DraftSnapshot {
+  exists: boolean;
+  to: string;
+  cc?: string;
+  bcc?: string;
+  subject: string;
+  body: string;
+  link: string;
+}
+
+export async function getDraftSnapshot(draftId: string): Promise<DraftSnapshot> {
+  const gmail = await getGmail();
+  const link = `https://mail.google.com/mail/u/0/#drafts?compose=${draftId}`;
+  try {
+    const got = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
+    const payload = got.data.message?.payload;
+    const headers = payload?.headers ?? [];
+    const h = (n: string) => headers.find((x) => (x.name ?? "").toLowerCase() === n)?.value ?? "";
+    return {
+      exists: true,
+      to: h("to"),
+      cc: h("cc") || undefined,
+      bcc: h("bcc") || undefined,
+      subject: h("subject"),
+      body: decodeDraftBody(payload).trim(),
+      link,
+    };
+  } catch {
+    return { exists: false, to: "", subject: "", body: "", link };
   }
 }
 
