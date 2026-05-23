@@ -99,20 +99,29 @@ function readRailwayConfig() {
 // ── Push-layer clobber guard for XA ─────────────────────────────────────────
 // Refuse to push a XACTANALYSIS_SESSION_JSON blob that isn't an AUTHENTICATED
 // app session. A failed-OTP / MFA-wall capture leaves only identity.verisk +
-// Incapsula cookies (~15, no app JSESSIONID); pushing that overwrites a good
-// Railway session with a dead one — the proven cause of the 2026-05-21 early
-// expiry (cron logs pushed 14KB then 4.9KB pre-auth blobs at 08:49 / 08:55).
+// SSO + Incapsula cookies and no app-host JSESSIONID; pushing that overwrites a
+// good Railway session with a dead one — the proven cause of the 2026-05-21
+// early expiry (cron logs pushed 14KB then 4.9KB pre-auth blobs at 08:49/08:55).
 //
 // auth-xactanalysis.mjs already gates its own push (commit acfb0db), but this
 // guard sits at the PUSH layer so it protects EVERY caller — manual
 // `node scripts/update-railway-sessions.mjs` runs, future auth scripts, a
 // stale local xactanalysis_session.json — not just that one code path.
 //
-// Heuristic verified against live data (2026-05-21): a healthy session has ~33
-// cookies incl. a JSESSIONID scoped to the app host; a dead pre-auth blob has
-// ~15 and none. The >=20 floor + app-JSESSIONID requirement clears the healthy
-// blob with margin and rejects the dead one. Other session vars are left as-is
-// (their blob shapes aren't validated here) to avoid false-positive blocks.
+// DISCRIMINATOR: a JSESSIONID scoped to the app host (www.xactanalysis.com).
+// You only receive that after the app serves an authenticated page; a capture
+// stuck at the identity.verisk MFA wall has none. Cookie *count* is NOT usable
+// — a real authenticated session can be as small as 15 cookies (verified
+// against the committed 4/22 session) and the dead 2026-05-21 captures were
+// ALSO 15. An earlier `cookies.length >= 20` floor false-positived on small-
+// but-valid sessions; tests/xa_push_guard.test.mjs locks the contract.
+//
+// Known limitation: a pre-auth capture that picked up an app-host JSESSIONID on
+// first contact (before the MFA wall) would pass this check. That can't reach
+// disk going forward — auth-xactanalysis.mjs's acfb0db gate refuses to SAVE any
+// non-authenticated capture — so it's a legacy-only edge. Closing it fully would
+// need the auth script to stamp a proof-of-auth marker (see deliverable notes).
+// Other session vars are left as-is (their shapes aren't validated here).
 function isPushableSession(key, value) {
   if (key !== "XACTANALYSIS_SESSION_JSON") return { ok: true };
   let parsed;
@@ -125,11 +134,11 @@ function isPushableSession(key, value) {
   const hasAppSession = cookies.some(
     (c) => c && c.name === "JSESSIONID" && typeof c.domain === "string" && c.domain.includes("xactanalysis.com"),
   );
-  if (cookies.length >= 20 && hasAppSession) return { ok: true };
+  if (hasAppSession) return { ok: true };
   return {
     ok: false,
-    reason: `looks like a pre-auth / failed-OTP capture (cookies=${cookies.length}, ` +
-      `appJSESSIONID=${hasAppSession}) — refusing to clobber a good Railway session`,
+    reason: `no app-host JSESSIONID (cookies=${cookies.length}) — looks like a ` +
+      `pre-auth / failed-OTP capture; refusing to clobber a good Railway session`,
   };
 }
 
