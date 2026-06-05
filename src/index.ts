@@ -19,10 +19,11 @@ import {
 import express from "express";
 
 // Tool implementations
-import { gmailSendEmail, gmailCreateDraft, gmailDeleteDraft, gmailSendDraft, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
+import { gmailSendEmail, gmailCreateDraft, gmailCreateDraftScheduled, recoverScheduledSends, gmailDeleteDraft, gmailSendDraft, gmailFindEmail, gmailGetEmail, gmailReplyToEmail, gmailArchiveEmail, gmailDownloadAttachment } from "./tools/gmail.js";
 import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
-import { startClaimMonitor } from "./watchers/claim_monitor.js";
+import { startClaimMonitor, getClaimMonitorHealth } from "./watchers/claim_monitor.js";
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
+import { startFollowupScheduler } from "./watchers/followup_scheduler.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -61,6 +62,7 @@ const TOOLS: Tool[] = [
   { name: "gmail_create_draft", description: "Create a Gmail DRAFT (does NOT send) so Hakiel can review/edit in his Gmail compose window before sending. Same params as gmail_send_email plus optional bcc. Returns the draft ID, message ID, and a deep link to open the draft in the Gmail web UI. Use this instead of gmail_send_email whenever a human should review before send.", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, cc: { type: "string" }, bcc: { type: "string" } }, required: ["to", "subject", "body"] } },
   { name: "gmail_delete_draft", description: "Permanently delete a Gmail draft by its draft ID. Captures a brief snapshot (To/Cc/Subject) before deletion for audit trail. Use when a draft was created in error or has been superseded by a newer version.", inputSchema: { type: "object", properties: { draft_id: { type: "string", description: "Numeric Gmail draft ID (from gmail_create_draft output or Gmail compose URL ?compose=<id>)" } }, required: ["draft_id"] } },
   { name: "gmail_send_draft", description: "Send an existing Gmail draft and remove it from the Drafts folder in one API call. Reads the draft back BEFORE sending so the returned response carries the exact snapshot that was sent. Use this when a draft has been reviewed and is ready to ship — sending via gmail_send_email would orphan the draft.", inputSchema: { type: "object", properties: { draft_id: { type: "string", description: "Numeric Gmail draft ID (from gmail_create_draft output or Gmail compose URL ?compose=<id>)" } }, required: ["draft_id"] } },
+  { name: "gmail_create_draft_scheduled", description: "Create a Gmail draft and AUTO-SEND it at send_at (ISO-8601). Gmail's native Schedule-Send isn't API-exposed, so this emulates it via a labeled draft + an in-process timer (re-armed on boot from the label). LIMITATION: fires only while the server runs; if it's down at send_at the email goes out late on next boot, not on time. STRICT-SEND GUARDRAIL applies because it auto-fires: third-party recipients require approved_at_iso_timestamp within 15 min AND force_send=true; internal-only recipients bypass. Cancel before send_at with gmail_delete_draft.", inputSchema: { type: "object", properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" }, send_at: { type: "string", description: "ISO-8601 datetime to send at. Must be in the future and within 1 year." }, cc: { type: "string" }, bcc: { type: "string" }, approved_at_iso_timestamp: { type: "string", description: "ISO-8601 approval timestamp (within last 15 min) for a third-party scheduled send. Pair with force_send:true." }, force_send: { type: "boolean", description: "Set true with a fresh approved_at_iso_timestamp to authorize a third-party scheduled send." } }, required: ["to", "subject", "body", "send_at"] } },
   { name: "gmail_find_email", description: "Search for emails using Gmail search syntax", inputSchema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } },
   { name: "gmail_get_email", description: "Get full content of an email by message ID", inputSchema: { type: "object", properties: { message_id: { type: "string" } }, required: ["message_id"] } },
   { name: "gmail_reply_to_email", description: "Reply to an existing email thread", inputSchema: { type: "object", properties: { message_id: { type: "string" }, body: { type: "string" } }, required: ["message_id", "body"] } },
@@ -269,6 +271,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "gmail_create_draft": return gmailCreateDraft(args as any);
     case "gmail_delete_draft": return gmailDeleteDraft(args as any);
     case "gmail_send_draft": return gmailSendDraft(args as any);
+    case "gmail_create_draft_scheduled": return gmailCreateDraftScheduled(args as any);
     case "gmail_find_email": return gmailFindEmail(args as any);
     case "gmail_get_email": return gmailGetEmail(args as any);
     case "gmail_reply_to_email": return gmailReplyToEmail(args as any);
@@ -484,7 +487,21 @@ if (PORT) {
     const transport = new SSEServerTransport("/messages", res);
     transports.set(transport.sessionId, transport);
 
-    res.on("close", () => transports.delete(transport.sessionId));
+    // Keepalive: SSEServerTransport emits no heartbeats of its own, so an idle
+    // MCP stream looks dead to Railway's edge proxy, which idle-closes it after
+    // a few minutes. That deletes the session server-side with no reconnect, so
+    // the next client `POST /messages` 404s and the client surfaces it as
+    // "Session terminated" — silently wedging the claim pipeline. A comment ping
+    // every 20s (well under typical 60-120s proxy idle limits) keeps it open.
+    const keepAlive = setInterval(() => {
+      try { res.write(": ping\n\n"); } catch { /* socket gone; close handler cleans up */ }
+    }, 20_000);
+    const cleanup = () => {
+      clearInterval(keepAlive);
+      transports.delete(transport.sessionId);
+    };
+    res.on("close", cleanup);
+    res.on("error", cleanup);
 
     const server = createServer();
     await server.connect(transport);
@@ -498,6 +515,42 @@ if (PORT) {
   });
 
   app.get("/health", (_req, res) => res.json({ status: "ok", tools: TOOLS.length }));
+
+  // Liveness probe for Railway healthcheck / external uptime polling. Unlike
+  // /health (static "ok"), this reports the claim-monitor's real liveness plus
+  // the count of live SSE sessions, returns 503 when the watcher is wedged, and
+  // fires a throttled ntfy so a silent stall still surfaces even if nothing else
+  // polls it. (The [STALL] watchdog already alerts; the throttle here avoids
+  // double-spam when a healthcheck hammers /healthz during an outage.)
+  let lastHealthAlertAt = 0;
+  const HEALTH_ALERT_THROTTLE_MS = 10 * 60 * 1000;
+  app.get("/healthz", (_req, res) => {
+    const cm = getClaimMonitorHealth();
+    const ok = cm.healthy;
+    if (!ok && Date.now() - lastHealthAlertAt > HEALTH_ALERT_THROTTLE_MS) {
+      lastHealthAlertAt = Date.now();
+      const server = process.env.CLAIM_MONITOR_NTFY_SERVER || "https://ntfy.sh";
+      const topic = process.env.HEALTH_NTFY_TOPIC || "hakiel-mac-mini-health";
+      const mins = Math.round((cm.sinceLastCycleMs ?? 0) / 60000);
+      fetch(`${server}/${encodeURIComponent(topic)}`, {
+        method: "POST",
+        headers: {
+          "Title": "[UNHEALTHY] mcp-automation",
+          "Priority": "5",
+          "Tags": "warning",
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+        body: `claim-monitor: no successful cycle in ${mins}m; live SSE sessions=${transports.size}. Check Railway.`,
+      }).catch(() => { /* swallow */ });
+    }
+    res.status(ok ? 200 : 503).json({
+      status: ok ? "ok" : "unhealthy",
+      uptimeSec: Math.round(process.uptime()),
+      activeSseSessions: transports.size,
+      tools: TOOLS.length,
+      claimMonitor: cm,
+    });
+  });
 
   // Public time endpoint. No auth, no DB, no background work — just a clock.
   // Used by Dispatch (via http_request) when its bash sandbox is unavailable
@@ -620,6 +673,13 @@ if (PORT) {
     // availability inquiries + signing-document deliveries. See
     // src/watchers/notary_monitor.ts.
     startNotaryMonitor();
+    // Follow-up scheduler: arms the 3hr no-reply [FOLLOWUP] alert after an
+    // approved SMS is sent (handleClaimApproval registers entries). See
+    // src/watchers/followup_scheduler.ts.
+    startFollowupScheduler();
+    // Re-arm any pending scheduled sends (gmail_create_draft_scheduled) whose
+    // in-memory timers were lost on the last restart. See src/tools/gmail.ts.
+    recoverScheduledSends().catch(() => { /* swallow */ });
   });
   // Disable Nagle's algorithm so small SSE packets aren't buffered on localhost
   httpServer.on("connection", (socket) => socket.setNoDelay(true));

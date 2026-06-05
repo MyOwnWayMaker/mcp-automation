@@ -40,6 +40,8 @@ export type ImportantCategory =
   | "other_important"
   | "not_important";
 
+export type ReplyIntent = "docs_only" | "cta";
+
 export type ImportantVerdict = {
   is_important: boolean;
   confidence: number;
@@ -48,6 +50,7 @@ export type ImportantVerdict = {
   action_hint: string;
   deadline: string | null;
   source: "marketing_filter" | "hard_allowlist" | "llm" | "fail_open";
+  reply_intent: ReplyIntent; // docs_only -> fixed "Received, thank you."; cta -> "Hi <First>," + substance
   suggested_reply: string; // body-only — NO greeting, NO closing, NO signature
 };
 
@@ -257,6 +260,7 @@ Return STRICT JSON only, no prose, no markdown:
   "summary": "one-sentence what this email is",
   "action_hint": "one short clause about what the recipient should do",
   "deadline": "YYYY-MM-DD or null",
+  "reply_intent": "docs_only" | "cta",
   "suggested_reply": "REPLY BODY ONLY — see strict rules below"
 }
 
@@ -269,11 +273,19 @@ Gmail sendAs settings).
 - Just the reply prose itself, ready to slot into a thread.
 - If you include a greeting, closing, or signature, the system will append the
   signature anyway and Hakiel will see duplicates. Don't.
-- Keep the draft 2-4 sentences. Concrete dates over "as soon as I can." Never
-  commit to large dollar amounts, schedules >14 days out, or sight-unseen
-  signatures. If unsure, fall back to:
-  "Acknowledging receipt — I'll review and circle back by [tomorrow/EOD]."
-  (still no greeting / sign-off).
+- Classify reply_intent:
+  - "docs_only": the email merely sends docs/attachments, forwards a packet,
+    shares a link, or is an FYI with NO question and NO requested action. The
+    system replies with exactly "Received, thank you.", so for docs_only return
+    suggested_reply as "".
+  - "cta": it asks a question, requests an action, or needs a decision. Write the
+    reply BODY ONLY in suggested_reply. Get straight to the point with NO
+    "acknowledging receipt" / "thank you for your email" preamble (the system
+    adds the "Hi <First>," greeting itself). 2-4 sentences; concrete dates over
+    "as soon as I can." Never commit to large dollar amounts, schedules over 14
+    days out, or sight-unseen signatures.
+  - If you cannot draft confident substance for a "cta", return suggested_reply
+    as "" and let Hakiel write it. Do NOT emit a placeholder preamble.
 - If is_important is false, return suggested_reply as an empty string.
 
 Flag as important (is_important=true) if ANY are true:
@@ -301,6 +313,7 @@ Return STRICT JSON only:
   "summary": "one-sentence what this email is",
   "action_hint": "one short clause about what the recipient should do",
   "deadline": "YYYY-MM-DD or null",
+  "reply_intent": "docs_only" | "cta",
   "suggested_reply": "REPLY BODY ONLY — see strict rules below"
 }
 
@@ -311,11 +324,19 @@ sendAs settings).
 - DO NOT include any closing line ("Best,", "Thanks,", "Regards,", "Sincerely,").
 - DO NOT include any signature, name, title, or contact info.
 - Just the reply prose itself, ready to slot into a thread.
-- Keep the draft 2-4 sentences. Concrete dates over "as soon as I can." Never
-  commit to large dollar amounts, schedules >14 days out, or sight-unseen
-  signatures. If unsure, fall back to:
-  "Acknowledging receipt — I'll review and circle back by [tomorrow/EOD]."
-  (still no greeting / sign-off).
+- Classify reply_intent:
+  - "docs_only": the email merely sends docs/attachments, forwards a packet,
+    shares a link, or is an FYI with NO question and NO requested action. The
+    system replies with exactly "Received, thank you.", so for docs_only return
+    suggested_reply as "".
+  - "cta": it asks a question, requests an action, or needs a decision. Write the
+    reply BODY ONLY in suggested_reply. Get straight to the point with NO
+    "acknowledging receipt" / "thank you for your email" preamble (the system
+    adds the "Hi <First>," greeting itself). 2-4 sentences; concrete dates over
+    "as soon as I can." Never commit to large dollar amounts, schedules over 14
+    days out, or sight-unseen signatures.
+  - If you cannot draft confident substance for a "cta", return suggested_reply
+    as "" and let Hakiel write it. Do NOT emit a placeholder preamble.
 - If the email is purely informational/notification with no real request,
   return suggested_reply as an empty string.`;
 
@@ -371,6 +392,7 @@ async function llmClassify(args: {
       action_hint: "Review manually.",
       deadline: null,
       source: "fail_open",
+      reply_intent: "cta",
       suggested_reply: "",
     };
   }
@@ -400,6 +422,7 @@ async function llmClassify(args: {
           action_hint: String(parsed.action_hint || "").substring(0, 200),
           deadline: parsed.deadline && parsed.deadline !== "null" ? String(parsed.deadline) : null,
           source: "llm",
+          reply_intent: parsed.reply_intent === "cta" ? "cta" : "docs_only",
           suggested_reply: String(parsed.suggested_reply || "").substring(0, 2000),
         };
       }
@@ -418,6 +441,7 @@ async function llmClassify(args: {
     action_hint: "Open + skim.",
     deadline: null,
     source: "fail_open",
+    reply_intent: "cta",
     suggested_reply: "",
   };
 }
@@ -440,6 +464,7 @@ async function llmSummarizeOnly(args: {
       action_hint: "Open + review.",
       deadline: null,
       source: "hard_allowlist",
+      reply_intent: "cta",
       suggested_reply: "",
     };
   }
@@ -464,6 +489,7 @@ async function llmSummarizeOnly(args: {
         action_hint: String(parsed.action_hint || "Open + review.").substring(0, 200),
         deadline: parsed.deadline && parsed.deadline !== "null" ? String(parsed.deadline) : null,
         source: "hard_allowlist",
+        reply_intent: parsed.reply_intent === "cta" ? "cta" : "docs_only",
         suggested_reply: String(parsed.suggested_reply || "").substring(0, 2000),
       };
     }
@@ -479,6 +505,7 @@ async function llmSummarizeOnly(args: {
     action_hint: "Open + review.",
     deadline: null,
     source: "hard_allowlist",
+    reply_intent: "cta",
     suggested_reply: "",
   };
 }

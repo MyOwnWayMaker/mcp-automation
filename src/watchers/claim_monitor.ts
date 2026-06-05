@@ -193,6 +193,28 @@ let pollInFlightSince = 0;
 let lastSuccessfulCycleAt = 0;
 let lastStallAlertAt = 0;
 
+// Liveness snapshot for the /healthz endpoint. "healthy" = the watcher either
+// isn't running / is disabled, or it completed a poll cycle within the same
+// WATCHDOG_STALL_MS window the [STALL] watchdog uses.
+export function getClaimMonitorHealth() {
+  const now = Date.now();
+  const running = started_at > 0;
+  const disabled = process.env.CLAIM_MONITOR_DISABLED === "1";
+  const sinceLastCycleMs = lastSuccessfulCycleAt > 0 ? now - lastSuccessfulCycleAt : null;
+  const healthy = !running || disabled
+    ? true
+    : sinceLastCycleMs !== null && sinceLastCycleMs < WATCHDOG_STALL_MS;
+  return {
+    running,
+    disabled,
+    pollInFlight,
+    lastSuccessfulCycleAt: lastSuccessfulCycleAt > 0 ? new Date(lastSuccessfulCycleAt).toISOString() : null,
+    sinceLastCycleMs,
+    stallThresholdMs: WATCHDOG_STALL_MS,
+    healthy,
+  };
+}
+
 // ── External-call timeout helper ────────────────────────────────────────────
 
 // Race a promise against a hard timeout. On timeout, the original promise is
@@ -449,7 +471,9 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
           let draft_reason: string | undefined;
 
           const replyText = (verdict.suggested_reply || "").trim();
-          if (!replyText) {
+          // docs_only always drafts (the drafter forces "Received, thank you.");
+          // a cta with no substance no-ops so we never draft a bare greeting.
+          if (verdict.reply_intent !== "docs_only" && !replyText) {
             draft_status = "no_reply_text";
           } else if (full.data.threadId && messageIdHeader) {
             try {
@@ -461,6 +485,7 @@ async function pollOnce(): Promise<{ scanned: number; alerted: number }> {
                   cc_addresses: replyAllCc || undefined,
                   original_subject: subject,
                   reply_body: replyText,
+                  reply_intent: verdict.reply_intent,
                   category: verdict.category,
                   source_email_id: m.id,
                 }),
