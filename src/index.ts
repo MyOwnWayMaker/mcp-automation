@@ -24,6 +24,7 @@ import { extractPdfText, gmailAttachmentText } from "./tools/pdf_extract.js";
 import { startClaimMonitor, getClaimMonitorHealth } from "./watchers/claim_monitor.js";
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
 import { startFollowupScheduler } from "./watchers/followup_scheduler.js";
+import { startXaKeepalive, getXaKeepaliveHealth } from "./watchers/xa_keepalive.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -549,6 +550,7 @@ if (PORT) {
       activeSseSessions: transports.size,
       tools: TOOLS.length,
       claimMonitor: cm,
+      xaKeepalive: getXaKeepaliveHealth(),
     });
   });
 
@@ -677,6 +679,11 @@ if (PORT) {
     // approved SMS is sent (handleClaimApproval registers entries). See
     // src/watchers/followup_scheduler.ts.
     startFollowupScheduler();
+    // XA session keepalive: pokes XactAnalysis on a 12h cadence to keep the
+    // sliding-window TTL warm. Quiet stretches (weekends) otherwise let the
+    // session idle-expire well before the 30-day hard ceiling. See
+    // src/watchers/xa_keepalive.ts.
+    startXaKeepalive();
     // Re-arm any pending scheduled sends (gmail_create_draft_scheduled) whose
     // in-memory timers were lost on the last restart. See src/tools/gmail.ts.
     recoverScheduledSends().catch(() => { /* swallow */ });
