@@ -309,43 +309,128 @@ try {
   }
 
   if (otp) {
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(4000);
     const otpSelectors = [
       'input[name="otpCode"]',
       'input[autocomplete="one-time-code"]',
+      'input[name="code"]',
+      'input[name="otp"]',
+      'input[name*="code" i]',
+      'input[name*="otp" i]',
+      'input[id*="code" i]',
+      'input[id*="otp" i]',
+      'input[id*="passcode" i]',
+      'input[id*="verification" i]',
+      'input[inputmode="numeric"]',
+      'input[aria-label*="code" i]',
+      'input[aria-label*="verification" i]',
+      'input[aria-label*="passcode" i]',
+      'input[placeholder*="code" i]',
+      'input[placeholder*="enter" i]',
+      'input[placeholder*="verification" i]',
       'input[type="tel"]',
       'input[type="number"]',
       'input[type="text"][maxlength]',
-      'input[placeholder*="code" i]',
-      'input[placeholder*="enter" i]',
+      'input[type="password"][maxlength]',
+      'input[id^="mat-input-"]',  // Angular Material auto-generated id (Verisk identity page)
+    ];
+
+    const scopes = [
+      { name: 'page', loc: page },
+      ...page.frames().filter(f => f !== page.mainFrame()).map((f, i) => ({ name: `frame[${i}]:${f.url().slice(0, 80)}`, loc: f })),
     ];
 
     let otpEntered = false;
-    for (const sel of otpSelectors) {
-      const field = page.locator(sel).first();
-      if (await field.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await field.fill(otp);
-        console.log(`✅ Entered OTP "${otp}" into field: ${sel}`);
-        otpEntered = true;
-        break;
+    outer: for (const scope of scopes) {
+      for (const sel of otpSelectors) {
+        try {
+          const field = scope.loc.locator(sel).first();
+          if (await field.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await field.click().catch(() => {});
+            await field.fill(otp).catch(async () => {
+              await field.focus().catch(() => {});
+              await page.keyboard.type(otp, { delay: 80 });
+            });
+            console.log(`✅ Entered OTP "${otp}" via ${scope.name} selector: ${sel}`);
+            otpEntered = true;
+            break outer;
+          }
+        } catch (_) { /* try next */ }
       }
+    }
+
+    // Last-resort fallback: if the page has exactly one visible text/tel/password input, use it.
+    // The Verisk OTP page renders just the OTP field on screen, so this is unambiguous.
+    if (!otpEntered) {
+      try {
+        const candidates = await page.$$eval(
+          'input[type="text"], input[type="tel"], input[type="password"], input:not([type])',
+          els => els
+            .map((e, idx) => ({ idx, visible: !!(e.offsetWidth || e.offsetHeight), id: e.id, name: e.name }))
+            .filter(x => x.visible)
+        );
+        if (candidates.length === 1) {
+          const c = candidates[0];
+          const sel = c.id ? `#${c.id}` : (c.name ? `input[name="${c.name}"]` : `input[type="text"]`);
+          const field = page.locator(sel).first();
+          await field.click().catch(() => {});
+          await field.fill(otp).catch(async () => {
+            await field.focus().catch(() => {});
+            await page.keyboard.type(otp, { delay: 80 });
+          });
+          console.log(`✅ Entered OTP "${otp}" via single-visible-input fallback: ${sel}`);
+          otpEntered = true;
+        }
+      } catch (_) { /* fall through to diagnostic */ }
     }
 
     if (!otpEntered) {
       console.log("⚠️  Could not find OTP input field — please enter the code manually: " + otp);
+      const dumpDir = process.env.XA_DEBUG_DUMP_DIR || '/Users/dino/.claude/jobs/91a395c2/tmp';
+      try { fs.mkdirSync(dumpDir, { recursive: true }); } catch {}
+      const ts = `${Date.now()}`;
+      try { await page.screenshot({ path: `${dumpDir}/xa-otp-fail-${ts}.png`, fullPage: true }); console.log(`📸 Screenshot: ${dumpDir}/xa-otp-fail-${ts}.png`); } catch (e) { console.log('screenshot fail:', e.message); }
+      try { const html = await page.content(); fs.writeFileSync(`${dumpDir}/xa-otp-fail-${ts}.html`, html); console.log(`📄 HTML dump: ${dumpDir}/xa-otp-fail-${ts}.html`); } catch (e) { console.log('html dump fail:', e.message); }
+      try {
+        const inputs = await page.$$eval('input', els => els.map(e => ({
+          name: e.name, id: e.id, type: e.type, placeholder: e.placeholder,
+          maxlength: e.maxLength, autocomplete: e.autocomplete,
+          ariaLabel: e.getAttribute('aria-label'), visible: !!(e.offsetWidth || e.offsetHeight),
+        })));
+        console.log('Inputs on page:', JSON.stringify(inputs, null, 2));
+      } catch (e) { console.log('input enum fail:', e.message); }
     } else {
-      for (const selector of [
-        'button:has-text("Verify")',
-        'button:has-text("Submit")',
-        'button:has-text("Continue")',
-        'button:has-text("Sign in")',
-        'button[type="submit"]',
-      ]) {
-        const btn = page.locator(selector).first();
-        if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
-          await btn.click();
-          console.log(`✅ Submitted OTP`);
-          break;
+      // Try Enter-key submit FIRST — the OTP input is focused, and modern forms
+      // submit on Enter. This avoids guessing button text wrong (a "Continue"
+      // somewhere else on the page is not the OTP submit).
+      let submitted = false;
+      try {
+        await page.keyboard.press('Enter');
+        console.log(`✅ Submitted OTP via Enter key`);
+        submitted = true;
+        // Give the form 4s to navigate. If still on identity page, fall through.
+        await page.waitForTimeout(4000);
+        const stillIdentity = /identity\.verisk|\/auth\//.test(page.url());
+        if (stillIdentity) {
+          console.log(`(Enter didn't trigger nav; trying button click fallback)`);
+          submitted = false;
+        }
+      } catch (_) { /* fall through to button-click */ }
+
+      if (!submitted) {
+        for (const selector of [
+          'button:has-text("Verify")',
+          'button:has-text("Submit")',
+          'button:has-text("Continue")',
+          'button:has-text("Sign in")',
+          'button[type="submit"]',
+        ]) {
+          const btn = page.locator(selector).first();
+          if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await btn.click();
+            console.log(`✅ Submitted OTP via button: ${selector}`);
+            break;
+          }
         }
       }
     }
@@ -367,6 +452,19 @@ try {
   console.log("✅ Login successful! URL:", page.url());
 } catch {
   console.log("Timed out waiting for the authenticated dashboard.");
+  // Diagnostic on dashboard timeout — capture post-submit state to debug what went wrong
+  try {
+    const dumpDir = process.env.XA_DEBUG_DUMP_DIR || '/Users/dino/.claude/jobs/91a395c2/tmp';
+    fs.mkdirSync(dumpDir, { recursive: true });
+    const ts = `${Date.now()}`;
+    console.log(`Current URL: ${page.url()}`);
+    try { await page.screenshot({ path: `${dumpDir}/xa-dash-fail-${ts}.png`, fullPage: true }); console.log(`📸 Dashboard-fail screenshot: ${dumpDir}/xa-dash-fail-${ts}.png`); } catch (e) { console.log('dash screenshot fail:', e.message); }
+    try { const html = await page.content(); fs.writeFileSync(`${dumpDir}/xa-dash-fail-${ts}.html`, html); console.log(`📄 Dashboard-fail HTML: ${dumpDir}/xa-dash-fail-${ts}.html`); } catch (e) { console.log('dash html fail:', e.message); }
+    try {
+      const visibleText = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+      console.log(`Visible text on post-submit page:\n${visibleText}`);
+    } catch (e) { console.log('text grab fail:', e.message); }
+  } catch (e) { console.log('dashboard-timeout diagnostic fail:', e.message); }
 }
 
 // Settle briefly so any post-login Set-Cookie writes land. GUARDED: if the
