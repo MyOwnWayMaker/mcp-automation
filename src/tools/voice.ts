@@ -1052,6 +1052,31 @@ export async function voiceSendSms(args: {
         }, `[data-mcp-pick2="${composeRecipient.pickedIdx}"]`);
         nativeSetResult = { ok: true, valueAfter: valueAfterType };
 
+        // Fallback: paste landed empty (observed 2026-06-04 against the live
+        // Voice instance — clipboard.writeText + Ctrl+V silently no-ops on the
+        // current Railway Chromium build, and the JSON debug payload shows
+        // the compose To input read back `value: ""` while the sidebar
+        // gv-make-call-panel input still held the dial-pad-stage number).
+        // Type the number into the compose To via the keyboard instead so
+        // the picker's input-event listener actually fires; the Enter
+        // commit-gesture below finalizes the chip when no "Send to <number>"
+        // tile renders.
+        if (!valueAfterType) {
+          await composeToLoc.focus({ timeout: 5000 }).catch(() => {});
+          await page.waitForTimeout(150);
+          await composeToLoc.pressSequentially(args.number, { delay: 50 }).catch(() => {});
+          await page.waitForTimeout(400);
+          const valueAfterTyped = await page.evaluate((sel) => {
+            const input = document.querySelector(sel) as HTMLInputElement | null;
+            return input ? input.value : null;
+          }, `[data-mcp-pick2="${composeRecipient.pickedIdx}"]`);
+          nativeSetResult = {
+            ok: !!valueAfterTyped,
+            valueAfter: valueAfterTyped,
+            reason: "paste_empty_typed_fallback",
+          };
+        }
+
         // Poll for the "Send to <number>" suggestion tile. Voice's picker
         // surfaces it ~500-1500ms after the paste event. Match by visible
         // text starting with "Send to" — that's the gesture the user
@@ -1117,6 +1142,20 @@ export async function voiceSendSms(args: {
             break;
           }
           if (i === 11) suggestionDebug = found.candidates;
+          await page.waitForTimeout(500);
+        }
+
+        // Commit-gesture fallback: when no "Send to <number>" tile rendered
+        // during the poll loop (observed 2026-06-04 — Voice's
+        // gv-message-party-picker no longer surfaces the tile for typed-in
+        // numbers, and the existing Enter fallback at the tile-click site
+        // never runs because `found.picked` stayed false). Pressing Enter on
+        // the focused compose To input commits the chip directly from the
+        // typed value, matching the gesture a human uses when the picker is
+        // quiet. No-op when the input is empty or a chip is already committed.
+        if (!autocompleteClicked && nativeSetResult.valueAfter) {
+          await composeToLoc.focus({ timeout: 2000 }).catch(() => {});
+          await page.keyboard.press("Enter").catch(() => {});
           await page.waitForTimeout(500);
         }
       } // close else (auto mode)
