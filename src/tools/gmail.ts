@@ -2,6 +2,7 @@ import { google } from "googleapis";
 import fs from "fs";
 import path from "path";
 import { getGoogleAuthClient } from "../auth/google.js";
+import { checkSendGuardrail, allRecipientsInternal as guardrailAllInternal } from "../util/send_guardrail.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 async function getGmail() {
@@ -49,33 +50,10 @@ function encodeEmail(params: {
   return Buffer.from(lines).toString("base64url");
 }
 
-// Domains Hakiel controls / treats as internal. Sends to these bypass the
-// strict-send guardrail because they don't carry the same out-the-door risk
-// as third-party recipients (no client-facing reputation hit if something
-// goes wrong; he can immediately retract via Gmail's own UI if needed).
-const INTERNAL_SEND_DOMAINS = new Set(
-  (process.env.GMAIL_INTERNAL_DOMAINS || "erseville.com").split(",").map(s => s.trim().toLowerCase()).filter(Boolean),
-);
-
-function extractRecipientDomains(...fields: (string | undefined)[]): string[] {
-  const domains: string[] = [];
-  for (const f of fields) {
-    if (!f) continue;
-    for (const part of f.split(",")) {
-      const m = part.match(/<([^>]+)>/) || [null, part.trim()];
-      const addr = (m[1] || "").trim().toLowerCase();
-      const at = addr.indexOf("@");
-      if (at > 0 && at < addr.length - 1) domains.push(addr.slice(at + 1));
-    }
-  }
-  return domains;
-}
-
-function allRecipientsInternal(...fields: (string | undefined)[]): boolean {
-  const domains = extractRecipientDomains(...fields);
-  if (domains.length === 0) return false; // no parseable recipient → not internal-only
-  return domains.every(d => INTERNAL_SEND_DOMAINS.has(d));
-}
+// Strict-send domain check + approval logic now live in src/util/send_guardrail.ts
+// (shared with the notary send tools). Re-exported alias for back-compat
+// callers in this file.
+const allRecipientsInternal = guardrailAllInternal;
 
 /**
  * Send an email via Gmail. To prevent another direct-send bypass (the Paul
@@ -111,25 +89,15 @@ export async function gmailSendEmail(args: {
   }
 
   // Strict-send guardrail for third-party recipients.
-  const internalOnly = allRecipientsInternal(args.to, args.cc, args.bcc);
-  if (!internalOnly) {
-    const approvedAt = (args.approved_at_iso_timestamp || "").trim();
-    const approvedMs = approvedAt ? Date.parse(approvedAt) : NaN;
-    const ageMs = Number.isFinite(approvedMs) ? Date.now() - approvedMs : NaN;
-    const approvalFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 15 * 60 * 1000;
-
-    if (!args.force_send || !approvalFresh) {
-      return makeTextContent(
-        "❌ gmail_send_email REFUSED: third-party recipient(s) detected and no valid pre-send approval.\n\n" +
-        `Recipients: to=${args.to}${args.cc ? ` | cc=${args.cc}` : ""}${args.bcc ? ` | bcc=${args.bcc}` : ""}\n` +
-        `Internal domains (no-check): ${[...INTERNAL_SEND_DOMAINS].join(", ") || "(none)"}\n\n` +
-        "Choose one of:\n" +
-        "  (1) gmail_create_draft + (Hakiel reviews) + gmail_send_draft(draft_id=...) — preferred.\n" +
-        "  (2) Re-call with draft_id of an existing reviewed draft.\n" +
-        "  (3) Re-call with approved_at_iso_timestamp=<ISO-8601 within last 15 min> AND force_send=true — only when an explicit Hakiel approval has just been received."
-      );
-    }
-  }
+  const decision = checkSendGuardrail({
+    tool: "gmail_send_email",
+    to: args.to,
+    cc: args.cc,
+    bcc: args.bcc,
+    approved_at_iso_timestamp: args.approved_at_iso_timestamp,
+    force_send: args.force_send,
+  });
+  if (!decision.ok) return makeTextContent(decision.reason);
 
   const gmail = await getGmail();
   const raw = encodeEmail(args);
@@ -139,7 +107,7 @@ export async function gmailSendEmail(args: {
   });
   return makeTextContent(
     `✅ Email sent. Message ID: ${res.data.id}\n` +
-    `Path: ${internalOnly ? "internal-only (guardrail skipped)" : "force_send with fresh approval"}`
+    `Path: ${decision.path === "internal_only" ? "internal-only (guardrail skipped)" : "force_send with fresh approval"}`
   );
 }
 
@@ -392,23 +360,15 @@ export async function gmailCreateDraftScheduled(args: {
 
   // Strict-send guardrail — a scheduled send auto-fires, so it needs the same
   // approval as a direct send (matches gmail_send_email).
-  const internalOnly = allRecipientsInternal(args.to, args.cc, args.bcc);
-  if (!internalOnly) {
-    const approvedAt = (args.approved_at_iso_timestamp || "").trim();
-    const approvedMs = approvedAt ? Date.parse(approvedAt) : NaN;
-    const ageMs = Number.isFinite(approvedMs) ? Date.now() - approvedMs : NaN;
-    const approvalFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 15 * 60 * 1000;
-    if (!args.force_send || !approvalFresh) {
-      return makeTextContent(
-        "❌ gmail_create_draft_scheduled REFUSED: third-party recipient(s) and no valid pre-send approval.\n\n" +
-        `Recipients: to=${args.to}${args.cc ? ` | cc=${args.cc}` : ""}${args.bcc ? ` | bcc=${args.bcc}` : ""}\n` +
-        `Internal domains (no-check): ${[...INTERNAL_SEND_DOMAINS].join(", ") || "(none)"}\n\n` +
-        "A scheduled send auto-fires, so it needs the same approval as a direct send:\n" +
-        "  - Re-call with approved_at_iso_timestamp=<ISO-8601 within last 15 min> AND force_send=true, OR\n" +
-        "  - Use gmail_create_draft (no schedule) and send manually when ready."
-      );
-    }
-  }
+  const decision = checkSendGuardrail({
+    tool: "gmail_create_draft_scheduled",
+    to: args.to,
+    cc: args.cc,
+    bcc: args.bcc,
+    approved_at_iso_timestamp: args.approved_at_iso_timestamp,
+    force_send: args.force_send,
+  });
+  if (!decision.ok) return makeTextContent(decision.reason);
 
   const gmail = await getGmail();
   const isoSendAt = new Date(sendAtMs).toISOString();
@@ -514,30 +474,65 @@ export async function gmailDeleteDraft(args: { draft_id: string }): Promise<Call
  * created via gmail_create_draft (or in the Gmail UI), reviewed, and is
  * ready to ship — sending via gmail_send_email would orphan the draft.
  *
+ * STRICT-SEND GUARDRAIL: the recipients (To/Cc/Bcc) are read from the
+ * server-stored draft BEFORE send and run through the same third-party
+ * check as gmail_send_email. This closes the auto-reply gap (incident
+ * 2026-06-04/05): automation that drafted then immediately called
+ * gmail_send_draft was shipping un-reviewed mail. Now an internal-only
+ * draft still ships freely; a third-party draft requires the explicit
+ * approved_at_iso_timestamp (within 15 min) AND force_send=true.
+ *
  * Reads the draft back BEFORE send so we have a verified snapshot of what
  * actually got sent for the audit trail. Returns the resulting message+
  * thread IDs and the snapshot.
  */
-export async function gmailSendDraft(args: { draft_id: string }): Promise<CallToolResult> {
+export async function gmailSendDraft(args: {
+  draft_id: string;
+  approved_at_iso_timestamp?: string;
+  force_send?: boolean;
+}): Promise<CallToolResult> {
   if (!args.draft_id) return makeTextContent("❌ draft_id is required.");
   const gmail = await getGmail();
 
   // Snapshot before send — same pattern as gmail_create_draft uses post-create.
   let snapHeaders = "";
   let snapBody = "(could not read draft before send)";
+  let snapTo = "", snapCc: string | undefined, snapBcc: string | undefined;
   try {
     const got = await gmail.users.drafts.get({ userId: "me", id: args.draft_id, format: "full" });
     const payload = got.data.message?.payload;
     const headers = payload?.headers ?? [];
     const h = (n: string) => headers.find((x) => (x.name ?? "").toLowerCase() === n)?.value ?? "";
+    snapTo = h("to");
+    snapCc = h("cc") || undefined;
+    snapBcc = h("bcc") || undefined;
     snapHeaders =
-      `To: ${h("to")}\n` +
-      (h("cc") ? `Cc: ${h("cc")}\n` : "") +
-      (h("bcc") ? `Bcc: ${h("bcc")}\n` : "") +
+      `To: ${snapTo}\n` +
+      (snapCc ? `Cc: ${snapCc}\n` : "") +
+      (snapBcc ? `Bcc: ${snapBcc}\n` : "") +
       `Subject: ${h("subject")}`;
     snapBody = decodeDraftBody(payload).trim() || "(BODY EMPTY IN STORED DRAFT)";
   } catch (e: any) {
     snapBody = `(drafts.get failed: ${e?.message || e})`;
+  }
+
+  // Guardrail on the SERVER-STORED draft recipients, not call args (which has
+  // no recipients). If we couldn't read the draft, the empty recipient list
+  // is treated as "not internal" by the guardrail, so an unreadable draft
+  // cannot accidentally pass the internal-only bypass.
+  const decision = checkSendGuardrail({
+    tool: "gmail_send_draft",
+    to: snapTo,
+    cc: snapCc,
+    bcc: snapBcc,
+    approved_at_iso_timestamp: args.approved_at_iso_timestamp,
+    force_send: args.force_send,
+  });
+  if (!decision.ok) {
+    return makeTextContent(
+      decision.reason +
+        `\n\nDraft snapshot (not sent):\n${snapHeaders}\n\n${snapBody}`,
+    );
   }
 
   try {
@@ -549,6 +544,7 @@ export async function gmailSendDraft(args: { draft_id: string }): Promise<CallTo
     const threadId = res.data.threadId ?? "";
     return makeTextContent(
       `✅ Draft ${args.draft_id} sent (and removed from Drafts).\n` +
+      `Path: ${decision.path === "internal_only" ? "internal-only (guardrail skipped)" : "force_send with fresh approval"}\n` +
       `Sent Message ID: ${messageId}\nThread ID: ${threadId}\n\n` +
       `--- SENT SNAPSHOT (was in the draft we just sent) ---\n${snapHeaders}\n\n${snapBody}`
     );

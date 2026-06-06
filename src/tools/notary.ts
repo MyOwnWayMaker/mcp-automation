@@ -1,6 +1,7 @@
 import { google } from "googleapis";
 import { getNotaryGmailClient } from "../auth/google-notary.js";
 import { getGoogleAuthClient } from "../auth/google.js";
+import { checkSendGuardrail } from "../util/send_guardrail.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 function ok(text: string): CallToolResult {
@@ -68,7 +69,20 @@ export async function notarySendEmail(args: {
   body: string;
   reply_to_message_id?: string;
   thread_id?: string;
+  approved_at_iso_timestamp?: string;
+  force_send?: boolean;
 }): Promise<CallToolResult> {
+  // Strict-send guardrail — same rule as the main inbox tools. The notary
+  // inbox was previously unguarded; auto-reply incident 2026-06-04/05 traced
+  // back to this gap.
+  const decision = checkSendGuardrail({
+    tool: "notary_send_email",
+    to: args.to,
+    approved_at_iso_timestamp: args.approved_at_iso_timestamp,
+    force_send: args.force_send,
+  });
+  if (!decision.ok) return ok(decision.reason);
+
   const auth = await getNotaryGmailClient();
   const gmail = google.gmail({ version: "v1", auth });
 
@@ -92,7 +106,11 @@ export async function notarySendEmail(args: {
     },
   });
 
-  return ok(`Email sent from drupenterprise1@gmail.com\nMessage ID: ${res.data.id}`);
+  return ok(
+    `Email sent from drupenterprise1@gmail.com\n` +
+    `Path: ${decision.path === "internal_only" ? "internal-only (guardrail skipped)" : "force_send with fresh approval"}\n` +
+    `Message ID: ${res.data.id}`,
+  );
 }
 
 export async function notaryMarkEmailRead(args: {
@@ -181,6 +199,8 @@ export async function gmailNotaryGetEmail(args: {
 export async function gmailNotaryReplyToEmail(args: {
   message_id: string;
   body: string;
+  approved_at_iso_timestamp?: string;
+  force_send?: boolean;
 }): Promise<CallToolResult> {
   const auth = await getNotaryGmailClient();
   const gmail = google.gmail({ version: "v1", auth });
@@ -195,9 +215,21 @@ export async function gmailNotaryReplyToEmail(args: {
   const headers = original.data.payload?.headers ?? [];
   const get = (name: string) => headers.find((h) => h.name === name)?.value ?? "";
   const subject = get("Subject").startsWith("Re:") ? get("Subject") : `Re: ${get("Subject")}`;
+  const recipient = get("From");
+
+  // Strict-send guardrail — recipient is the original message's From header
+  // (we'd be replying back to them). Closes the auto-reply gap on the notary
+  // inbox.
+  const decision = checkSendGuardrail({
+    tool: "gmail_notary_reply_to_email",
+    to: recipient,
+    approved_at_iso_timestamp: args.approved_at_iso_timestamp,
+    force_send: args.force_send,
+  });
+  if (!decision.ok) return ok(decision.reason);
 
   const lines = [
-    `To: ${get("From")}`,
+    `To: ${recipient}`,
     `From: drupenterprise1@gmail.com`,
     `Subject: ${subject}`,
     "Content-Type: text/plain; charset=utf-8",
@@ -213,7 +245,11 @@ export async function gmailNotaryReplyToEmail(args: {
     requestBody: { raw, threadId: original.data.threadId! },
   });
 
-  return ok(`Reply sent from drupenterprise1@gmail.com. Message ID: ${res.data.id}`);
+  return ok(
+    `Reply sent from drupenterprise1@gmail.com.\n` +
+    `Path: ${decision.path === "internal_only" ? "internal-only (guardrail skipped)" : "force_send with fresh approval"}\n` +
+    `Message ID: ${res.data.id}`,
+  );
 }
 
 export async function gmailNotaryArchiveEmail(args: {
