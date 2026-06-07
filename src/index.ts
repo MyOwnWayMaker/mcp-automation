@@ -26,6 +26,7 @@ import { startClaimMonitor, getClaimMonitorHealth } from "./watchers/claim_monit
 import { startNotaryMonitor } from "./watchers/notary_monitor.js";
 import { startFollowupScheduler } from "./watchers/followup_scheduler.js";
 import { startXaKeepalive, getXaKeepaliveHealth } from "./watchers/xa_keepalive.js";
+import { startFiletracKeepalive, getFiletracKeepaliveHealth } from "./watchers/filetrac_keepalive.js";
 import { calendarListEvents, calendarCreateEvent, calendarUpdateEvent, calendarDeleteEvent, calendarListCalendars } from "./tools/calendar.js";
 import { driveFindFile, driveGetFile, driveCreateFile, driveDeleteFile, driveMoveFile, driveCopyFile, driveCreateFolder, driveUploadFile } from "./tools/drive.js";
 import { sheetsGetRows, sheetsAppendRow, sheetsUpdateRow, sheetsClearRange, sheetsLookupRow, sheetsCreateSpreadsheet } from "./tools/sheets.js";
@@ -554,6 +555,7 @@ if (PORT) {
       tools: TOOLS.length,
       claimMonitor: cm,
       xaKeepalive: getXaKeepaliveHealth(),
+      filetracKeepalive: getFiletracKeepaliveHealth(),
     });
   });
 
@@ -687,6 +689,7 @@ if (PORT) {
     // session idle-expire well before the 30-day hard ceiling. See
     // src/watchers/xa_keepalive.ts.
     startXaKeepalive();
+    startFiletracKeepalive();
     // Re-arm any pending scheduled sends (gmail_create_draft_scheduled) whose
     // in-memory timers were lost on the last restart. See src/tools/gmail.ts.
     recoverScheduledSends().catch(() => { /* swallow */ });
