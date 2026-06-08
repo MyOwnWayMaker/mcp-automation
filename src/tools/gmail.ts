@@ -20,7 +20,7 @@ function makeTextContent(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
 }
 
-function encodeEmail(params: {
+export function encodeEmail(params: {
   to: string;
   subject: string;
   body: string;
@@ -44,7 +44,7 @@ function encodeEmail(params: {
     "",
     params.body,
   ]
-    .filter(Boolean)
+    .filter((x): x is string => x !== null)
     .join("\r\n");
 
   return Buffer.from(lines).toString("base64url");
@@ -127,7 +127,7 @@ export async function gmailSendEmail(args: {
  * also carries the verified snapshot. We snapshot the SERVER-STORED draft,
  * not our inputs, so a silent encode/store drop is caught.
  */
-function decodeDraftBody(payload: any): string {
+export function decodeDraftBody(payload: any): string {
   if (!payload) return "";
   if (payload.body?.data) return Buffer.from(payload.body.data, "base64url").toString("utf-8");
   if (Array.isArray(payload.parts)) {
