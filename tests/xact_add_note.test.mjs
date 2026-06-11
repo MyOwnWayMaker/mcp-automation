@@ -13,7 +13,12 @@
 // LIVE + WRITES TO A REAL CLAIM. It is therefore GATED on XACT_TEST_MFN and is
 // SKIPPED unless that env var names a designated safe/low-activity test MFN.
 // It writes a uniquely-tagged note, re-reads within 5s, asserts the tag appears
-// and the count incremented by exactly 1, then deletes the test note.
+// and the count incremented by exactly 1.
+//
+// HEADS-UP: XactAnalysis diary notes are IMMUTABLE (no deleteNote, no per-row
+// delete control) — the cleanup below is best-effort and is normally a NO-OP, so
+// every live run PERMANENTLY appends one note. Point XACT_TEST_MFN at a DEDICATED
+// THROWAWAY assignment, never a live customer claim.
 //
 // Run it explicitly:  XACT_TEST_MFN=<safe-mfn> node --test tests/xact_add_note.test.mjs
 
@@ -79,12 +84,13 @@ test(
       `Notes count did not increment by 1 (was ${beforeCount}, now ${afterCount})`
     );
 
-    // Cleanup: remove the test note so the diary stays clean. Best-effort —
-    // do not fail the test if the delete control isn't found.
+    // Cleanup (best-effort, normally a NO-OP): XA diary notes are immutable, so
+    // this will usually NOT remove the note. The note is clearly tagged
+    // "safe to delete" — this is why XACT_TEST_MFN must be a throwaway MFN.
     try {
       await xactDeleteNote({ mfn: MFN, note_text_match: tag });
     } catch {
-      /* leave it; it's clearly tagged as a deletable test note */
+      /* immutable diary — leave the clearly-tagged test note */
     }
   }
 );

@@ -17,9 +17,13 @@
  *   5. Voice read (local)         — voiceListThreads proves the Voice session is alive
  *   6. Voicemail (local)          — voiceGetVoicemails (currently a STUB; reported, not failed)
  *   7. Test SMS (throttled)       — small SMS to Hakiel's cell; opt-in + max ~1/day
- *   8. XA add-note round-trip     — write+read-back+delete on a DEDICATED test MFN
+ *   8. XA add-note round-trip     — write+read-back on a DEDICATED THROWAWAY MFN
  *                                   (opt-in via XACT_TEST_MFN; else skipped). Catches
  *                                   the 2026-06-10 "fake ✅, note never persisted" bug.
+ *                                   WARNING: XA notes are IMMUTABLE (no delete), so
+ *                                   each run PERMANENTLY appends a note. Only point
+ *                                   XACT_TEST_MFN at a junk assignment, never a live
+ *                                   customer claim, and prefer a low/manual cadence.
  *
  * Exit 0 = all green (skips/stubs ok); exit 1 = at least one hard failure (also ntfys).
  *
@@ -30,8 +34,9 @@
  *   HEALTHCHECK_SMS_NUMBER      default +16463457705 (Hakiel's cell)
  *   HEALTHCHECK_SMS_STAMP       default /tmp/healthcheck-last-sms.txt (throttle marker)
  *   HEALTHCHECK_SMS_MIN_HOURS   default 20 (min hours between test SMS)
- *   XACT_TEST_MFN               designated safe/low-activity MFN for the add-note
- *                               round-trip; UNSET => that check is skipped (no write)
+ *   XACT_TEST_MFN               DEDICATED THROWAWAY MFN for the add-note round-trip;
+ *                               UNSET => that check is skipped (no write). Each run
+ *                               permanently appends a note (XA notes can't be deleted)
  */
 import fs from "fs";
 import path from "path";
@@ -133,8 +138,9 @@ async function loadXact() {
   return import(p);
 }
 
-// Real write -> read-back -> delete on a DEDICATED test MFN. Gated on
-// XACT_TEST_MFN so it never writes to a live claim unless explicitly enabled.
+// Real write -> read-back on a DEDICATED THROWAWAY MFN. Gated on XACT_TEST_MFN so
+// it never writes unless explicitly enabled. NOTE: XA notes are immutable (no
+// delete), so each run permanently appends a note — never aim this at a live claim.
 async function checkXactAddNote() {
   const MFN = process.env.XACT_TEST_MFN;
   if (!MFN) { rec("XA add-note round-trip", "skip", "set XACT_TEST_MFN to a designated safe test MFN to enable"); return; }

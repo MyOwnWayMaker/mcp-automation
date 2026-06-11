@@ -915,18 +915,12 @@ async function waitForNoteDialogFrame(page: Page): Promise<Frame | null> {
   return null;
 }
 
-// Clicks the dialog's primary save/confirm control. Scope is the dialog frame
-// (in-page) or the page itself (standalone dialog). Returns true if it clicked one.
-async function clickNoteDialogSave(scope: Page | Frame): Promise<boolean> {
-  const btn = scope.locator(
-    [
-      "button:has-text('Add Note')", "button:has-text('Save')", "button:has-text('Done')",
-      "button:has-text('Okay')", "button:has-text('OK')",
-      "input[type='button'][value*='Save']", "input[type='submit'][value*='Save']",
-      "input[type='button'][value*='Add']", "input[type='submit'][value*='Add']",
-      "a:has-text('Save')",
-    ].join(", ")
-  ).first();
+// Clicks the dialog's real "ADD NOTE" submit control: #submitButton, whose
+// onclick is newNote() -> AJAX POST /apps/xa/ws/assignment/detail/notes. It must
+// NOT click the "Save Signature" button, which lives in the same form earlier in
+// the DOM (the prior generic save-button matcher clicked that and never saved).
+async function clickAddNoteSubmit(scope: Page | Frame): Promise<boolean> {
+  const btn = scope.locator("#submitButton, button:has-text('ADD NOTE'), [onclick*='newNote(']").first();
   if (await btn.count() > 0) {
     await btn.click({ timeout: 4000 }).catch(() => {});
     return true;
@@ -934,40 +928,80 @@ async function clickNoteDialogSave(scope: Page | Frame): Promise<boolean> {
   return false;
 }
 
-// Best-effort: open XA's add-note dialog, fill the note, and save it. Returns a
-// short label of the path taken (diagnostics only). Does NOT verify persistence
-// — the caller re-reads the diary to confirm.
+// Waits (best-effort) for the note-save AJAX POST to land, so the caller's
+// read-back sees committed state.
+function waitForNoteSavePost(p: Page): Promise<unknown> {
+  return p
+    .waitForResponse(
+      (r) => /\/xa\/ws\/assignment\/detail\/notes/i.test(r.url()) && r.request().method() === "POST",
+      { timeout: 15000 }
+    )
+    .catch(() => null);
+}
+
+// Best-effort: open XA's add-note dialog, fill the note, and submit it. Returns a
+// short label of the path taken (diagnostics only). Does NOT verify persistence —
+// the caller re-reads the diary to confirm.
 //
 // IMPORTANT: the dialog's email/share controls (emailAdjuster,
-// emailProjectManager, shareWithPolicyHolderCkbx) are left UNTOUCHED so they
-// stay unchecked. This records an INTERNAL diary note only — it never emails the
+// emailProjectManager, shareWithPolicyHolderCkbx) are left UNTOUCHED so they stay
+// unchecked. This records an INTERNAL diary note only — it never emails the
 // adjuster or shares with the insured.
 async function fillAndSaveNoteDialog(page: Page, mfn: string, note: string): Promise<string> {
-  // Strategy A: open the real in-page dialog and drive its iframe.
-  // The page-level addNote(isTask, isReply, parentNoteId, parentUser) only OPENS
-  // the dialog (it takes FLAGS, not the note text). The previous bug called
-  // addNote(noteText) and treated "the function ran" as success.
+  // Strategy A: in-page XADIFrame dialog via addNoteNew({}). NOTE: addNote()
+  // window.open()s a SEPARATE POPUP (handled in Strategy B), so it never yields
+  // an in-page frame — addNoteNew is the iframe path. The iframe loads
+  // dlg_addnoteform.jsp with #notetext and the #submitButton ("ADD NOTE").
   try {
     await navigateToTab(page, mfn, "d_notes");
     await page.evaluate(() => {
       const w = window as any;
-      if (typeof w.addNote === "function") { w.addNote(false, false); return; }
       if (typeof w.addNoteNew === "function") { w.addNoteNew({}); return; }
+      if (typeof w.addNote === "function") { w.addNote(false, false); return; }
     });
     const frame = await waitForNoteDialogFrame(page);
     if (frame) {
       const ta = frame.locator("#notetext, textarea[name='notetext']").first();
       if (await ta.count() > 0) {
         await ta.fill(note);
-        if (await clickNoteDialogSave(frame)) {
-          await page.waitForTimeout(2500);
-          return "in-page dialog (addNote -> iframe #notetext + save)";
+        const respP = waitForNoteSavePost(page);
+        if (await clickAddNoteSubmit(frame)) {
+          await respP;
+          await page.waitForTimeout(1500);
+          return "in-page XADIFrame dialog (addNoteNew -> #notetext + ADD NOTE)";
         }
       }
     }
-  } catch { /* fall through to Strategy B */ }
+  } catch { /* fall through */ }
 
-  // Strategy B: drive the standalone dialog page directly.
+  // Strategy B: capture the addNote() popup window and submit there.
+  try {
+    await navigateToTab(page, mfn, "d_notes");
+    const popupP = page.context().waitForEvent("page", { timeout: 8000 }).catch(() => null);
+    await page.evaluate(() => {
+      const w = window as any;
+      if (typeof w.addNote === "function") w.addNote(false, false);
+    });
+    const popup = await popupP;
+    if (popup) {
+      await popup.waitForLoadState("domcontentloaded").catch(() => {});
+      await popup.waitForTimeout(2000);
+      const ta = popup.locator("#notetext, textarea[name='notetext']").first();
+      if (await ta.count() > 0) {
+        await ta.fill(note);
+        const respP = waitForNoteSavePost(popup);
+        if (await clickAddNoteSubmit(popup)) {
+          await respP;
+          await popup.waitForTimeout(1500);
+          await popup.close().catch(() => {});
+          return "addNote() popup window (#notetext + ADD NOTE)";
+        }
+      }
+      await popup.close().catch(() => {});
+    }
+  } catch { /* fall through */ }
+
+  // Strategy C: drive the standalone dialog page; click the precise ADD NOTE submit.
   try {
     await page.goto(`${BASE}/shared/dlg_addnoteform.jsp?mfn=${mfn}&parent_package=cxa`, {
       waitUntil: "domcontentloaded",
@@ -976,24 +1010,16 @@ async function fillAndSaveNoteDialog(page: Page, mfn: string, note: string): Pro
     const ta = page.locator("#notetext, textarea[name='notetext']").first();
     if (await ta.count() > 0) {
       await ta.fill(note);
-      if (await clickNoteDialogSave(page)) {
-        await page.waitForTimeout(2500);
-        return "standalone dialog page (#notetext + save)";
+      const respP = waitForNoteSavePost(page);
+      if (await clickAddNoteSubmit(page)) {
+        await respP;
+        await page.waitForTimeout(1500);
+        return "standalone dialog page (#notetext + ADD NOTE)";
       }
-      // Last resort: flip submitted=yes and submit the form via JS.
-      await page.evaluate(() => {
-        const f = document.querySelector("form[name='addnote'], form#addnote") as HTMLFormElement | null;
-        if (!f) return;
-        const sub = f.querySelector("input[name='submitted']") as HTMLInputElement | null;
-        if (sub) sub.value = "yes";
-        f.submit();
-      });
-      await page.waitForTimeout(2500);
-      return "standalone dialog page (#notetext + form.submit fallback)";
     }
   } catch { /* fall through */ }
 
-  return "no add mechanism reached the note textarea";
+  return "no add mechanism reached the note submit";
 }
 
 export async function xactAddNote(args: {
