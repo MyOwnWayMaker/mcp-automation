@@ -1,4 +1,4 @@
-import { chromium, type Browser, type Page, type BrowserContext } from "playwright";
+import { chromium, type Browser, type Page, type BrowserContext, type Frame } from "playwright";
 import fs from "fs";
 import path from "path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -36,6 +36,10 @@ const STATUS_CODES: Record<string, number> = {
 
 function ok(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
+}
+
+function err(text: string): CallToolResult {
+  return { content: [{ type: "text", text }], isError: true };
 }
 
 function fmt(date: string): string {
@@ -882,113 +886,166 @@ export async function xactUpdateWorkflowStatus(args: {
   }
 }
 
+// Normalize note text for tolerant substring matching against XA's rendered
+// diary (collapses whitespace/newlines, lowercases).
+function normalizeNote(s: string): string {
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+// Reads the NOTES tab fresh from the server and returns the visible note count
+// (parsed from the "Notes (N)" tab label) plus the full notes body text. Always
+// re-navigates so the read reflects committed server state, not an optimistic
+// in-page DOM update.
+async function readNotesState(page: Page, mfn: string): Promise<{ count: number | null; text: string }> {
+  await navigateToTab(page, mfn, "d_notes");
+  const text = (await page.locator("body").innerText().catch(() => ""))
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  const m = text.match(/notes\s*\((\d+)\)/i);
+  return { count: m ? parseInt(m[1], 10) : null, text };
+}
+
+// Waits for XA's add-note dialog iframe (shared/dlg_addnoteform.jsp) to attach.
+async function waitForNoteDialogFrame(page: Page): Promise<Frame | null> {
+  for (let i = 0; i < 24; i++) {
+    const f = page.frames().find((fr) => /dlg_addnoteform\.jsp/i.test(fr.url()));
+    if (f) return f;
+    await page.waitForTimeout(500);
+  }
+  return null;
+}
+
+// Clicks the dialog's primary save/confirm control. Scope is the dialog frame
+// (in-page) or the page itself (standalone dialog). Returns true if it clicked one.
+async function clickNoteDialogSave(scope: Page | Frame): Promise<boolean> {
+  const btn = scope.locator(
+    [
+      "button:has-text('Add Note')", "button:has-text('Save')", "button:has-text('Done')",
+      "button:has-text('Okay')", "button:has-text('OK')",
+      "input[type='button'][value*='Save']", "input[type='submit'][value*='Save']",
+      "input[type='button'][value*='Add']", "input[type='submit'][value*='Add']",
+      "a:has-text('Save')",
+    ].join(", ")
+  ).first();
+  if (await btn.count() > 0) {
+    await btn.click({ timeout: 4000 }).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+// Best-effort: open XA's add-note dialog, fill the note, and save it. Returns a
+// short label of the path taken (diagnostics only). Does NOT verify persistence
+// — the caller re-reads the diary to confirm.
+//
+// IMPORTANT: the dialog's email/share controls (emailAdjuster,
+// emailProjectManager, shareWithPolicyHolderCkbx) are left UNTOUCHED so they
+// stay unchecked. This records an INTERNAL diary note only — it never emails the
+// adjuster or shares with the insured.
+async function fillAndSaveNoteDialog(page: Page, mfn: string, note: string): Promise<string> {
+  // Strategy A: open the real in-page dialog and drive its iframe.
+  // The page-level addNote(isTask, isReply, parentNoteId, parentUser) only OPENS
+  // the dialog (it takes FLAGS, not the note text). The previous bug called
+  // addNote(noteText) and treated "the function ran" as success.
+  try {
+    await navigateToTab(page, mfn, "d_notes");
+    await page.evaluate(() => {
+      const w = window as any;
+      if (typeof w.addNote === "function") { w.addNote(false, false); return; }
+      if (typeof w.addNoteNew === "function") { w.addNoteNew({}); return; }
+    });
+    const frame = await waitForNoteDialogFrame(page);
+    if (frame) {
+      const ta = frame.locator("#notetext, textarea[name='notetext']").first();
+      if (await ta.count() > 0) {
+        await ta.fill(note);
+        if (await clickNoteDialogSave(frame)) {
+          await page.waitForTimeout(2500);
+          return "in-page dialog (addNote -> iframe #notetext + save)";
+        }
+      }
+    }
+  } catch { /* fall through to Strategy B */ }
+
+  // Strategy B: drive the standalone dialog page directly.
+  try {
+    await page.goto(`${BASE}/shared/dlg_addnoteform.jsp?mfn=${mfn}&parent_package=cxa`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.waitForTimeout(2500);
+    const ta = page.locator("#notetext, textarea[name='notetext']").first();
+    if (await ta.count() > 0) {
+      await ta.fill(note);
+      if (await clickNoteDialogSave(page)) {
+        await page.waitForTimeout(2500);
+        return "standalone dialog page (#notetext + save)";
+      }
+      // Last resort: flip submitted=yes and submit the form via JS.
+      await page.evaluate(() => {
+        const f = document.querySelector("form[name='addnote'], form#addnote") as HTMLFormElement | null;
+        if (!f) return;
+        const sub = f.querySelector("input[name='submitted']") as HTMLInputElement | null;
+        if (sub) sub.value = "yes";
+        f.submit();
+      });
+      await page.waitForTimeout(2500);
+      return "standalone dialog page (#notetext + form.submit fallback)";
+    }
+  } catch { /* fall through */ }
+
+  return "no add mechanism reached the note textarea";
+}
+
 export async function xactAddNote(args: {
   mfn: string;
   note: string;
 }): Promise<CallToolResult> {
-  const { browser, page, close } = await getPage();
+  const { page, close } = await getPage();
+  const needle = normalizeNote(args.note).slice(0, 120);
 
   try {
-    await page.goto(`${BASE}/cxa/detail.jsp?mfn=${args.mfn}&src=ip`);
-    await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(4000);
+    // ── BEFORE: snapshot the diary so we can prove the write actually landed. ──
+    const before = await readNotesState(page, args.mfn);
+    const beforeHasText = normalizeNote(before.text).includes(needle);
 
-    // Switch to notes tab and wait for content to load
-    await page.evaluate((mfn: string) => (window as any).gotoDetailTab("d_notes", mfn, "ip", false, 0), args.mfn);
-    await page.waitForTimeout(5000);
+    // ── WRITE: open + fill + save XA's add-note dialog. ──
+    const pathTaken = await fillAndSaveNoteDialog(page, args.mfn, args.note);
 
-    // ── Step 1: Capture notes tab structure for debugging ──────────────────────
-    // Dump the #d_notes div HTML and all window note-related functions.
-    // This runs on every call so we can see exactly what the UI looks like.
-    const [notesHtml, noteFns, clickableInNotes] = await Promise.all([
-      page.evaluate(() => {
-        const el = document.getElementById("d_notes") || document.querySelector("[id*='notes']");
-        return el ? el.innerHTML.substring(0, 3000) : "(#d_notes not found)";
-      }).catch(() => "(eval failed)"),
-      page.evaluate(() =>
-        Object.keys(window as any)
-          .filter(k => /note|Note/i.test(k) && typeof (window as any)[k] === "function")
-          .join(", ")
-      ).catch(() => ""),
-      page.evaluate(() => {
-        const el = document.getElementById("d_notes");
-        if (!el) return "(no #d_notes)";
-        return Array.from(el.querySelectorAll("a, button, input[type='button'], input[type='submit'], [onclick]"))
-          .map(e => `${e.tagName} | text="${(e as HTMLElement).innerText?.substring(0,40)}" | onclick="${e.getAttribute('onclick') || ''}"`)
-          .join("\n");
-      }).catch(() => ""),
-    ]);
+    // ── AFTER: read-back verification (same contract as filetrac_add_note). ──
+    // Success means "the note is visible in the diary on a fresh re-read", NOT
+    // "we called a JS function". Until read-back confirms it, this returns an
+    // ERROR — never a fake success, because Dispatch and Hakiel trust the check.
+    await page.waitForTimeout(1500);
+    const after = await readNotesState(page, args.mfn);
+    const afterHasText = normalizeNote(after.text).includes(needle);
+    const countDelta =
+      before.count != null && after.count != null ? after.count - before.count : null;
 
-    // ── Step 2: Try calling window note functions directly ─────────────────────
-    // XA exposes updateStatus() for status changes — notes likely have a similar API.
-    const directCallResult = await page.evaluate((noteText: string) => {
-      const w = window as any;
-      // Try common XA note-adding JS function names
-      if (typeof w.addNote === "function") { w.addNote(noteText); return "called addNote()"; }
-      if (typeof w.AddNote === "function") { w.AddNote(noteText); return "called AddNote()"; }
-      if (typeof w.saveNote === "function") { w.saveNote(noteText); return "called saveNote()"; }
-      if (typeof w.SaveNote === "function") { w.SaveNote(noteText); return "called SaveNote()"; }
-      if (typeof w.addActionNote === "function") { w.addActionNote(noteText); return "called addActionNote()"; }
-      return null;
-    }, args.note).catch(() => null);
+    // Text-appeared-now is the strongest signal. If identical text was already
+    // present (duplicate note), fall back to the count incrementing by exactly 1.
+    const persisted = (afterHasText && !beforeHasText) || countDelta === 1;
 
-    if (directCallResult) {
-      await page.waitForTimeout(3000);
-      return ok(`✅ Note added to XactAnalysis assignment ${args.mfn} via ${directCallResult}:\n"${args.note.substring(0, 100)}"`);
+    if (persisted) {
+      return ok(
+        `✅ Note CONFIRMED on XactAnalysis ${args.mfn} (verified by diary read-back).\n` +
+        `Notes count: ${before.count ?? "?"} -> ${after.count ?? "?"}` +
+        `${countDelta != null ? ` (+${countDelta})` : ""}\n` +
+        `Note: "${args.note.substring(0, 150)}"`
+      );
     }
 
-    // ── Step 3: Look for note input in the notes tab (textarea or contenteditable) ──
-    await page.waitForTimeout(1000);
-    const noteInputSel = [
-      "#d_notes textarea",
-      "#d_notes [contenteditable='true']",
-      "#d_notes input[type='text']",
-      "textarea",
-      "[contenteditable='true']",
-    ].join(", ");
-
-    let noteInput = page.locator(noteInputSel).first();
-    if (await noteInput.count() === 0) {
-      // Click any button in #d_notes that might reveal the input
-      const addBtnInNotes = page.locator(
-        "#d_notes a, #d_notes button, #d_notes input[type='button'], " +
-        'a:has-text("Add a Note"), a:has-text("Add Note"), button:has-text("Add")'
-      ).first();
-      if (await addBtnInNotes.count() > 0) {
-        await addBtnInNotes.click();
-        await page.waitForTimeout(3000);
-        noteInput = page.locator(noteInputSel).first();
-      }
-    }
-
-    if (await noteInput.count() > 0) {
-      const tagName = await noteInput.evaluate(el => el.tagName.toLowerCase()).catch(() => "unknown");
-      if (tagName === "div" || tagName === "span") {
-        // contenteditable — use type() instead of fill()
-        await noteInput.click();
-        await noteInput.evaluate((el, text) => { (el as HTMLElement).innerText = text; }, args.note);
-      } else {
-        await noteInput.fill(args.note);
-      }
-
-      // Submit
-      await page.locator(
-        "#d_notes input[type='submit'], #d_notes button[type='submit'], " +
-        "#d_notes input[value*='Save'], #d_notes input[value*='Add'], " +
-        "input[type='submit'], button[type='submit']"
-      ).first().click().catch(async () => {
-        await page.keyboard.press("Enter").catch(() => {});
-      });
-      await page.waitForTimeout(3000);
-      return ok(`✅ Note added to XactAnalysis assignment ${args.mfn}:\n"${args.note.substring(0, 100)}"`);
-    }
-
-    // ── Step 4: Return full debug so we can see what mechanism XA actually uses ──
-    return ok(
-      `Could not add note to ${args.mfn}. Debug snapshot:\n\n` +
-      `=== #d_notes HTML (first 3000 chars) ===\n${notesHtml}\n\n` +
-      `=== Note-related window functions ===\n${noteFns || "(none found)"}\n\n` +
-      `=== Clickable elements in #d_notes ===\n${clickableInNotes}`
+    return err(
+      `❌ Note NOT added to XactAnalysis ${args.mfn} — read-back could not confirm it, ` +
+      `so this is reported as a FAILURE (do NOT treat as success).\n` +
+      `Write path attempted: ${pathTaken}\n` +
+      `Notes count: ${before.count ?? "?"} -> ${after.count ?? "?"} ` +
+      `(delta ${countDelta ?? "unknown"}); note text ${afterHasText ? "appears" : "does NOT appear"} ` +
+      `in the diary after re-read.` +
+      (beforeHasText
+        ? ` (Matching text was already present before the write, so the text match is inconclusive; ` +
+          `relied on the count, which did not increment by 1.)`
+        : ``) +
+      `\nThe note was NOT recorded. Re-run, or check XA manually.`
     );
   } finally {
     await close();
@@ -1148,7 +1205,11 @@ export async function xactGetNotes(args: {
 
     const notesIdx = bodyText.indexOf("Add a Note");
     const notesSection = notesIdx >= 0 ? bodyText.slice(notesIdx) : bodyText;
-    return ok(`Notes for assignment ${args.mfn}:\n\n${notesSection.substring(0, 3000)}`);
+    // Surface the "Notes (N)" tab-label count so callers (and the add-note
+    // read-back test) can assert the counter, independent of the body slice.
+    const countMatch = bodyText.match(/notes\s*\((\d+)\)/i);
+    const countLine = countMatch ? `Notes count: ${countMatch[1]}\n` : "";
+    return ok(`Notes for assignment ${args.mfn}:\n${countLine}\n${notesSection.substring(0, 3000)}`);
   } finally {
     await close();
   }

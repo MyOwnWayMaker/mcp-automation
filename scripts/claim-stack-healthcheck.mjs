@@ -17,6 +17,9 @@
  *   5. Voice read (local)         — voiceListThreads proves the Voice session is alive
  *   6. Voicemail (local)          — voiceGetVoicemails (currently a STUB; reported, not failed)
  *   7. Test SMS (throttled)       — small SMS to Hakiel's cell; opt-in + max ~1/day
+ *   8. XA add-note round-trip     — write+read-back+delete on a DEDICATED test MFN
+ *                                   (opt-in via XACT_TEST_MFN; else skipped). Catches
+ *                                   the 2026-06-10 "fake ✅, note never persisted" bug.
  *
  * Exit 0 = all green (skips/stubs ok); exit 1 = at least one hard failure (also ntfys).
  *
@@ -27,6 +30,8 @@
  *   HEALTHCHECK_SMS_NUMBER      default +16463457705 (Hakiel's cell)
  *   HEALTHCHECK_SMS_STAMP       default /tmp/healthcheck-last-sms.txt (throttle marker)
  *   HEALTHCHECK_SMS_MIN_HOURS   default 20 (min hours between test SMS)
+ *   XACT_TEST_MFN               designated safe/low-activity MFN for the add-note
+ *                               round-trip; UNSET => that check is skipped (no write)
  */
 import fs from "fs";
 import path from "path";
@@ -122,6 +127,42 @@ async function checkSms() {
   }
 }
 
+async function loadXact() {
+  const p = path.join(REPO, "dist/tools/xactanalysis.js");
+  if (!fs.existsSync(p)) throw new Error("dist/tools/xactanalysis.js missing — run `npm run build`");
+  return import(p);
+}
+
+// Real write -> read-back -> delete on a DEDICATED test MFN. Gated on
+// XACT_TEST_MFN so it never writes to a live claim unless explicitly enabled.
+async function checkXactAddNote() {
+  const MFN = process.env.XACT_TEST_MFN;
+  if (!MFN) { rec("XA add-note round-trip", "skip", "set XACT_TEST_MFN to a designated safe test MFN to enable"); return; }
+  const textOf = (res) => (res?.content || []).map((c) => c.text || "").join("\n");
+  const num = (t) => parseInt((t.match(/Notes count:\s*(\d+)/i) || [])[1] || "-1", 10);
+  try {
+    const { xactAddNote, xactGetNotes, xactDeleteNote } = await loadXact();
+    const tag = `TEST-XACT-NOTE-${Date.now()}`;
+    const beforeCount = num(textOf(await xactGetNotes({ mfn: MFN })));
+    const addRes = await xactAddNote({ mfn: MFN, note: `${tag} :: healthcheck round-trip, safe to delete.` });
+    const addText = textOf(addRes);
+    if (addRes.isError === true || !/CONFIRMED/i.test(addText)) {
+      rec("XA add-note round-trip", false, `add NOT confirmed on ${MFN}: ${addText.slice(0, 160)}`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+    const after = textOf(await xactGetNotes({ mfn: MFN }));
+    const afterCount = num(after);
+    const okPersist = after.includes(tag) && afterCount === beforeCount + 1;
+    rec("XA add-note round-trip", okPersist,
+      okPersist ? `persisted on ${MFN} (count ${beforeCount}->${afterCount})`
+                : `note did NOT persist on ${MFN} (tag=${after.includes(tag)}, count ${beforeCount}->${afterCount})`);
+    try { await xactDeleteNote({ mfn: MFN, note_text_match: tag }); } catch { /* clearly tagged */ }
+  } catch (e) {
+    rec("XA add-note round-trip", false, e.message);
+  }
+}
+
 async function ntfy(title, body) {
   try {
     await fetch(`https://ntfy.sh/${encodeURIComponent(NTFY_TOPIC)}`, {
@@ -138,6 +179,7 @@ async function ntfy(title, body) {
   await checkVoiceRead();
   await checkVoicemail();
   await checkSms();
+  await checkXactAddNote();
 
   const fails = results.filter((r) => r.status === false);
   const stubs = results.filter((r) => r.status === "stub");
