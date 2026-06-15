@@ -36,10 +36,25 @@ notify() {
 
 notify "[XA re-auth] starting" "Logs at $LOG"
 
-# Run the auth script. It writes xactanalysis_session.json locally AND pushes
-# XACTANALYSIS_SESSION_JSON to Railway via the existing GraphQL helper.
+# Persistent Chromium profile holding Verisk's device-trust cookie. Once the
+# device is trusted (bootstrapped with one OTP), this unattended run skips MFA
+# and completes with NO OTP. Stable home-dir path so it's shared across runs.
+export XA_CHROME_PROFILE_DIR="$HOME/.xa-userdata"
+# Headful left ON (XA_HEADLESS unset): Incapsula/Imperva is friendlier to a real
+# window + returning profile, and launchd agents run in the logged-in GUI session.
+
+# Run the auth script with SKIP_RAILWAY_PUSH so it does NOT call the multi-var
+# helper (which can clobber Voice/Notary/FileTrac with stale local files). It
+# just writes xactanalysis_session.json locally; we push only the XA var below.
+export SKIP_RAILWAY_PUSH=1
 /opt/homebrew/bin/node "$REPO/scripts/auth-xactanalysis.mjs" >> "$LOG" 2>&1
 rc=$?
+
+# On a successful re-auth, push ONLY XACTANALYSIS_SESSION_JSON (single-var,
+# never the 4-var clobber). Failure to push downgrades success to failure.
+if [ "$rc" -eq 0 ]; then
+  /opt/homebrew/bin/node "$REPO/scripts/push-xa-session.mjs" >> "$LOG" 2>&1 || rc=$?
+fi
 
 if [ "$rc" -eq 0 ]; then
   echo "=== $(date) — re-auth SUCCESS ===" >> "$LOG"

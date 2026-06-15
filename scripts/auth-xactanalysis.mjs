@@ -38,6 +38,7 @@
 import { chromium } from "playwright";
 import { google } from "googleapis";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import dotenv from "dotenv";
 
@@ -255,28 +256,103 @@ async function fetchOtpFromGmail(afterMs, timeoutMs = 90000) {
   throw new Error("Timed out waiting for OTP email.");
 }
 
+// ── Remember-device helper ───────────────────────────────────────────────────
+// Verisk shows the session-persistence toggle as one of: a labeled checkbox
+// ("Remember this device" / "Keep me signed in" / "Trust this device"), an
+// Angular Material mat-checkbox, or a plain input[type=checkbox]. Opting in
+// plants a long-lived device-trust cookie — that cookie, persisted in the
+// Chromium profile below, is what lets future scheduled re-auths SKIP MFA.
+// Best-effort: a missing toggle just means no persistence, never an error.
+async function tryCheckRememberDevice(scope) {
+  const labelTexts = [
+    "Remember this device", "Keep me signed in", "Trust this device",
+    "Don't ask again", "Remember me",
+    // Okta device-trust toggle (Verisk migrated SSO MFA to Okta mid-2026):
+    "Do not challenge me on this device again",
+    "Do not challenge me on this device",
+    "Do not challenge me on this device for the next",
+  ];
+  try {
+    for (const t of labelTexts) {
+      const byLabel = scope.locator(`label:has-text("${t}"), :text("${t}")`).first();
+      if (await byLabel.isVisible({ timeout: 800 }).catch(() => false)) {
+        await byLabel.click().catch(() => {});
+        console.log(`✅ Opted into device persistence: "${t}"`);
+        return true;
+      }
+    }
+    for (const sel of ['mat-checkbox', 'input[type="checkbox"]']) {
+      const cb = scope.locator(sel).first();
+      if (await cb.isVisible({ timeout: 800 }).catch(() => false)) {
+        const checked = await cb.isChecked().catch(() => false);
+        if (!checked) {
+          await cb.click().catch(() => {});
+          console.log(`✅ Checked device-persistence box via ${sel}`);
+        } else {
+          console.log(`✅ Device-persistence box already checked (${sel})`);
+        }
+        return true;
+      }
+    }
+  } catch { /* best-effort */ }
+  console.log("ℹ️ No remember-device toggle found on this screen.");
+  return false;
+}
+
 // ── Browser login ─────────────────────────────────────────────────────────────
-const browser = await chromium.launch({ headless: false, slowMo: 200 });
-const context = await browser.newContext({
+// Persistent Chromium profile on disk so Verisk device-trust survives across
+// re-auths. Once the device is trusted (a remember-device box checked during a
+// bootstrap login with an OTP), subsequent logins skip MFA entirely — that's
+// what makes the scheduled cron run unattended (no OTP). Mirrors the FileTrac
+// remote-MFA persistent-profile pattern. Headful by default (Incapsula is
+// friendlier to a real window + returning profile); XA_HEADLESS=1 forces
+// headless for environments without a display.
+const PROFILE_DIR = process.env.XA_CHROME_PROFILE_DIR
+  ?? path.join(os.homedir(), ".xa-userdata");
+const HEADLESS = process.env.XA_HEADLESS === "1";
+fs.mkdirSync(PROFILE_DIR, { recursive: true });
+console.log(`Using Chromium profile: ${PROFILE_DIR} (headless=${HEADLESS})`);
+const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+  headless: HEADLESS,
+  slowMo: HEADLESS ? 0 : 200,
   userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 });
-const page = await context.newPage();
+const browser = context.browser();
+const page = context.pages()[0] ?? await context.newPage();
 
 console.log("Opening XactAnalysis...");
 await page.goto("https://www.xactanalysis.com");
 await page.waitForLoadState("domcontentloaded");
 await page.waitForTimeout(2000);
 
-// Step 1: email → NEXT
-await page.fill('input[name="preAuthEmailField"]', process.env.XACTANALYSIS_EMAIL);
-await page.click('button:has-text("NEXT")');
-await page.waitForTimeout(3000);
+// Step 1: email → NEXT (skipped if the persistent profile is already authed)
+let alreadyAuthed = false;
+const emailField = page.locator('input[name="preAuthEmailField"]');
+const haveEmailField = await emailField.first()
+  .waitFor({ state: "visible", timeout: 10000 })
+  .then(() => true)
+  .catch(() => false);
+if (!haveEmailField) {
+  if (/xactanalysis\.com/.test(page.url()) && !/identity\.verisk|\/auth\//.test(page.url())) {
+    alreadyAuthed = true;
+    console.log("✅ No login screen — persistent profile already authenticated. URL:", page.url());
+  } else {
+    console.log("⚠️ Email field not found and not on dashboard. URL:", page.url());
+  }
+}
+if (!alreadyAuthed) {
+  await emailField.fill(process.env.XACTANALYSIS_EMAIL);
+  await page.click('button:has-text("NEXT")');
+  await page.waitForTimeout(3000);
+}
 
 // Step 2: password
 const pwdField = page.locator('input[name="passwordField"]');
 if (await pwdField.count() > 0) {
   await pwdField.fill(process.env.XACTANALYSIS_PASSWORD);
-  await page.check('input[type="checkbox"]').catch(() => {});
+  // "Keep me signed in" sometimes appears on the password screen — opt in here
+  // too (and again on the OTP screen below) so device-trust is planted.
+  await tryCheckRememberDevice(page);
   await page.click('button[type="submit"]');
   await page.waitForTimeout(4000);
 }
@@ -292,19 +368,55 @@ const mfaTriggeredAt = Date.now();
 
 try {
   const selectButtons = page.locator('button:has-text("SELECT")');
-  await selectButtons.first().waitFor({ state: "visible", timeout: 15000 });
-  console.log("✅ MFA screen detected");
+  // Okta MFA detection — Verisk migrated SSO MFA to Okta mid-2026. The Okta
+  // page lives at .../ui/oktaMfa, auto-sends the SMS, and shows the code field
+  // ("Enter a code") directly with a "FINISH LOGIN" button. There is NO
+  // "SELECT method" step, so the legacy selectButtons.nth(1).click() below used
+  // to time out (locator.click 30s) and abort the whole MFA step. We now detect
+  // Okta and skip straight to OTP entry.
+  const oktaCodeField = page.locator(
+    'input[autocomplete="one-time-code"], input[name*="passcode" i], input[name*="code" i], input[id*="code" i]'
+  );
+  // Race the legacy SELECT form, the Okta code page, and a direct dashboard
+  // landing (a trusted device skips MFA entirely — the unattended-cron path).
+  const mfaOrDash = await Promise.race([
+    selectButtons.first().waitFor({ state: "visible", timeout: 25000 }).then(() => "mfa").catch(() => null),
+    page.waitForURL(u => /\/ui\/oktaMfa/i.test(u.href), { timeout: 25000 }).then(() => "okta").catch(() => null),
+    oktaCodeField.first().waitFor({ state: "visible", timeout: 25000 }).then(() => "okta").catch(() => null),
+    page.waitForURL(u => u.href.includes("xactanalysis.com") && !u.href.includes("identity.verisk"), { timeout: 25000 }).then(() => "dash").catch(() => null),
+  ]);
+  if (alreadyAuthed || mfaOrDash === "dash") {
+    console.log("✅ MFA skipped — device trusted / already authenticated.");
+    throw { __skipMfa: true };
+  }
+  const isOkta = mfaOrDash === "okta" || /\/ui\/oktaMfa/i.test(page.url());
+  if (mfaOrDash === "mfa") {
+    console.log("✅ MFA screen detected (legacy Verisk SELECT form)");
+  } else if (isOkta) {
+    console.log("✅ MFA screen detected (Okta flow — code field shown, SMS auto-sent)");
+  } else {
+    console.log("⚠️ MFA screen not detected within 25s. URL:", page.url());
+  }
 
   let otp;
   if (MFA_METHOD === "sms") {
-    await selectButtons.nth(1).click();
-    console.log("✅ Clicked second SELECT (SMS / text option)");
-    await page.waitForTimeout(2000);
+    // Legacy Verisk form needs an explicit SMS-method click; the Okta flow shows
+    // the code field directly (SMS already sent), so we must NOT click a
+    // non-existent SELECT (that was the 30s timeout that broke the whole step).
+    if (!isOkta && (await selectButtons.count()) > 1) {
+      await selectButtons.nth(1).click();
+      console.log("✅ Clicked second SELECT (SMS / text option)");
+      await page.waitForTimeout(2000);
+    } else {
+      console.log("→ Okta/auto SMS: code field already present, no method-select click needed");
+    }
     otp = await fetchOtpForSms();
   } else {
-    await selectButtons.first().click();
-    console.log("✅ Clicked first SELECT (email option)");
-    await page.waitForTimeout(2000);
+    if (!isOkta && (await selectButtons.count()) > 0) {
+      await selectButtons.first().click();
+      console.log("✅ Clicked first SELECT (email option)");
+      await page.waitForTimeout(2000);
+    }
     otp = await fetchOtpFromGmail(mfaTriggeredAt);
   }
 
@@ -400,6 +512,9 @@ try {
         console.log('Inputs on page:', JSON.stringify(inputs, null, 2));
       } catch (e) { console.log('input enum fail:', e.message); }
     } else {
+      // Opt into "Remember this device" on the OTP screen BEFORE submitting, so
+      // Verisk plants the device-trust cookie that lets future re-auths skip MFA.
+      await tryCheckRememberDevice(page);
       // Try Enter-key submit FIRST — the OTP input is focused, and modern forms
       // submit on Enter. This avoids guessing button text wrong (a "Continue"
       // somewhere else on the page is not the OTP submit).
@@ -419,11 +534,15 @@ try {
 
       if (!submitted) {
         for (const selector of [
+          'button:has-text("FINISH LOGIN")',   // Okta (Verisk-branded) OTP submit
+          'button:has-text("Finish")',
           'button:has-text("Verify")',
+          'input[type="submit"][value*="Verify" i]',
           'button:has-text("Submit")',
           'button:has-text("Continue")',
           'button:has-text("Sign in")',
           'button[type="submit"]',
+          'input[type="submit"]',
         ]) {
           const btn = page.locator(selector).first();
           if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
@@ -436,8 +555,12 @@ try {
     }
   }
 } catch (e) {
-  console.log(">>> MFA step error:", e.message);
-  console.log(">>> Please complete MFA manually in the browser if it's open.");
+  if (e && e.__skipMfa) {
+    // intentional skip — device trusted, no MFA needed
+  } else {
+    console.log(">>> MFA step error:", e.message);
+    console.log(">>> Please complete MFA manually in the browser if it's open.");
+  }
 }
 
 // Step 6: Wait for successful redirect
