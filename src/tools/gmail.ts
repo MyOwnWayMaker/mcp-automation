@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { getGoogleAuthClient } from "../auth/google.js";
 import { checkSendGuardrail, allRecipientsInternal as guardrailAllInternal } from "../util/send_guardrail.js";
+import { appendToSchedule, type ScheduledSend } from "./scheduled_send.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 async function getGmail() {
@@ -390,15 +391,41 @@ export async function gmailCreateDraftScheduled(args: {
   armScheduledSend(draftId, sendAtMs);
 
   const link = `https://mail.google.com/mail/u/0/#drafts?compose=${draftId}`;
+
+  // Persist to scheduled_sends.json so the launchd sweep can act as a backstop
+  // if this in-process timer misses (server down at send_at). Both paths are
+  // idempotent against the underlying Gmail draft — whichever fires first wins;
+  // the other gets 404 from drafts.send and the sweep drops the entry.
+  const internalOnly = guardrailAllInternal(args.to, args.cc, args.bcc);
+  const entry: ScheduledSend = {
+    draft_id: draftId,
+    message_id: messageId || undefined,
+    to: args.to,
+    cc: args.cc,
+    bcc: args.bcc,
+    subject: args.subject,
+    link,
+    send_at_iso: isoSendAt,
+    auto_send: internalOnly,
+    recipients_internal_only: internalOnly,
+    created_at_iso: new Date().toISOString(),
+    surfaced_at_iso: null,
+  };
+  try {
+    appendToSchedule(entry);
+  } catch (e: any) {
+    console.error(`[gmail-scheduled] queue write failed for ${draftId}: ${e?.message || e}`);
+  }
+
   const ntfyStatus = await pushDraftSnapshotNtfy({
     to: args.to, subject: `[SCHEDULED ${isoSendAt}] ${args.subject}`, body: args.body, cc: args.cc, bcc: args.bcc, link,
   });
 
   return makeTextContent(
-    `✅ Scheduled draft created. Auto-sends at ${isoSendAt} (while the server is running).\n` +
+    `✅ Scheduled draft created. Auto-sends at ${isoSendAt}.\n` +
     `Draft ID: ${draftId}\nMessage ID: ${messageId}\nSnapshot ntfy: ${ntfyStatus}\nOpen in Gmail: ${link}\n\n` +
-    `To CANCEL: gmail_delete_draft(draft_id="${draftId}") before send_at.\n` +
-    `Note: native Gmail scheduling isn't API-exposed; if the server is down at send_at the email goes out on next boot, not on time.`
+    `Firing: in-process timer (on-time while the MCP server is running) + launchd sweep at ~5-min cadence (backstop if the server was down at send_at).\n` +
+    `To CANCEL: gmail_delete_draft(draft_id="${draftId}") before send_at — that stops the timer AND lets the sweep drop the entry on its next tick.`
   );
 }
 
