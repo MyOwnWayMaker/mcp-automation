@@ -3,21 +3,35 @@
  * sms-monitor.mjs — outbound check-back + inbound reply detection for
  * inspection first-contact SMS.
  *
- * On CONFIRM, auto-creates a Google Calendar event for the proposed slot
- * (calendar is Hakiel's own — internal write, allowed by TOP RULE).
- * NEVER auto-writes to any third-party portal (FileTrac, XA, etc.). Those
- * always require per-action confirmation; the script only DETECTS and
- * ntfy's a suggested action.
+ * On CONFIRM (new assignments):
+ *   - auto-creates the Google Calendar event (internal write),
+ *   - writes the Planned Inspection Date to FileTrac via the INTERNAL claimID
+ *     — exactly once (inspection_date_written guard + only-if-empty read),
+ *   - updates the Queststar mirror row (internal write),
+ *   all pre-authorized by Hakiel's per-action approval of the outbound SMS
+ *   (the approval prompt disclosed these write-backs; decided 2026-07-01).
+ *   Re-inspection entries (claim_context.kind === "reinspection") NEVER touch
+ *   CMS date fields — their agreement note goes through the outbox gate.
+ *
+ * On a counter-offer / unclear reply: drafts a response (accepts their time
+ * when the calendar is free, else proposes the next opening) and pushes it to
+ * the sms_outbox approval gate — it is NOT sent from here. DECLINE = ntfy only.
+ *
+ * CMS notes are never auto-posted from anywhere (standing rule, no exceptions).
  *
  * Env:
  *   SMS_MONITOR_NTFY_TOPIC  default `hakiel-mac-mini-xa-reauth`
- *   SMS_MONITOR_DRY_RUN     `1` skips ntfy + calendar + tracker writes
+ *   SMS_MONITOR_DRY_RUN     `1` skips ntfy + calendar + tracker/CMS writes
  *   CALENDAR_TIMEZONE       default `America/Los_Angeles` (PT)
  */
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import {
+  loadOutbox, saveOutbox, addProposal, findOpenProposal,
+  ntfyPublish, APPROVALS_TOPIC,
+} from "./pipeline/outbox.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Load .env.local first (Mac mini Google paths), then .env as fallback.
@@ -69,6 +83,20 @@ async function loadCalendar() {
   const p = path.join(REPO, "dist/tools/calendar.js");
   if (!fs.existsSync(p)) throw new Error("dist/tools/calendar.js missing — run `npm run build`");
   return import(p);
+}
+
+async function loadFiletrac() {
+  const p = path.join(REPO, "dist/tools/filetrac.js");
+  if (!fs.existsSync(p)) throw new Error("dist/tools/filetrac.js missing — run `npm run build`");
+  return import(p);
+}
+
+async function loadQueststar() {
+  return import(path.join(REPO, "scripts/pipeline/queststar.mjs"));
+}
+
+async function loadSlotPicker() {
+  return import(path.join(REPO, "dist/tools/slot_picker.js"));
 }
 
 /**
@@ -279,7 +307,7 @@ export async function findExistingCalendarEvent(entry, deps = {}) {
   }
 }
 
-async function createInspectionCalendarEvent(entry, deps = {}) {
+export async function createInspectionCalendarEvent(entry, deps = {}) {
   if (!entry.proposed_date_iso) return { ok: false, reason: "no proposed_date_iso" };
   if (entry.calendar_event_id) return { ok: false, reason: "already created", event_id: entry.calendar_event_id };
 
@@ -368,6 +396,276 @@ function fmtPST(iso) {
   return new Date(iso).toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
 }
 
+// ─── C3: Planned Inspection Date write-back (once, only-if-empty) ────────────
+
+/** Read FileTrac's current "Date of Inspection" from a claim-detail dump. */
+export function parseInspectionDate(detailText) {
+  const m = String(detailText ?? "").match(/Date of Inspection:[ \t]*(.*)/);
+  if (!m) return null;
+  const v = m[1].trim();
+  return v === "" || /\(not set\)/i.test(v) ? "" : v;
+}
+
+/**
+ * Write the Planned Inspection Date to the CMS on CONFIRM. Guards:
+ *   - re-inspections never touch date fields,
+ *   - entry.inspection_date_written (once-only, survives tracker re-runs),
+ *   - read-before-write: an existing FT value is adopted, never overwritten,
+ *   - PCAS/USCS = FileTrac via INTERNAL claimID; SLG/XA is not wired → flag.
+ * Returns a one-line outcome string for the ntfy body.
+ */
+export async function writeInspectionDate(entry, deps = {}) {
+  const ctx = entry.claim_context || {};
+  if (ctx.kind === "reinspection") return "FT date: not applicable (re-inspection — dates untouched)";
+  if (entry.inspection_date_written) return "FT date: already written on a prior tick (guard)";
+  if (!entry.proposed_date_iso) return "FT date: SKIPPED — no proposed date on entry";
+  if (ctx.ia_firm === "SLG" || entry.ia_firm === "SLG") return "FT date: SKIPPED — SLG/XA write-back not wired (set in XA manually)";
+  const claimId = ctx.ft_internal_claim_id;
+  const companyIndex = ctx.company_index ?? entry.company_index;
+  if (!claimId || companyIndex == null) return "FT date: SKIPPED — no internal claimID on entry (set manually)";
+
+  const ft = deps.filetrac ?? await loadFiletrac();
+  const detailText = (await ft.filetracGetClaim({ claim_id: String(claimId), company_index: companyIndex }))
+    ?.content?.map((c) => c.text || "").join("\n") ?? "";
+  const current = parseInspectionDate(detailText);
+  if (current === null) return "FT date: SKIPPED — could not read claim (FT session?)";
+  if (current !== "") {
+    entry.inspection_date_written = true; // adopt — never overwrite
+    return `FT date: already ${current} (adopted, left as-is)`;
+  }
+  if (DRY_RUN) return `FT date [dry-run]: would set ${entry.proposed_date_iso} on claim ${claimId}`;
+  await ft.filetracUpdateClaimDates({
+    claim_id: String(claimId), company_index: companyIndex,
+    inspection_date: entry.proposed_date_iso,
+  });
+  entry.inspection_date_written = true;
+  return `FT date: SET Date of Inspection ${entry.proposed_date_iso} (FT claim ${claimId})`;
+}
+
+/** Queststar mirror update on CONFIRM (internal write — no gate). */
+export async function updateQueststarOnConfirm(entry, deps = {}) {
+  const ctx = entry.claim_context || {};
+  const rowId = ctx.queststar_row_id;
+  if (!rowId) return "Queststar: no row id on entry — skipped";
+  if (DRY_RUN) return `Queststar [dry-run]: would mark row ${rowId} scheduled`;
+  const qs = deps.queststar ?? await loadQueststar();
+  const when = `${entry.proposed_date_iso}${entry.proposed_time_window ? " " + entry.proposed_time_window : ""}`;
+  await qs.updateClaimRow(rowId, { inspection_status: "Scheduled" });
+  const rows = await qs.listClaimRows({ limit: 2000 });
+  const row = rows.find((r) => Number(r.id) === Number(rowId));
+  if (row) await qs.appendClaimNote(row, `Inspection confirmed by insured for ${when} (via SMS).`);
+  return `Queststar: row ${rowId} inspection_status=Scheduled + note`;
+}
+
+// ─── C4: counter-offer extraction + gated reply drafts ──────────────────────
+
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
+/**
+ * Pull an explicit time window (or single start time) from an inbound reply.
+ *   "10-10:30" / "10:30am-11am" / "between 2 and 3pm" → {startHour,...,endHour,...}
+ *   "2pm" / "at 10:30"                                 → 1-hour window from that time
+ * Returns null when no concrete time is present.
+ */
+export function extractTimeFromReply(body) {
+  const s = String(body ?? "").toLowerCase();
+  let m = s.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|to|and)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (m && !(m[2] == null && m[5] == null && m[3] == null && m[6] == null && Number(m[1]) > 12)) {
+    let [, h1, m1, p1, h2, m2, p2] = m;
+    if (!p1 && p2) p1 = p2;
+    if (!p2 && p1) p2 = p1;
+    const to24 = (h, p) => { let hh = Number(h); if (p === "pm" && hh < 12) hh += 12; if (p === "am" && hh === 12) hh = 0; return hh; };
+    // No meridiem at all: assume business hours (7–18) — 2 means 2pm.
+    const biz = (hh) => (!p1 && hh >= 1 && hh <= 6 ? hh + 12 : hh);
+    const startHour = biz(to24(h1, p1));
+    const endHour = biz(to24(h2, p2));
+    if (startHour < endHour || (startHour === endHour && Number(m2 ?? 0) > Number(m1 ?? 0))) {
+      return { startHour, startMin: m1 ? Number(m1) : 0, endHour, endMin: m2 ? Number(m2) : 0, explicit_range: true };
+    }
+  }
+  m = s.match(/(?:\bat\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+  if (m) {
+    const to24 = (h, p) => { let hh = Number(h); if (p === "pm" && hh < 12) hh += 12; if (p === "am" && hh === 12) hh = 0; return hh; };
+    const startHour = to24(m[1], m[3]);
+    const startMin = m[2] ? Number(m[2]) : 0;
+    return { startHour, startMin, endHour: startHour + 1, endMin: startMin, explicit_range: false };
+  }
+  return null;
+}
+
+/**
+ * Pull an explicit day from the reply: weekday name, "tomorrow", "today", or
+ * M/D. Resolved against `now` in LA. Returns YYYY-MM-DD or null.
+ */
+export function extractDayFromReply(body, now = new Date()) {
+  const s = String(body ?? "").toLowerCase();
+  const laToday = new Intl.DateTimeFormat("en-CA", { timeZone: CAL_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const [y, mo, d] = laToday.split("-").map(Number);
+  const addDays = (n) => {
+    const dt = new Date(Date.UTC(y, mo - 1, d + n));
+    return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+  };
+  if (/\btomorrow\b/.test(s)) return addDays(1);
+  if (/\btoday\b/.test(s)) return addDays(0);
+  for (let i = 0; i < 7; i++) {
+    if (new RegExp(`\\b${WEEKDAYS[i]}\\b`).test(s)) {
+      const todayDow = new Date(Date.UTC(y, mo - 1, d)).getUTCDay();
+      let delta = (i - todayDow + 7) % 7;
+      if (delta === 0) delta = 7; // "Thursday" on a Thursday = next week
+      return addDays(delta);
+    }
+  }
+  const m = s.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (m) {
+    const yy = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : y;
+    return `${yy}-${String(Number(m[1])).padStart(2, "0")}-${String(Number(m[2])).padStart(2, "0")}`;
+  }
+  return null;
+}
+
+export function windowLabel(w) {
+  const part = (h, mi) => {
+    const dp = h >= 12 ? "pm" : "am";
+    const hh = h % 12 === 0 ? 12 : h % 12;
+    return mi ? `${hh}:${String(mi).padStart(2, "0")}${dp}` : `${hh}${dp}`;
+  };
+  return `${part(w.startHour, w.startMin)}-${part(w.endHour, w.endMin)}`;
+}
+
+/** True when the reply's time matches the proposed window's start. */
+export function replyTimeMatchesProposal(replyWindow, proposedWindowStr) {
+  const p = parseWindow(proposedWindowStr);
+  if (!p || !replyWindow) return false;
+  return p.startHour === replyWindow.startHour && p.startMin === replyWindow.startMin;
+}
+
+/** Any timed calendar event overlapping [start,end]? deps-stubbed in tests. */
+async function calendarBusy(startIso, endIso, deps = {}) {
+  const listFn = deps.calendarListEvents ?? (await loadCalendar()).calendarListEvents;
+  try {
+    const res = await listFn({ time_min: startIso, time_max: endIso, max_results: 20 });
+    const text = (res?.content || []).map((c) => c.text || "").join("\n");
+    return /^ID:\s*\S+/m.test(text);
+  } catch {
+    return null; // unknown — treat as busy so we never auto-accept blind
+  }
+}
+
+/**
+ * Build the gated counter-reply draft. When the insured named a concrete
+ * day+time and the calendar is free there, accept it; otherwise propose the
+ * next opening from the slot picker. Returns { draft_text, accepted } or
+ * null when we couldn't produce a sensible draft (caller falls back to a
+ * plain ntfy).
+ */
+export async function draftCounterReply(entry, inboundBody, now = new Date(), deps = {}) {
+  const time = extractTimeFromReply(inboundBody);
+  const day = extractDayFromReply(inboundBody, now)
+    ?? (time ? entry.proposed_date_iso : null);
+  const first = (entry.contact_name || "").split(/\s+/)[0] || "there";
+
+  if (time && day) {
+    const { start, end } = buildEventTimes(day, windowLabel(time), CAL_TZ);
+    if (new Date(start).getTime() > now.getTime()) {
+      const busy = await calendarBusy(start, end, deps);
+      if (busy === false) {
+        return {
+          draft_text: `Hi ${first}. ${windowLabel(time)} works — you're on my schedule. See you then.`,
+          accepted: { date_iso: day, window: windowLabel(time) },
+        };
+      }
+    }
+  }
+
+  // Their time doesn't work (busy/past/unparseable) → offer the next opening.
+  const lossAddress = (entry.claim_context || {}).loss_address;
+  if (!lossAddress) return null;
+  try {
+    const pickFn = deps.pickInspectionSlots ?? (await loadSlotPicker()).pickInspectionSlots;
+    const picked = await pickFn({ loss_address: lossAddress, max_slots: 1 });
+    if (!picked.ok || !picked.slots?.length) return null;
+    const s = picked.slots[0];
+    return {
+      draft_text: `Hi ${first}. Unfortunately that time doesn't work on my end. The next opening I have is ${s.weekday} ${s.date} between ${s.start_label}-${s.end_label}. Would that work?`,
+      accepted: null,
+      offered: { date_iso: s.date, start: s.start, end: s.end },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Push a counter-reply draft into the outbox approval gate (one open
+ * counter_reply per claim). Returns the proposal id or null.
+ */
+export function queueCounterReply(entry, counter, inboundBody) {
+  const outbox = loadOutbox();
+  const ctx = entry.claim_context || {};
+  const claimKey = ctx.file_number ?? entry.claim_id ?? entry.contact_phone;
+  if (findOpenProposal(outbox, claimKey, "counter_reply")) return null;
+  const p = addProposal(outbox, {
+    kind: "counter_reply",
+    insured_name: entry.contact_name,
+    to_phone: entry.contact_phone,
+    thread_id: entry.thread_id,
+    draft_text: counter.draft_text,
+    slots: counter.offered ? [{ start: counter.offered.start, end: counter.offered.end, date: counter.offered.date_iso, label: `${counter.offered.date_iso}` }] : [],
+    accepted_slot: counter.accepted ?? null,
+    inbound_quote: String(inboundBody ?? "").slice(0, 300),
+    claim: {
+      ia_firm: ctx.ia_firm ?? entry.ia_firm ?? null,
+      company_index: ctx.company_index ?? entry.company_index ?? null,
+      ft_internal_claim_id: ctx.ft_internal_claim_id ?? null,
+      file_number: ctx.file_number ?? entry.claim_id ?? null,
+      loss_address: ctx.loss_address ?? null,
+      queststar_row_id: ctx.queststar_row_id ?? null,
+      first_contact_on_send: false, // first text already went out
+    },
+    claim_context: ctx,
+    tracker_entry_id: entry.id ?? null,
+  });
+  saveOutbox(outbox);
+  return p.id;
+}
+
+/**
+ * Queue the gated "agreed to re-inspection" CMS note (kind=cms_note in the
+ * outbox — the runner posts it to FileTrac ONLY after Hakiel approves,
+ * always visible_to_client:false). One open note per claim.
+ */
+export function queueReinspectionNote(entry) {
+  const ctx = entry.claim_context || {};
+  const outbox = loadOutbox();
+  const claimKey = ctx.file_number ?? entry.claim_id ?? entry.contact_phone;
+  if (findOpenProposal(outbox, claimKey, "cms_note")) return null;
+  const when = `${entry.proposed_date_iso}${entry.proposed_time_window ? " " + entry.proposed_time_window : ""}`;
+  const p = addProposal(outbox, {
+    kind: "cms_note",
+    insured_name: entry.contact_name,
+    to_phone: entry.contact_phone,
+    draft_text: `Agreed to re-inspection appointment on ${when}.`,
+    slots: [],
+    claim: {
+      ia_firm: ctx.ia_firm ?? entry.ia_firm ?? null,
+      company_index: ctx.company_index ?? entry.company_index ?? null,
+      ft_internal_claim_id: ctx.ft_internal_claim_id ?? null,
+      file_number: ctx.file_number ?? entry.claim_id ?? null,
+      first_contact_on_send: false,
+    },
+    claim_context: ctx,
+    tracker_entry_id: entry.id ?? null,
+  });
+  saveOutbox(outbox);
+  ntfyPublish({
+    topic: APPROVALS_TOPIC,
+    title: `Approval needed - CMS note for ${entry.contact_name}`,
+    body: `Re-inspection agreed. Proposed FileTrac note (visible_to_client: false):\n\n"${p.draft_text}"\n\nsend ${p.id} | edit ${p.id}: <text> | skip ${p.id}`,
+    priority: "high", tags: "memo",
+  }).catch(() => {});
+  return p.id;
+}
+
 /**
  * Process a single tracker entry. Side-effects (fetchThread, ntfy, calendar)
  * are injected via `deps` so tests can stub them. Production wires the real
@@ -395,7 +693,29 @@ export async function processEntry(entry, now, deps = {}) {
 
   if (newInbound.length > 0) {
     const last = newInbound[newInbound.length - 1];
-    const intent = classify(last.body);
+    let intent = classify(last.body);
+
+    // Confirmed-at-a-different-time reconciliation: "10-10:30 works" against a
+    // proposed 10:30-11:30. An explicit full range on the SAME day → adopt
+    // their window and proceed as CONFIRM (Planned Inspection Date is the
+    // day, which is unchanged). A different DAY, or a bare single time that
+    // doesn't match the proposal → counter-offer path.
+    if (intent === "CONFIRM") {
+      const replyTime = extractTimeFromReply(last.body);
+      const replyDay = extractDayFromReply(last.body, new Date(now));
+      const dayDiffers = replyDay && entry.proposed_date_iso && replyDay !== entry.proposed_date_iso;
+      if (dayDiffers) {
+        intent = "COUNTER";
+      } else if (replyTime && !replyTimeMatchesProposal(replyTime, entry.proposed_time_window)) {
+        if (replyTime.explicit_range) {
+          entry.proposed_time_window = windowLabel(replyTime);
+          entry.window_adjusted_from_reply = true;
+        } else {
+          intent = "COUNTER";
+        }
+      }
+    }
+
     const dateLabel = entry.proposed_date_iso || "(no date)";
     const window = entry.proposed_time_window ? ` ${entry.proposed_time_window}` : "";
 
@@ -425,6 +745,49 @@ export async function processEntry(entry, now, deps = {}) {
       }
     }
 
+    // C3: CMS + Queststar write-backs on CONFIRM. Pre-authorized by the
+    // approval of the outbound SMS (prompt disclosed them). Once-only +
+    // only-if-empty guards live inside; re-inspections are no-ops.
+    let ftLine = "", qsLine = "";
+    if (intent === "CONFIRM") {
+      try { ftLine = `\n${await (deps.writeInspectionDate ?? writeInspectionDate)(entry, deps)}`; }
+      catch (e) { ftLine = `\nFT date: WRITE FAILED (${String(e.message).slice(0, 100)}) — set manually`; }
+      try { qsLine = `\n${await (deps.updateQueststarOnConfirm ?? updateQueststarOnConfirm)(entry, deps)}`; }
+      catch (e) { qsLine = `\nQueststar: update failed (${String(e.message).slice(0, 100)})`; }
+      // Re-inspection agreements land as a GATED CMS note (never auto-posted —
+      // standing no-auto-notes rule). Queue it for approval on the outbox.
+      if ((entry.claim_context || {}).kind === "reinspection" && !DRY_RUN) {
+        try {
+          const noteId = (deps.queueReinspectionNote ?? queueReinspectionNote)(entry);
+          ftLine += noteId
+            ? `\nCMS note drafted as outbox #${noteId} — approve on '${APPROVALS_TOPIC}' to post (not visible to client).`
+            : `\nCMS note: already awaiting approval for this claim.`;
+        } catch (e) {
+          ftLine += `\nCMS note: draft failed (${String(e.message).slice(0, 80)})`;
+        }
+      }
+    }
+
+    // C4: counter-offer / unclear → gated reply draft in the outbox.
+    let counterLine = "";
+    if (intent === "COUNTER" || intent === "UNCLEAR") {
+      try {
+        const counter = await (deps.draftCounterReply ?? draftCounterReply)(entry, last.body, new Date(now), deps);
+        if (counter && !DRY_RUN) {
+          const pid = (deps.queueCounterReply ?? queueCounterReply)(entry, counter, last.body);
+          counterLine = pid
+            ? `\nDraft reply queued as outbox #${pid} — approve on '${APPROVALS_TOPIC}' (send ${pid} | edit ${pid}: <text> | skip ${pid}):\n"${counter.draft_text}"`
+            : `\nA counter-reply draft is already awaiting your approval for this claim.`;
+        } else if (counter && DRY_RUN) {
+          counterLine = `\n[dry-run] would queue reply draft: "${counter.draft_text}"`;
+        } else {
+          counterLine = `\nCould not auto-draft a reply — handle the thread manually.`;
+        }
+      } catch (e) {
+        counterLine = `\nCounter-draft error: ${String(e.message).slice(0, 100)} — handle manually.`;
+      }
+    }
+
     const ntfyTitle = `SMS reply from ${entry.contact_name} — ${intent}`;
     const ntfyBody = [
       `Claim: ${entry.claim_id || "?"} (${entry.ia_firm || "?"})`,
@@ -432,10 +795,10 @@ export async function processEntry(entry, now, deps = {}) {
       `Reply (${fmtPST(last.timestamp_iso)}): ${last.body}`,
       ``,
       intent === "CONFIRM"
-        ? `Suggested: set FT planned inspection ${dateLabel}${window}. Reply "yes set ${dateLabel}" to authorize.${calLine}`
+        ? `Confirmed for ${dateLabel}${window}.${entry.window_adjusted_from_reply ? " (window adjusted to their reply)" : ""}${calLine}${ftLine}${qsLine}`
         : intent === "DECLINE"
-          ? `Suggested: propose a new slot. Their reply suggests they cannot make ${dateLabel}${window}.`
-          : `Unclear — read the full thread, then decide.`,
+          ? `They can't make ${dateLabel}${window} — your move (call or re-propose).`
+          : `${intent === "COUNTER" ? "They proposed a different time." : "Unclear reply."}${counterLine}`,
     ].join("\n");
     await ntfyFn({
       title: ntfyTitle,

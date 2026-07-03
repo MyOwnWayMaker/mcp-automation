@@ -25,6 +25,7 @@ const PIPELINE_TEST_FILES = [
   "tests/orchestrator_helpers.test.mjs",
   "tests/queststar_wire.test.mjs",
   "tests/sms_drafter.test.mjs",
+  "tests/sms_outbox.test.mjs",
 ];
 
 const present = PIPELINE_TEST_FILES.filter((f) => fs.existsSync(path.join(REPO, f)));

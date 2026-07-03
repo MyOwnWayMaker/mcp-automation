@@ -22,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveClaimFolderOrdinal } from "./folder-resolver.mjs";
 import { findClaimRowByKey, createClaimRow, appendClaimNote, rowFields as qsRowFields } from "./queststar.mjs";
+import { proposeInspectionSms } from "./scheduler.mjs";
 
 // ─── Lazy tool import (so the orchestrator file itself is import-safe) ────────
 
@@ -393,6 +394,8 @@ export function parseFiletracClaimDetail(text) {
     date_of_loss: first("Date of Loss:"),
     date_received: first("Date Received:"),
     policy: first("Policy #:"),
+    insured_phone: first("Phone #:"),
+    insured_alt_phone: first("Alternate Phone #:"),
     loss_address,
   };
 }
@@ -446,6 +449,8 @@ async function backfillIdentityFromFiletrac({ parsed, msg, client_short }) {
 
   // Fill blanks only — a real parse always wins.
   if (!parsed.insured_name && d.insured) parsed.insured_name = d.insured;
+  if (!parsed.insured_phone && d.insured_phone) parsed.insured_phone = d.insured_phone;
+  if (!parsed.insured_alt_phone && d.insured_alt_phone) parsed.insured_alt_phone = d.insured_alt_phone;
   if (!parsed.carrier && d.carrier) parsed.carrier = d.carrier;
   if (!parsed.loss_type && d.loss_type) parsed.loss_type = d.loss_type;
   if (!parsed.loss_description && d.loss_description) parsed.loss_description = d.loss_description;
@@ -637,7 +642,22 @@ async function processNewAssignment({ msg, parsed, todayDate, dryRun }) {
     carrier_short,
     loss_type,
   };
-  if (dryRun) return { action: "new_assignment", dry_run: args };
+  if (dryRun) {
+    // Preview the scheduling proposal too (read-only: geocode + calendar +
+    // FT list; no outbox write, no ntfy). Soft-fail like the live path.
+    let scheduling = null;
+    try {
+      scheduling = await proposeInspectionSms({
+        msg, parsed, folderResult: null, insured, client_short, loss_type,
+        company_index: CLIENT_TO_FT_COMPANY[client_short] ?? null,
+        ft_internal_claim_id: ft_identity?.claim_id ?? null,
+        dryRun: true,
+      });
+    } catch (e) {
+      scheduling = { skipped: "scheduler-error", detail: String(e?.message ?? e).slice(0, 160) };
+    }
+    return { action: "new_assignment", dry_run: args, scheduling };
+  }
 
   const fr = await t.createClaimDriveFolder(args);
   const folderResult = asResultObject(fr);
@@ -698,11 +718,27 @@ async function processNewAssignment({ msg, parsed, todayDate, dryRun }) {
     row = await createClaimRow(fields);
   }
 
+  // Scheduling-assistant proposer: slot pick + SMS draft parked behind the
+  // approval gate (ntfy topic). Soft-fail — a scheduling gap must never
+  // un-file the claim; the gap itself is ntfy'd for manual scheduling.
+  let scheduling = null;
+  try {
+    scheduling = await proposeInspectionSms({
+      msg, parsed, folderResult, insured, client_short, loss_type,
+      company_index: CLIENT_TO_FT_COMPANY[client_short] ?? null,
+      ft_internal_claim_id: ft_identity?.claim_id ?? null,
+      queststar_row_id: row.id,
+    });
+  } catch (e) {
+    scheduling = { skipped: "scheduler-error", detail: String(e?.message ?? e).slice(0, 160) };
+  }
+
   return {
     action: "new_assignment",
     folder: folderResult.claim_folder,
     queststar_row_id: row.id,
     ft_backfill: ftBackfill,
+    scheduling,
     ...(ft_identity ? { ft_identity } : {}),
     ...(carrier_short_flagged ? { carrier_short_unverified: carrier_short_flagged } : {}),
   };
@@ -835,13 +871,39 @@ async function processSupplement({ msg, parsed, todayDate, dryRun }) {
       `Supplement #${resolved.ordinal} received via ${parsed.sender_kind} (${msg.id}). Folder: ${folderResult.claim_folder.name}`);
   } // else: don't auto-create a row from a supplement — original claim should already exist
 
+  // Re-inspection scheduling: most supplements are desk reviews — only a
+  // request that explicitly asks for a re-visit gets the scheduling chain.
+  // kind:"reinspection" makes the whole downstream loop skip CMS date fields
+  // (the agreement lands as a GATED note instead).
+  let scheduling = null;
+  if (REINSPECTION_RE.test([msg.subject, parsed.loss_description, msg.body].filter(Boolean).join(" "))) {
+    try {
+      const company_index = CLIENT_TO_FT_COMPANY[identity.client] ?? null;
+      if (company_index != null && (!parsed.insured_phone || !parsed.loss_address)) {
+        await backfillIdentityFromFiletrac({ parsed, msg, client_short: identity.client }).catch(() => null);
+      }
+      scheduling = await proposeInspectionSms({
+        msg, parsed, folderResult,
+        insured: identity.insured, client_short: identity.client, loss_type: identity.loss_type,
+        company_index, queststar_row_id: row?.id ?? null,
+        kind: "reinspection",
+      });
+    } catch (e) {
+      scheduling = { skipped: "scheduler-error", detail: String(e?.message ?? e).slice(0, 160) };
+    }
+  }
+
   return {
     action: "supplement",
     ordinal: resolved.ordinal,
     folder: folderResult.claim_folder,
     queststar_row_id: row?.id ?? null,
+    ...(scheduling ? { scheduling } : {}),
   };
 }
+
+// A supplement email that asks for another site visit (vs. a paper review).
+export const REINSPECTION_RE = /re-?inspect\w*|re-?visit|second (?:look|inspection)|go (?:back )?out (?:to|and)|another inspection|inspect (?:the )?(?:additional|new) damage/i;
 
 function formatAddress(a) {
   if (!a) return "?";
