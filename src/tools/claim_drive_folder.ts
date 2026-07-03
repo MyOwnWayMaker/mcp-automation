@@ -23,12 +23,10 @@ function extractFolderLink(text: string): string | null {
 
 // ─── Tree-name derivation per locked 2026-05-04 convention ──────────────
 
-const QUARTER_LABELS: Record<number, string> = {
-  1: "Q1 (Jan–Mar)",
-  2: "Q2 (Apr–Jun)",
-  3: "Q3 (Jul–Sep)",
-  4: "Q4 (Oct–Dec)",
-};
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 
 function quarterFromMonth(monthZeroBased: number): number {
   return Math.floor(monthZeroBased / 3) + 1;
@@ -43,9 +41,8 @@ function pad2(n: number): string {
  * string in LA-local time. Uses Intl so it's DST-correct + portable.
  */
 function deriveTreeLabels(requestDateIso: string): {
-  year: string;
   quarter: string;
-  monthYearMonth: string;
+  month: string;
   yearMonthDay: string;
 } {
   // Parse the input — accept full ISO or YYYY-MM-DD; treat the latter as
@@ -68,10 +65,11 @@ function deriveTreeLabels(requestDateIso: string): {
   const m = parts.month;
   const d = parts.day;
   const monthZero = parseInt(m) - 1;
+  // Match the live Drive archive layout exactly: root → "{YYYY} Q{n} Inspections"
+  // → "MM - Month YYYY" → claim folder. No separate year level.
   return {
-    year: y,
-    quarter: QUARTER_LABELS[quarterFromMonth(monthZero)],
-    monthYearMonth: `${y}-${m}`,
+    quarter: `${y} Q${quarterFromMonth(monthZero)} Inspections`,
+    month: `${m} - ${MONTH_NAMES[monthZero]} ${y}`,
     yearMonthDay: `${y}-${m}-${d}`,
   };
 }
@@ -204,7 +202,6 @@ export type CreateClaimDriveFolderResult =
   | {
       ok: true;
       // IDs and links for every level
-      year_folder: { id: string; name: string; created: boolean };
       quarter_folder: { id: string; name: string; created: boolean };
       month_folder: { id: string; name: string; created: boolean };
       claim_folder: { id: string; name: string; created: boolean; link?: string };
@@ -229,16 +226,18 @@ export type CreateClaimDriveFolderResult =
  */
 export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): Promise<CreateClaimDriveFolderResult> {
   // 1. Locate the Claims root.
-  let claimsRootId = args.claims_root_id;
+  // Archive root: explicit arg → CLAIMS_ROOT_ID env → locate by canonical name.
+  // The live archive folder is "Claims and Inspection Archive" (not "Claims").
+  let claimsRootId = args.claims_root_id ?? process.env.CLAIMS_ROOT_ID;
   if (!claimsRootId) {
     const findRoot = await driveFindFile({
-      query: `name = 'Claims' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+      query: `name = 'Claims and Inspection Archive' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
       max_results: 5,
     });
     const text = extractText(findRoot);
     claimsRootId = extractFolderId(text) ?? undefined;
     if (!claimsRootId) {
-      return { ok: false, error: "Could not locate root 'Claims' folder. Pass claims_root_id explicitly." };
+      return { ok: false, error: "Could not locate 'Claims and Inspection Archive' root. Pass claims_root_id or set CLAIMS_ROOT_ID." };
     }
   }
 
@@ -252,9 +251,8 @@ export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): 
 
   // 3. Walk / create each level.
   try {
-    const yearFolder = await findOrCreateFolder(claimsRootId, labels.year);
-    const quarterFolder = await findOrCreateFolder(yearFolder.id, labels.quarter);
-    const monthFolder = await findOrCreateFolder(quarterFolder.id, labels.monthYearMonth);
+    const quarterFolder = await findOrCreateFolder(claimsRootId, labels.quarter);
+    const monthFolder = await findOrCreateFolder(quarterFolder.id, labels.month);
 
     // Resolve the ordinal for repeat-work-type folders (e.g. 2nd, 3rd
     // supplement) so the new folder lands at the next-unused slot rather
@@ -291,9 +289,8 @@ export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): 
 
     return {
       ok: true,
-      year_folder: { id: yearFolder.id, name: labels.year, created: yearFolder.created },
       quarter_folder: { id: quarterFolder.id, name: labels.quarter, created: quarterFolder.created },
-      month_folder: { id: monthFolder.id, name: labels.monthYearMonth, created: monthFolder.created },
+      month_folder: { id: monthFolder.id, name: labels.month, created: monthFolder.created },
       claim_folder: {
         id: claimFolder.id,
         name: claimFolderName,
@@ -301,7 +298,7 @@ export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): 
         link: claimFolder.link,
       },
       photos_folder: { id: photosFolder.id, name: "Photos for Xactimate", created: photosFolder.created },
-      path: `Claims/${labels.year}/${labels.quarter}/${labels.monthYearMonth}/${claimFolderName}/`,
+      path: `Claims and Inspection Archive/${labels.quarter}/${labels.month}/${claimFolderName}/`,
       already_existed: !claimFolder.created,
     };
   } catch (e: any) {

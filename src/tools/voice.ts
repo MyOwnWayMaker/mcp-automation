@@ -1161,6 +1161,33 @@ export async function voiceSendSms(args: {
       } // close else (auto mode)
       await page.waitForTimeout(1500);
 
+      // Keyboard-commit fallback (2026-06-29): for some numbers Voice surfaces
+      // the "Send to <number>" suggestion as a multi-child tile whose
+      // center-click lands in a dead zone — the dropdown dismisses without
+      // committing a chip (one number's tile committed on click, another's
+      // didn't, both seeing autocomplete_clicked=true). Driving Voice's own
+      // Material autocomplete with ArrowDown+Enter highlights the first option
+      // and commits via its selection handler — no coordinate click. Gated on
+      // "chip not yet committed" so the already-working click path is a no-op.
+      if (!args.manual_recipient) {
+        const composeSel = `[data-mcp-pick2="${composeRecipient.pickedIdx}"]`;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const committed = await page.evaluate((sel) => {
+            const inp = document.querySelector(sel) as HTMLInputElement | null;
+            // After commit Voice clears the To input AND renders a chip pill.
+            // Empty input value is the cleanest commit signal.
+            return inp ? inp.value === "" : false;
+          }, composeSel).catch(() => false);
+          if (committed) break;
+          await composeToLoc.focus({ timeout: 2000 }).catch(() => {});
+          await page.waitForTimeout(150);
+          await page.keyboard.press("ArrowDown").catch(() => {});
+          await page.waitForTimeout(200);
+          await page.keyboard.press("Enter").catch(() => {});
+          await page.waitForTimeout(700);
+        }
+      }
+
       // Verify a recipient chip / pill appeared. Voice renders chips with
       // formatted numbers like "(424) 466-3685" or "‪+1 424-466-3685‬", so
       // strip non-digits before comparing — substring match on the raw text

@@ -463,7 +463,7 @@ function fmt(date: string): string {
  * return the browser + page on the ASP claims system.
  * After navigating, saves ASP session cookies for future fast-path requests.
  */
-async function getFiletracPage(companyIndex = 0): Promise<{
+export async function getFiletracPage(companyIndex = 0): Promise<{
   browser: Browser;
   page: Page;
   aspBase: string;

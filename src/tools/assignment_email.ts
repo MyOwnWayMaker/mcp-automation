@@ -17,6 +17,7 @@ export type SenderKind =
   | "aan_portal"          // noreply@app.associatedadjusting.com
   | "straightline"        // claims@straightlineglobal.com (forwards)
   | "ianet"               // assignments@ianetwork.net (IA Network portal)
+  | "harbor_claims"       // claims@harborclaims.com (SLG/Harbor follow-ups)
   | "personal"            // human senders (crr2day@gmail.com)
   | "unknown";
 
@@ -302,6 +303,68 @@ function parseStraightlineEmail(args: {
 }
 
 /**
+ * Harbor Claims (claims@harborclaims.com) — SLG/Harbor's TPA desk. Harbor
+ * NEVER originates new assignments to us (those come via SLG/Xactware); all
+ * emails from Harbor are follow-ups on an existing claim — supplement
+ * reviews, payment letters, status updates, contractor questions.
+ *
+ * Subject is usually just the carrier claim # ("1226000034") or that plus a
+ * tag ("1226000034 - Final Bid/Change Order"). The body is typically a
+ * forwarded chain.
+ *
+ * Detection rule for kind: scan the latest text for supplement-intent
+ * phrases — "supplement", "additional payment", "additional funds",
+ * "additional damage", "additional review", "change order", "review and
+ * advise". Otherwise default to status_update.
+ */
+function parseHarborEmail(args: {
+  subject: string;
+  body: string;
+  from: string;
+}): ParseAssignmentEmailResult {
+  // Pull a claim # from subject (digits or alphanumeric). Subjects show "1226000034"
+  // or "Re: 1226000034" or "Re: 1226000034 - Final Bid/Change Order".
+  const claim_number =
+    args.subject.match(/^(?:Re|Fwd|FW):\s*(\S+)/i)?.[1].replace(/[,;]$/, "") ??
+    args.subject.match(/\b(\d{6,})\b/)?.[1];
+
+  const text = stripHtml(args.body).slice(0, 8000); // top of thread = latest message
+  const supplementCues =
+    /\b(supplement|additional\s+(payment|funds|damage|review)|change\s+order|review\s+and\s+advise|contractor\s+(estimate|invoice|supplement)|hidden\s+damage)\b/i;
+  const noteCues = /\b(note\s+has\s+been\s+added|comment\s+(added|posted))\b/i;
+  const reinspectionCues = /\b(re-?inspection|return\s+visit|second\s+look)\b/i;
+  const reopenCues = /\b(reopen|re-?opened|re-?activate)\b/i;
+
+  let email_kind: EmailKind = "status_update";
+  let work_type: "supplement" | "reinspection" | "reopen" | undefined;
+  if (reopenCues.test(text) || reopenCues.test(args.subject)) {
+    email_kind = "supplement_request";
+    work_type = "reopen";
+  } else if (reinspectionCues.test(text) || reinspectionCues.test(args.subject)) {
+    email_kind = "supplement_request";
+    work_type = "reinspection";
+  } else if (supplementCues.test(text) || supplementCues.test(args.subject)) {
+    email_kind = "supplement_request";
+    work_type = "supplement";
+  } else if (noteCues.test(text) || noteCues.test(args.subject)) {
+    email_kind = "note_added";
+  }
+
+  return {
+    ok: true,
+    sender_kind: "harbor_claims",
+    email_kind,
+    platform: "manual",
+    carrier_claim_number: claim_number,
+    raw_subject: args.subject,
+    raw_from: args.from,
+    notes:
+      "Harbor Claims is the TPA desk for SLG/Harbor follow-ups — never an origin assignment. " +
+      (work_type ? `work_type=${work_type}.` : "Default kind is status_update if no supplement cues match."),
+  };
+}
+
+/**
  * Personal sender (e.g. crr2day@gmail.com — Rollon Rhoane, individual
  * communication). Extract claim # from subject if present, otherwise mark
  * as unknown.
@@ -472,6 +535,9 @@ export function parseAssignmentEmail(args: {
   }
   if (sender === "assignments@ianetwork.net" || sender.endsWith("@ianetwork.net")) {
     return parseIANetEmail(args);
+  }
+  if (sender === "claims@harborclaims.com") {
+    return parseHarborEmail(args);
   }
   if (sender === "crr2day@gmail.com") {
     return parsePersonalEmail(args);
