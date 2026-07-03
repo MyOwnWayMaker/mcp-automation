@@ -35,6 +35,32 @@ function formatProposedDate(d: Date): string {
   return `${parts.weekday} ${parts.month} ${ordinal(day)}`;
 }
 
+/** LA-local calendar date of an instant, as "YYYY-MM-DD". */
+function laDateString(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: LA_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+/**
+ * True when the slot falls on the LA-local day AFTER `now`. Pure calendar
+ * arithmetic on the LA-local date (not now+24h) so DST transitions can't
+ * shift the comparison.
+ */
+function isTomorrowInLA(slot: Date, now: Date): boolean {
+  const [y, m, d] = laDateString(now).split("-").map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + 1));
+  const nextStr = `${next.getUTCFullYear()}-${pad2(next.getUTCMonth() + 1)}-${pad2(next.getUTCDate())}`;
+  return laDateString(slot) === nextStr;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
 /**
  * Format a single LA-local instant as "7am" or "7:30am".
  * No leading zero, lowercase am/pm, no colon when minutes are zero.
@@ -108,6 +134,8 @@ export type DraftSmsArgs = {
   // Slot start + end as ISO strings (with offset). Typically the picker output.
   slot_start: string;
   slot_end: string;
+  // "Now" override for tests. Defaults to the wall clock.
+  now_iso?: string;
 };
 
 export type DraftSmsResult =
@@ -126,7 +154,9 @@ export type DraftSmsResult =
  *   {first_name_or_names} — single name as-is, two names "A and B",
  *      three+ Oxford-comma "A, B, and C".
  *   {proposed_date} — "Tuesday May 5th" (day-of-week + full month +
- *      ordinal day). Never numeric, never year.
+ *      ordinal day). Never numeric, never year. When the slot is the
+ *      LA-local day after "now", prefix "tomorrow, " → "tomorrow,
+ *      Tuesday June 30th" (Hakiel's standing wording rule, 2026-06-29).
  *   {proposed_time_frame} — "7am-8am" (no colons on the hour, no spaces
  *      around dash, lowercase am/pm).
  * Three paragraphs, blank lines between, no signature.
@@ -143,8 +173,11 @@ export function draftInspectionSms(args: DraftSmsArgs): DraftSmsResult {
   }
   if (names.length === 0) return { ok: false, error: "no insured first name(s) provided" };
 
+  const now = args.now_iso ? new Date(args.now_iso) : new Date();
+  if (args.now_iso && isNaN(now.getTime())) return { ok: false, error: `bad now_iso: ${args.now_iso}` };
+
   const first_name_or_names = formatFirstNameOrNames(names);
-  const proposed_date = formatProposedDate(start);
+  const proposed_date = (isTomorrowInLA(start, now) ? "tomorrow, " : "") + formatProposedDate(start);
   const proposed_time_frame = formatProposedTimeFrame(start, end);
 
   const sms_text =

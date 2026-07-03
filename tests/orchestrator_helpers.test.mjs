@@ -292,6 +292,23 @@ test("deriveLossType: nothing recognizable → null", () => {
   assert.equal(deriveLossType({ loss_type: null }, { subject: "Hello", attachments: [] }), null);
 });
 
+test("deriveLossType: structured loss_type beats description keywords (Tracey Fire-mislabel repro)", () => {
+  // 2026-06-29: "smoke detection" in the free-text description matched the
+  // Fire rule before the loss_type field's Water could win, because both
+  // were concatenated into one haystack. The field alone must decide.
+  const parsed = {
+    loss_type: "Discharge Water/Steam",
+    loss_description:
+      "The unit 204 above the insureds unit had a water over flow issue, so the water came down the ceiling, light fixture, smoke detection, walls and the unit",
+  };
+  assert.equal(deriveLossType(parsed, { subject: "", attachments: [] }), "Water");
+});
+
+test("deriveLossType: description decides only when loss_type is missing/unknown", () => {
+  const parsed = { loss_type: "N/A", loss_description: "kitchen fire with heavy soot" };
+  assert.equal(deriveLossType(parsed, { subject: "", attachments: [] }), "Fire");
+});
+
 // ── FileTrac identity backfill (PCAS free-text forwards) ─────────────────────
 // Guards the path that filed nothing for Sybil Davis 2026-06-23: a forwarded
 // PCAS assignment whose body was "Please see attached wind claim" — all fields

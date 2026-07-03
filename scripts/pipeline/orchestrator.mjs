@@ -209,10 +209,15 @@ export function normalizeLossType(raw) {
 }
 
 export function deriveLossType(parsed, msg) {
-  // Prefer the parser's own loss fields; fall back to subject + attachment
-  // filenames (XA "Benchmark_Wind_*" etc.) when the body omits a loss type.
-  const primary = normalizeLossType([parsed.loss_type, parsed.loss_description].filter(Boolean).join(" "));
-  if (primary !== "UNKNOWN") return primary;
+  // The structured loss_type field ALONE decides first — never mixed with the
+  // free-text description, whose incidental words outrank it in PERIL_RULES
+  // order ("water came down the ... smoke detection" labeled Tracey's water
+  // claim Fire on 2026-06-29). Description, then subject + attachment
+  // filenames (XA "Benchmark_Wind_*" etc.), are fallbacks only.
+  const fromField = normalizeLossType(parsed.loss_type);
+  if (fromField !== "UNKNOWN") return fromField;
+  const fromDescription = normalizeLossType(parsed.loss_description);
+  if (fromDescription !== "UNKNOWN") return fromDescription;
   const fallbackHay = [msg?.subject, ...((msg?.attachments ?? []).map(a => a.filename))].filter(Boolean).join(" ");
   const fb = normalizeLossType(fallbackHay);
   return fb === "UNKNOWN" ? null : fb;
