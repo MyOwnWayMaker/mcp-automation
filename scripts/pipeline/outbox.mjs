@@ -168,6 +168,10 @@ export async function ntfyPoll({ topic, since }) {
  *   "send 3 slot 2"        → { verb: "send", id: 3, slot_index: 1 }
  *   "edit 3: <full text>"  → { verb: "edit", id: 3, text: "<full text>" }
  *   "skip 3"               → { verb: "skip", id: 3 }
+ *   "inspected 81031873"           → { verb: "inspected", target, date: null }
+ *   "inspected tracey 7/1"         → { verb: "inspected", target: "tracey", date: "7/1" }
+ *   "inspected 81031873 2026-07-01"→ { verb: "inspected", target, date: "2026-07-01" }
+ * (inspected = Hakiel reporting a COMPLETED inspection; date defaults to today.)
  */
 export function parseApprovalCommand(raw) {
   const s = String(raw ?? "").trim();
@@ -177,6 +181,8 @@ export function parseApprovalCommand(raw) {
   if (m) return { verb: "edit", id: Number(m[1]), text: m[2].trim() };
   m = s.match(/^skip\s+#?(\d+)\s*$/i);
   if (m) return { verb: "skip", id: Number(m[1]) };
+  m = s.match(/^inspected\s+(.+?)(?:\s+(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?))?\s*$/i);
+  if (m) return { verb: "inspected", target: m[1].trim(), date: m[2] ?? null };
   return null;
 }
 

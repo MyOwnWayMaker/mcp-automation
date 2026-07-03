@@ -123,7 +123,9 @@ async function writeFirstContact(proposal) {
   const current = parseFirstContact(detail);
   if (current === null) return "First Contact: SKIPPED — could not read claim (FT session?)";
   if (current !== "") return `First Contact: already ${current} (left as-is)`;
-  const date = todayLA();
+  // First Contact = the day the ASSIGNMENT was received (Hakiel 2026-07-03),
+  // regardless of when the approval fires. Send-day is only the fallback.
+  const date = c.assignment_received ?? todayLA();
   await t.filetracUpdateClaimDates({
     claim_id: c.ft_internal_claim_id, company_index: c.company_index,
     first_contact_date: date,
@@ -207,6 +209,76 @@ async function settleCounterReply(p) {
   return lines.join("\n") || "Monitor: tracker synced";
 }
 
+/**
+ * `inspected <file#-or-name> [date]` — Hakiel reporting a COMPLETED
+ * inspection. Sets the CMS completed date/time via the monitor's shared
+ * writer (FT date for PCAS/USCS, XA Site Inspected date+time for SLG),
+ * ledgers it so the calendar sweep doesn't redo it. Date defaults to today.
+ */
+async function handleInspectedCommand(cmd) {
+  const monitor = await import(path.join(REPO, "scripts/sms-monitor.mjs"));
+
+  let dateIso;
+  if (!cmd.date) {
+    dateIso = todayLA();
+  } else if (/^\d{4}-/.test(cmd.date)) {
+    dateIso = cmd.date;
+  } else {
+    const [mm, dd, yy] = cmd.date.split("/");
+    const y = yy ? (yy.length === 2 ? `20${yy}` : yy) : String(new Date().getFullYear());
+    dateIso = `${y}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+  }
+
+  const trackerPath = path.join(REPO, "data/sms_tracker.json");
+  const tracker = fs.existsSync(trackerPath)
+    ? JSON.parse(fs.readFileSync(trackerPath, "utf8")) : { pending: [] };
+  const tl = cmd.target.toLowerCase();
+  const entry = (tracker.pending ?? []).find((e) => {
+    const ctx = e.claim_context || {};
+    return String(ctx.file_number ?? "") === cmd.target
+      || String(e.claim_id ?? "") === cmd.target
+      || String(e.contact_name ?? "").toLowerCase().includes(tl);
+  }) ?? null;
+  const ctx = entry?.claim_context || {};
+
+  // Completion TIME (XA wants it): the agreed window's end when we know it,
+  // else noon — his explicit command carries the authoritative date anyway.
+  let time_hhmm = "12:00";
+  if (entry?.proposed_time_window) {
+    const end = monitor.buildEventTimes(dateIso, entry.proposed_time_window, process.env.CALENDAR_TIMEZONE || "America/Los_Angeles").end;
+    time_hhmm = monitor.laDateTimeParts(end).time_hhmm;
+  }
+
+  const isNumeric = /^\d{7,9}$/.test(cmd.target);
+  const target = {
+    ia_firm: ctx.ia_firm ?? entry?.ia_firm ?? (isNumeric ? "PCAS" : null),
+    company_index: ctx.company_index ?? entry?.company_index,
+    ft_internal_claim_id: ctx.ft_internal_claim_id ?? null,
+    file_number: ctx.file_number ?? entry?.claim_id ?? (isNumeric ? cmd.target : null),
+    insured: entry?.contact_name ?? (!isNumeric ? cmd.target : null),
+    queststar_row_id: ctx.queststar_row_id ?? null,
+  };
+
+  const lines = await monitor.markInspectionCompleted(target, { date_iso: dateIso, time_hhmm });
+
+  const key = monitor.completionKey(target.file_number ?? target.insured ?? cmd.target, dateIso);
+  const ledger = monitor.loadCompletionLedger();
+  ledger.completed[key] = { date: dateIso, source: "command", at: new Date().toISOString() };
+  monitor.saveCompletionLedger(ledger);
+  if (entry) {
+    entry.inspection_completed_written = true;
+    fs.writeFileSync(trackerPath, JSON.stringify(tracker, null, 2));
+  }
+
+  await ntfyPublish({
+    topic: APPROVALS_TOPIC,
+    title: `Inspected - ${target.insured ?? target.file_number ?? cmd.target} ${dateIso}`,
+    body: lines.join("\n"),
+    tags: "white_check_mark",
+  }).catch(() => {});
+  return lines;
+}
+
 /** Send with read-back verification. ≤2 attempts. */
 async function sendSms(proposal, body) {
   const t = await tools();
@@ -270,6 +342,20 @@ export async function runOnce({ now = new Date() } = {}) {
   for (const m of poll.messages) {
     const cmd = parseApprovalCommand(m.message);
     if (!cmd) continue; // our own prompts / chatter on the topic
+
+    // `inspected <target> [date]` targets a claim, not an outbox proposal.
+    if (cmd.verb === "inspected") {
+      if (DRY_RUN) { log.push(`would handle: ${m.message}`); continue; }
+      try {
+        const lines = await handleInspectedCommand(cmd);
+        log.push(`inspected '${cmd.target}' → ${lines.join(" | ")}`);
+      } catch (e) {
+        log.push(`inspected '${cmd.target}' FAILED: ${e.message}`);
+        await ntfyPublish({ topic: APPROVALS_TOPIC, title: `inspected ${cmd.target} FAILED`, body: String(e.message).slice(0, 300), priority: "high", tags: "rotating_light" }).catch(() => {});
+      }
+      continue;
+    }
+
     const p = outbox.proposals.find(x => x.id === cmd.id);
     if (!p) {
       log.push(`cmd '${m.message}' → no proposal #${cmd.id}`);

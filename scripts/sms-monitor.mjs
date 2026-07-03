@@ -666,6 +666,258 @@ export function queueReinspectionNote(entry) {
   return p.id;
 }
 
+// ─── D3: inspection-completed sweep (calendar-driven; Hakiel 2026-07-03) ─────
+//
+// "Whenever you see it on my calendar, the time that you see it should be the
+// end time." When an inspection event's END has passed, the inspection is
+// complete: XA/SLG gets Site Inspected with the end DATE + TIME; FileTrac just
+// gets the date (its single "Date of Inspection" field, overwritten if the
+// actual day differs from the planned one). Queststar flips to Complete.
+// Once-only via data/inspections_completed.json. Standing-authorized by
+// Hakiel's 2026-07-03 instruction — no per-event gate.
+
+const LEDGER_PATH = path.join(REPO, "data/inspections_completed.json");
+const FT_COMPANY_BY_FIRM = { Accelerated: 0, PCAS: 1, Premier: 1, Stewardship: 2, USCS: 3 };
+
+export function loadCompletionLedger(p = LEDGER_PATH) {
+  if (!fs.existsSync(p)) return { completed: {} };
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return { completed: {} }; }
+}
+
+export function saveCompletionLedger(ledger, p = LEDGER_PATH) {
+  if (DRY_RUN) return;
+  fs.writeFileSync(p, JSON.stringify(ledger, null, 2));
+}
+
+export function completionKey(fileNumberOrName, dateIso) {
+  return `${String(fileNumberOrName).toLowerCase().replace(/[^a-z0-9]+/g, "-")}:${dateIso}`;
+}
+
+async function loadXact() {
+  return import(path.join(REPO, "dist/tools/xactanalysis.js"));
+}
+
+/** "6/30/2026" (FT) vs "2026-06-30" — same calendar day? */
+export function usDateEqualsIso(us, iso) {
+  const m = String(us ?? "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return false;
+  return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}` === iso;
+}
+
+/** LA-local {date_iso, time_hhmm} of an instant. */
+export function laDateTimeParts(iso) {
+  const d = new Date(iso);
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: CAL_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(d).map((x) => [x.type, x.value]));
+  return { date_iso: `${p.year}-${p.month}-${p.day}`, time_hhmm: `${p.hour === "24" ? "00" : p.hour}:${p.minute}` };
+}
+
+/**
+ * Write "inspection completed" to the CMS + Queststar.
+ *   target: { ia_firm, company_index?, ft_internal_claim_id?, file_number?,
+ *             insured?, mfn?, queststar_row_id? }
+ *   when:   { date_iso, time_hhmm }  — the calendar event's END (or the
+ *            date Hakiel gave the `inspected` command).
+ * Returns outcome lines. Exported — the outbox runner's `inspected` command
+ * uses the same path.
+ */
+export async function markInspectionCompleted(target, when, deps = {}) {
+  const lines = [];
+  const firm = target.ia_firm ?? "";
+
+  if (firm === "SLG") {
+    const xact = deps.xact ?? await loadXact();
+    let mfn = target.mfn ?? null;
+    if (!mfn && target.insured) {
+      try {
+        const r = await xact.xactFindAssignmentByName({ name_query: target.insured });
+        const text = (r?.content || []).map((c) => c.text || "").join("\n");
+        mfn = text.match(/MFN:\s*([A-Z0-9]+)/i)?.[1] ?? null;
+      } catch { /* fall through */ }
+    }
+    if (!mfn) {
+      lines.push(`XA: no MFN resolvable for ${target.insured ?? "?"} — set Site Inspected manually`);
+    } else if (DRY_RUN) {
+      lines.push(`XA [dry-run]: would set Site Inspected ${when.date_iso} ${when.time_hhmm} on ${mfn}`);
+    } else {
+      await xact.xactUpdateWorkflowStatus({
+        mfn, status: "site_inspected", date: when.date_iso, time: when.time_hhmm,
+      });
+      lines.push(`XA ${mfn}: Site Inspected ${when.date_iso} ${when.time_hhmm}`);
+    }
+  } else {
+    const companyIndex = target.company_index ?? FT_COMPANY_BY_FIRM[firm];
+    const ft = deps.filetrac ?? await loadFiletrac();
+    let claimId = target.ft_internal_claim_id ?? null;
+    if (!claimId && target.file_number != null && companyIndex != null) {
+      try {
+        const r = await ft.filetracListClaims({ company_index: companyIndex, max_results: 50, include_closed: false });
+        const listText = (r?.content || []).map((c) => c.text || "").join("\n");
+        const esc = String(target.file_number).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        claimId = listText.match(new RegExp(`File #:\\s*${esc}\\s*\\|\\s*Claim ID:\\s*(\\d+)`, "i"))?.[1] ?? null;
+      } catch { /* fall through */ }
+    }
+    if (!claimId || companyIndex == null) {
+      lines.push(`FT: no internal claimID for ${target.file_number ?? target.insured ?? "?"} — set Date of Inspection manually`);
+    } else {
+      const r = await ft.filetracGetClaim({ claim_id: String(claimId), company_index: companyIndex });
+      const current = parseInspectionDate((r?.content || []).map((c) => c.text || "").join("\n"));
+      if (current !== "" && current !== null && usDateEqualsIso(current, when.date_iso)) {
+        lines.push(`FT claim ${claimId}: Date of Inspection already ${current}`);
+      } else if (DRY_RUN) {
+        lines.push(`FT [dry-run]: would set Date of Inspection ${when.date_iso} on claim ${claimId}`);
+      } else {
+        // Completion date is authoritative — overwrite a differing planned date.
+        await ft.filetracUpdateClaimDates({
+          claim_id: String(claimId), company_index: companyIndex, inspection_date: when.date_iso,
+        });
+        lines.push(`FT claim ${claimId}: Date of Inspection ${when.date_iso}${current ? ` (was ${current})` : ""}`);
+      }
+    }
+  }
+
+  if (target.queststar_row_id && !DRY_RUN) {
+    try {
+      const qs = deps.queststar ?? await loadQueststar();
+      await qs.updateClaimRow(target.queststar_row_id, { inspection_status: "Complete" });
+      lines.push(`Queststar row ${target.queststar_row_id}: Complete`);
+    } catch (e) {
+      lines.push(`Queststar: update failed (${String(e.message).slice(0, 60)})`);
+    }
+  }
+  return lines;
+}
+
+/** Look up the ACTUAL calendar event end for a tracker entry (it may have moved). */
+async function findEventEnd(entry, now, deps = {}) {
+  const listFn = deps.calendarListEvents ?? (await loadCalendar()).calendarListEvents;
+  try {
+    const from = new Date(`${entry.proposed_date_iso}T00:00:00Z`);
+    from.setUTCDate(from.getUTCDate() - 1);
+    const to = new Date(now + 14 * 24 * 3600 * 1000);
+    const res = await listFn({
+      time_min: from.toISOString(), time_max: to.toISOString(),
+      query: entry.contact_name, max_results: 20,
+    });
+    const text = (res?.content || []).map((c) => c.text || "").join("\n");
+    for (const b of text.split(/\n-{2,}\n?/)) {
+      const id = b.match(/ID:\s*(\S+)/)?.[1];
+      const end = b.match(/End:\s*(\S+)/)?.[1];
+      if (id && end && entry.calendar_event_id && id === entry.calendar_event_id) return end;
+    }
+  } catch { /* fall back below */ }
+  // Fallback: the agreed window's end from the tracker fields.
+  if (entry.proposed_date_iso) {
+    return buildEventTimes(entry.proposed_date_iso, entry.proposed_time_window, CAL_TZ).end;
+  }
+  return null;
+}
+
+/**
+ * Sweep 1: tracker entries whose inspection event END has passed.
+ * Sweep 2: manually-scheduled calendar events (last 7 days) titled like
+ * inspections with a parseable file # / firm, not covered by the tracker.
+ * Both funnel through markInspectionCompleted + the once-only ledger.
+ */
+export async function sweepCompletedInspections(tracker, now, deps = {}) {
+  const ntfyFn = deps.ntfy ?? ntfy;
+  const ledger = loadCompletionLedger(deps.ledgerPath);
+  const actions = [];
+  let ledgerMutated = false;
+
+  // Sweep 1 — tracker entries (resolved ones included: confirm ≠ complete).
+  for (const entry of tracker.pending ?? []) {
+    if (entry.inspection_completed_written) continue;
+    if (!entry.proposed_date_iso) continue;
+    const ctx = entry.claim_context || {};
+    if (ctx.kind === "reinspection") continue; // agreement note is gated; no date fields
+    const key = completionKey(ctx.file_number ?? entry.claim_id ?? entry.contact_phone, entry.proposed_date_iso);
+    if (ledger.completed[key]) { entry.inspection_completed_written = true; continue; }
+    const endIso = await findEventEnd(entry, now, deps);
+    if (!endIso || new Date(endIso).getTime() > now) continue; // not happened yet / moved out
+    const when = laDateTimeParts(endIso);
+    let lines;
+    try {
+      lines = await (deps.markInspectionCompleted ?? markInspectionCompleted)({
+        ia_firm: ctx.ia_firm ?? entry.ia_firm,
+        company_index: ctx.company_index ?? entry.company_index,
+        ft_internal_claim_id: ctx.ft_internal_claim_id,
+        file_number: ctx.file_number ?? entry.claim_id,
+        insured: entry.contact_name,
+        queststar_row_id: ctx.queststar_row_id,
+      }, when, deps);
+    } catch (e) {
+      lines = [`completion write failed: ${String(e.message).slice(0, 120)}`];
+    }
+    const failed = lines.some((l) => /manually|failed/i.test(l));
+    // One attempt per inspection — success OR failure gets ledgered so a
+    // broken write nags once, not every 30 minutes. The `inspected` command
+    // is the retry/override path.
+    entry.inspection_completed_written = true;
+    ledger.completed[key] = { date: when.date_iso, source: "tracker", failed, at: new Date(now).toISOString() };
+    ledgerMutated = true;
+    actions.push({ id: entry.id || entry.thread_id, action: `inspection_completed${failed ? ":partial" : ""}` });
+    await ntfyFn({
+      title: `Inspected — ${entry.contact_name} ${when.date_iso}`,
+      body: `${lines.join("\n")}\n\n${failed ? `Fix with 'inspected ${ctx.file_number ?? entry.claim_id ?? entry.contact_name} ${when.date_iso}' once resolved, or set it in the portal.` : `Reply 'inspected ${ctx.file_number ?? entry.claim_id ?? entry.contact_name} <date>' on the approvals topic if this is wrong.`}`,
+      priority: failed ? "high" : "low",
+      tags: failed ? "warning" : "white_check_mark",
+    });
+  }
+
+  // Sweep 2 — manually-scheduled inspection events not in the tracker.
+  try {
+    const listFn = deps.calendarListEvents ?? (await loadCalendar()).calendarListEvents;
+    const res = await listFn({
+      time_min: new Date(now - 7 * 24 * 3600 * 1000).toISOString(),
+      time_max: new Date(now).toISOString(),
+      query: "Inspection", max_results: 50,
+    });
+    const text = (res?.content || []).map((c) => c.text || "").join("\n");
+    for (const b of text.split(/\n-{2,}\n?/)) {
+      const titleLine = b.split("\n").map((l) => l.trim()).find((l) => /inspection/i.test(l) && !/^ID:|^Start:|^End:|^Location:/.test(l));
+      const end = b.match(/End:\s*(\S+)/)?.[1];
+      if (!titleLine || !end || new Date(end).getTime() > now) continue;
+      const fileNumber = titleLine.match(/\b(\d{7,9})\b/)?.[1] ?? null;
+      const firm = titleLine.match(/\b(PCAS|USCS|SLG|IANet|AAN|Premier)\b/i)?.[1]?.toUpperCase() ?? null;
+      if (!fileNumber || !firm) continue; // can't resolve a claim — leave alone
+      const when = laDateTimeParts(end);
+      const key = completionKey(fileNumber, when.date_iso);
+      if (ledger.completed[key]) continue;
+      // Skip if a tracker entry already covers this file # (sweep 1's job).
+      const covered = (tracker.pending ?? []).some((e) =>
+        String((e.claim_context || {}).file_number ?? e.claim_id ?? "") === fileNumber && !e.claim_context?.kind);
+      if (covered) continue;
+      const insured = titleLine.replace(/^\[ADJ\]\s*/i, "").split(/\s+Inspection/i)[0]?.trim() || null;
+      let lines;
+      try {
+        lines = await (deps.markInspectionCompleted ?? markInspectionCompleted)(
+          { ia_firm: firm === "PREMIER" ? "PCAS" : firm, file_number: fileNumber, insured }, when, deps);
+      } catch (e) {
+        lines = [`completion write failed: ${String(e.message).slice(0, 120)}`];
+      }
+      const failed = lines.some((l) => /manually|failed/i.test(l));
+      // One attempt per inspection (see sweep 1) — ledger success AND failure.
+      ledger.completed[key] = { date: when.date_iso, source: "calendar", failed, at: new Date(now).toISOString() };
+      ledgerMutated = true;
+      actions.push({ id: `cal:${fileNumber}`, action: `inspection_completed${failed ? ":partial" : ""}` });
+      await ntfyFn({
+        title: `Inspected — ${insured ?? fileNumber} ${when.date_iso}`,
+        body: `${lines.join("\n")}\n\n${failed ? `Fix with 'inspected ${fileNumber} ${when.date_iso}' once resolved, or set it in the portal.` : `Reply 'inspected ${fileNumber} <date>' on the approvals topic if this is wrong.`}`,
+        priority: failed ? "high" : "low",
+        tags: failed ? "warning" : "white_check_mark",
+      });
+    }
+  } catch (e) {
+    actions.push({ id: "calendar-sweep", action: `error:${String(e.message).slice(0, 80)}` });
+  }
+
+  if (ledgerMutated) saveCompletionLedger(ledger, deps.ledgerPath);
+  return actions;
+}
+
 /**
  * Process a single tracker entry. Side-effects (fetchThread, ntfy, calendar)
  * are injected via `deps` so tests can stub them. Production wires the real
@@ -788,6 +1040,20 @@ export async function processEntry(entry, now, deps = {}) {
       }
     }
 
+    // Quiet-success rule (Hakiel 2026-07-03): the date writes are just field
+    // updates in the CMS — don't itemize them. One terse line when everything
+    // worked; only problems and pending-approval asks get spelled out.
+    let confirmTail = "";
+    if (intent === "CONFIRM") {
+      const lines = [calLine, ftLine, qsLine]
+        .flatMap((s) => s.split("\n")).map((s) => s.trim()).filter(Boolean);
+      const keep = lines.filter((l) =>
+        /FAILED|ERROR|SKIPPED|manually|could not|no row id|approve on|awaiting|draft failed/i.test(l));
+      const kindNote = (entry.claim_context || {}).kind === "reinspection"
+        ? "Calendar updated." : "Calendar + CMS date + Queststar updated.";
+      confirmTail = keep.length ? `\n${keep.join("\n")}` : ` ${kindNote}`;
+    }
+
     const ntfyTitle = `SMS reply from ${entry.contact_name} — ${intent}`;
     const ntfyBody = [
       `Claim: ${entry.claim_id || "?"} (${entry.ia_firm || "?"})`,
@@ -795,7 +1061,7 @@ export async function processEntry(entry, now, deps = {}) {
       `Reply (${fmtPST(last.timestamp_iso)}): ${last.body}`,
       ``,
       intent === "CONFIRM"
-        ? `Confirmed for ${dateLabel}${window}.${entry.window_adjusted_from_reply ? " (window adjusted to their reply)" : ""}${calLine}${ftLine}${qsLine}`
+        ? `Confirmed for ${dateLabel}${window}.${entry.window_adjusted_from_reply ? " (window adjusted to their reply)" : ""}${confirmTail}`
         : intent === "DECLINE"
           ? `They can't make ${dateLabel}${window} — your move (call or re-propose).`
           : `${intent === "COUNTER" ? "They proposed a different time." : "Unclear reply."}${counterLine}`,
@@ -834,7 +1100,6 @@ export async function processEntry(entry, now, deps = {}) {
 export async function runMonitorOnce({ trackerPath = TRACKER_PATH, deps = {}, now = Date.now() } = {}) {
   const tracker = loadTracker(trackerPath);
   const pending = Array.isArray(tracker.pending) ? tracker.pending : [];
-  if (pending.length === 0) return { mutated: false, actions: [] };
   let mutated = false;
   const actions = [];
   for (let i = 0; i < pending.length; i++) {
@@ -845,6 +1110,22 @@ export async function runMonitorOnce({ trackerPath = TRACKER_PATH, deps = {}, no
     actions.push({ id: entry.id || entry.thread_id, action });
   }
   tracker.pending = pending;
+
+  // D3: completion sweep runs even with an empty tracker — manually-scheduled
+  // calendar inspections still need their CMS date/time written when they end.
+  // Opt-in (production main passes runCompletionSweep:true) so unit tests that
+  // stub only fetchThread/ntfy never touch the real calendar/CMS/ledger.
+  if (deps.runCompletionSweep === true) {
+    const beforeSweep = JSON.stringify(tracker.pending);
+    try {
+      const sweepActions = await sweepCompletedInspections(tracker, now, deps);
+      actions.push(...sweepActions);
+    } catch (e) {
+      actions.push({ id: "completion-sweep", action: `error:${String(e.message).slice(0, 80)}` });
+    }
+    if (JSON.stringify(tracker.pending) !== beforeSweep) mutated = true;
+  }
+
   if (mutated) saveTracker(tracker, trackerPath);
   return { mutated, actions, tracker };
 }
@@ -854,7 +1135,7 @@ const isDirectRun = process.argv[1] && import.meta.url === `file://${process.arg
 if (isDirectRun) {
   (async () => {
     console.log(`=== sms-monitor ${new Date().toISOString()} ===`);
-    const { mutated, actions } = await runMonitorOnce();
+    const { mutated, actions } = await runMonitorOnce({ deps: { runCompletionSweep: true } });
     for (const a of actions) console.log(`[${a.id}] ${a.action}`);
     if (actions.length === 0) console.log("no pending entries — exit");
     console.log(`done. mutated=${mutated}`);

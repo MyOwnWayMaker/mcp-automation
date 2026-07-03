@@ -209,6 +209,32 @@ export function normalizeLossType(raw) {
   return "UNKNOWN";
 }
 
+// Uniqueness parenthetical (Hakiel 2026-07-03): folder titles carry whatever
+// makes the claim unique — "Water (Sewer Backup)", "Wind (Weight of Snow)".
+// Derived from the free-text loss description only when a keyword clearly
+// matches; returns null (no parenthetical) otherwise — never guess. Order
+// matters: specific causes before generic pipe/leak catches.
+const CAUSE_RULES = [
+  [/sewer|sewage|clogged\s+(?:drain|main)/i, "Sewer Backup"],
+  [/slab\s*leak|under\s*(?:the\s*)?slab/i, "Slab Leak"],
+  [/water\s*heater/i, "Water Heater Leak"],
+  [/roof\s*leak|leak\w*\s+(?:from|in)\s+(?:the\s+)?roof/i, "Roof Leak"],
+  [/(?:unit|apartment|apt\.?)\s*(?:#?\d+\s*)?(?:above|upstairs)|from\s+(?:the\s+)?unit\s+above|came\s+down\s+the\s+ceiling/i, "Water From Unit Above"],
+  [/w[ei]{1,2}ght\s*of\s*snow/i, "Weight of Snow"],
+  [/tree\s+(?:fell|down|downed|came|on\s)/i, "Tree on Structure"],
+  [/pipe\s*(?:burst|break|broke)|burst\s*pipe/i, "Pipe Burst"],
+  [/pipe\s*leak|supply\s*line/i, "Pipe Leak"],
+  [/carport/i, "Carport Damage"],
+  [/hail/i, "Hail"],
+  [/mold/i, "Mold"],
+];
+export function deriveCauseParenthetical(lossDescription) {
+  const s = String(lossDescription ?? "");
+  if (!s) return null;
+  for (const [re, label] of CAUSE_RULES) if (re.test(s)) return label;
+  return null;
+}
+
 export function deriveLossType(parsed, msg) {
   // The structured loss_type field ALONE decides first — never mixed with the
   // free-text description, whose incidental words outrank it in PERIL_RULES
@@ -635,12 +661,18 @@ async function processNewAssignment({ msg, parsed, todayDate, dryRun }) {
     ? carrier_short : null;
 
   const request_date = normalizeDate(parsed.date_received) ?? normalizeDate(todayDate) ?? todayDate.slice(0, 10);
+  // Folder title carries the uniqueness parenthetical when the description
+  // yields one — "Water (Sewer Backup)". The bare peril still flows everywhere
+  // else (Queststar, scheduler).
+  const cause = deriveCauseParenthetical(parsed.loss_description);
+  const loss_type_labeled = cause && !String(loss_type).includes("(")
+    ? `${loss_type} (${cause})` : loss_type;
   const args = {
     request_date,
     insured_name: insured,
     client_short,
     carrier_short,
-    loss_type,
+    loss_type: loss_type_labeled,
   };
   if (dryRun) {
     // Preview the scheduling proposal too (read-only: geocode + calendar +
@@ -651,6 +683,7 @@ async function processNewAssignment({ msg, parsed, todayDate, dryRun }) {
         msg, parsed, folderResult: null, insured, client_short, loss_type,
         company_index: CLIENT_TO_FT_COMPANY[client_short] ?? null,
         ft_internal_claim_id: ft_identity?.claim_id ?? null,
+        request_date,
         dryRun: true,
       });
     } catch (e) {
@@ -728,6 +761,7 @@ async function processNewAssignment({ msg, parsed, todayDate, dryRun }) {
       company_index: CLIENT_TO_FT_COMPANY[client_short] ?? null,
       ft_internal_claim_id: ft_identity?.claim_id ?? null,
       queststar_row_id: row.id,
+      request_date,
     });
   } catch (e) {
     scheduling = { skipped: "scheduler-error", detail: String(e?.message ?? e).slice(0, 160) };
@@ -886,6 +920,7 @@ async function processSupplement({ msg, parsed, todayDate, dryRun }) {
         msg, parsed, folderResult,
         insured: identity.insured, client_short: identity.client, loss_type: identity.loss_type,
         company_index, queststar_row_id: row?.id ?? null,
+        request_date,
         kind: "reinspection",
       });
     } catch (e) {

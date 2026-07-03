@@ -206,6 +206,8 @@ export type CreateClaimDriveFolderResult =
       month_folder: { id: string; name: string; created: boolean };
       claim_folder: { id: string; name: string; created: boolean; link?: string };
       photos_folder: { id: string; name: string; created: boolean };
+      reports_folder: { id: string; name: string; created: boolean };
+      qa_folder: { id: string; name: string; created: boolean };
       // Full path for human reference
       path: string;
       already_existed: boolean;   // true if claim_folder was found rather than created
@@ -283,9 +285,13 @@ export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): 
     });
     const claimFolder = await findOrCreateFolder(monthFolder.id, claimFolderName);
 
-    // Photos for Xactimate is a standard subfolder per claim — create even
-    // if claim folder pre-existed (in case it was missing).
+    // Standard subfolders per claim — create even if the claim folder
+    // pre-existed (in case one is missing). "Hakiel Reports Submitted" holds
+    // his own deliverables; "QA Final Reports to Carrier" holds the
+    // carrier-approved versions pulled from XactAnalysis for comparison.
     const photosFolder = await findOrCreateFolder(claimFolder.id, "Photos for Xactimate");
+    const reportsFolder = await findOrCreateFolder(claimFolder.id, "Hakiel Reports Submitted");
+    const qaFolder = await findOrCreateFolder(claimFolder.id, "QA Final Reports to Carrier");
 
     return {
       ok: true,
@@ -298,6 +304,8 @@ export async function createClaimDriveFolder(args: CreateClaimDriveFolderArgs): 
         link: claimFolder.link,
       },
       photos_folder: { id: photosFolder.id, name: "Photos for Xactimate", created: photosFolder.created },
+      reports_folder: { id: reportsFolder.id, name: "Hakiel Reports Submitted", created: reportsFolder.created },
+      qa_folder: { id: qaFolder.id, name: "QA Final Reports to Carrier", created: qaFolder.created },
       path: `Claims and Inspection Archive/${labels.quarter}/${labels.month}/${claimFolderName}/`,
       already_existed: !claimFolder.created,
     };

@@ -123,7 +123,7 @@ export function buildApprovalPrompt(p, topic = APPROVALS_TOPIC) {
 export async function proposeInspectionSms({
   msg, parsed, folderResult, insured, client_short, loss_type,
   company_index = null, ft_internal_claim_id = null, queststar_row_id = null,
-  kind = "new_assignment", dryRun = false,
+  request_date = null, kind = "new_assignment", dryRun = false,
 }) {
   const t = await schedTools();
 
@@ -191,6 +191,9 @@ export async function proposeInspectionSms({
       drive_folder_url: folderResult?.claim_folder?.link ?? null,
       queststar_row_id,
       first_contact_on_send: kind === "new_assignment",
+      // First Date of Contact is stamped with the day the ASSIGNMENT was
+      // received (Hakiel 2026-07-03), not the day the approval fires.
+      assignment_received: request_date,
     },
     claim_context: buildClaimContext({ parsed, folderResult, lossAddressStr }),
     source_message_id: msg?.id ?? null,

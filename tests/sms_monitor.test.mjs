@@ -633,5 +633,8 @@ test("processEntry: dedup hit adopts existing event_id into tracker", async () =
   assert.equal(out.calendar_event_id, "ev-dedup", "dedup id must land in tracker");
   assert.equal(out.resolved, true);
   assert.equal(ntfyCalls.length, 1);
-  assert.match(ntfyCalls[0].body, /adopted existing ev-dedup/);
+  // Quiet-success rule (2026-07-03): the adoption is silent — the body only
+  // itemizes problems (here: the SKIPPED date writes on this bare entry).
+  assert.doesNotMatch(ntfyCalls[0].body, /adopted existing/);
+  assert.match(ntfyCalls[0].body, /Confirmed for 2026-06-11/);
 });

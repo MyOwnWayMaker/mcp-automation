@@ -232,3 +232,174 @@ test("windowLabel + replyTimeMatchesProposal", () => {
   assert.equal(replyTimeMatchesProposal({ startHour: 9, startMin: 0 }, "9am-10am"), true);
   assert.equal(replyTimeMatchesProposal({ startHour: 10, startMin: 0 }, "9am-10am"), false);
 });
+
+// ── D3: inspected command grammar ───────────────────────────────────────────
+
+test("grammar: inspected with file#, name, dates", () => {
+  assert.deepEqual(parseApprovalCommand("inspected 81031873"), { verb: "inspected", target: "81031873", date: null });
+  assert.deepEqual(parseApprovalCommand("inspected tracey 7/1"), { verb: "inspected", target: "tracey", date: "7/1" });
+  assert.deepEqual(parseApprovalCommand("INSPECTED 81031873 2026-07-01"), { verb: "inspected", target: "81031873", date: "2026-07-01" });
+  assert.deepEqual(parseApprovalCommand("inspected yoav avicasis 7/1/2026"), { verb: "inspected", target: "yoav avicasis", date: "7/1/2026" });
+  assert.equal(parseApprovalCommand("inspected"), null);
+});
+
+// ── D3: completion writer + sweep ───────────────────────────────────────────
+
+const {
+  markInspectionCompleted, sweepCompletedInspections, usDateEqualsIso,
+  laDateTimeParts, completionKey, loadCompletionLedger,
+} = await import("../scripts/sms-monitor.mjs");
+
+test("usDateEqualsIso + laDateTimeParts + completionKey", () => {
+  assert.equal(usDateEqualsIso("6/30/2026", "2026-06-30"), true);
+  assert.equal(usDateEqualsIso("7/1/2026", "2026-06-30"), false);
+  assert.deepEqual(laDateTimeParts("2026-06-30T10:30:00-07:00"), { date_iso: "2026-06-30", time_hhmm: "10:30" });
+  assert.equal(completionKey("81031873", "2026-06-30"), "81031873:2026-06-30");
+});
+
+function ftCompletionStub({ current = "", writes = [] } = {}) {
+  return {
+    filetracGetClaim: async () => ({ content: [{ type: "text", text: `Date of Inspection: ${current}` }] }),
+    filetracUpdateClaimDates: async (args) => { writes.push(args); return { content: [] }; },
+    filetracListClaims: async () => ({ content: [{ type: "text", text: "File #: 81031873 | Claim ID: 3711537 | x" }] }),
+  };
+}
+
+test("markInspectionCompleted: PCAS writes FT date, overwrites a differing planned date", async () => {
+  const writes = [];
+  const lines = await markInspectionCompleted(
+    { ia_firm: "PCAS", company_index: 1, ft_internal_claim_id: "999" },
+    { date_iso: "2026-07-02", time_hhmm: "10:30" },
+    { filetrac: ftCompletionStub({ current: "7/01/2026", writes }) },
+  );
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].inspection_date, "2026-07-02");
+  assert.match(lines[0], /was 7\/01\/2026/);
+});
+
+test("markInspectionCompleted: same-day FT value → no write", async () => {
+  const writes = [];
+  const lines = await markInspectionCompleted(
+    { ia_firm: "PCAS", company_index: 1, ft_internal_claim_id: "999" },
+    { date_iso: "2026-06-30", time_hhmm: "10:30" },
+    { filetrac: ftCompletionStub({ current: "6/30/2026", writes }) },
+  );
+  assert.equal(writes.length, 0);
+  assert.match(lines[0], /already/);
+});
+
+test("markInspectionCompleted: resolves internal claimID from File # when missing", async () => {
+  const writes = [];
+  await markInspectionCompleted(
+    { ia_firm: "PCAS", file_number: "81031873" },
+    { date_iso: "2026-07-02", time_hhmm: "10:30" },
+    { filetrac: ftCompletionStub({ writes }) },
+  );
+  assert.equal(writes[0].claim_id, "3711537");
+  assert.equal(writes[0].company_index, 1);
+});
+
+test("markInspectionCompleted: SLG routes to XA site_inspected with date + END time", async () => {
+  const calls = [];
+  const xact = {
+    xactFindAssignmentByName: async () => ({ content: [{ type: "text", text: "Claim #: 12 | MFN: 06X7T7W" }] }),
+    xactUpdateWorkflowStatus: async (args) => { calls.push(args); return { content: [] }; },
+  };
+  const lines = await markInspectionCompleted(
+    { ia_firm: "SLG", insured: "Vincent Pinedo" },
+    { date_iso: "2026-07-02", time_hhmm: "15:30" },
+    { xact },
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { mfn: "06X7T7W", status: "site_inspected", date: "2026-07-02", time: "15:30" });
+  assert.match(lines[0], /Site Inspected 2026-07-02 15:30/);
+});
+
+test("sweep 1: passed tracker event → completion written once, ledgered, entry flagged", async () => {
+  const ledgerPath = path.join(TMP, "ledger1.json");
+  const marks = [], notes = [];
+  const entry = {
+    id: "t1", contact_name: "Test Person", claim_id: "81031111",
+    proposed_date_iso: "2026-07-01", proposed_time_window: "9am-10am",
+    calendar_event_id: "ev1", resolved: true,
+    claim_context: { file_number: "81031111", ia_firm: "PCAS", company_index: 1, ft_internal_claim_id: "42" },
+  };
+  const deps = {
+    ledgerPath,
+    calendarListEvents: async () => ({ content: [{ type: "text", text: "ID: ev1\nInspection — Test Person\nStart: 2026-07-01T09:00:00-07:00\nEnd: 2026-07-01T10:00:00-07:00" }] }),
+    markInspectionCompleted: async (t, w) => { marks.push([t, w]); return [`FT claim 42: Date of Inspection ${w.date_iso}`]; },
+    ntfy: async (n) => notes.push(n),
+  };
+  const now = new Date("2026-07-02T08:00:00-07:00").getTime();
+  const tracker = { pending: [entry] };
+  const actions = await sweepCompletedInspections(tracker, now, deps);
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0][1].date_iso, "2026-07-01");
+  assert.equal(marks[0][1].time_hhmm, "10:00"); // event END, per Hakiel
+  assert.equal(entry.inspection_completed_written, true);
+  assert.equal(actions.filter(a => /inspection_completed/.test(a.action)).length, 1);
+  // second run: ledger + entry flag → no new writes
+  const again = await sweepCompletedInspections(tracker, now, deps);
+  assert.equal(marks.length, 1);
+  assert.equal(again.filter(a => /inspection_completed/.test(a.action)).length, 0);
+});
+
+test("sweep 1: future/moved event → untouched; reinspection kind → never", async () => {
+  const ledgerPath = path.join(TMP, "ledger2.json");
+  const marks = [];
+  const mk = async (t, w) => { marks.push([t, w]); return ["ok"]; };
+  const now = new Date("2026-07-02T08:00:00-07:00").getTime();
+  const future = {
+    contact_name: "F", proposed_date_iso: "2026-07-03", proposed_time_window: "9am-10am",
+    calendar_event_id: "ev9", claim_context: { file_number: "1", ia_firm: "PCAS" },
+  };
+  const reinsp = {
+    contact_name: "R", proposed_date_iso: "2026-07-01", proposed_time_window: "9am-10am",
+    claim_context: { file_number: "2", ia_firm: "PCAS", kind: "reinspection" },
+  };
+  await sweepCompletedInspections({ pending: [future, reinsp] }, now, {
+    ledgerPath, markInspectionCompleted: mk, ntfy: async () => {},
+    calendarListEvents: async () => ({ content: [{ type: "text", text: "ID: ev9\nInspection — F\nStart: 2026-07-03T09:00:00-07:00\nEnd: 2026-07-03T10:00:00-07:00" }] }),
+  });
+  assert.equal(marks.length, 0);
+  assert.equal(future.inspection_completed_written, undefined);
+});
+
+test("sweep 2: manually-scheduled '[ADJ] … Inspection' event resolves file # + firm", async () => {
+  const ledgerPath = path.join(TMP, "ledger3.json");
+  const marks = [], notes = [];
+  const deps = {
+    ledgerPath,
+    calendarListEvents: async () => ({ content: [{ type: "text", text: "ID: cal9\n[ADJ] Yoav Avicasis Inspection — PCAS/Seaview 81031873\nStart: 2026-06-30T10:00:00-07:00\nEnd: 2026-06-30T11:00:00-07:00\nLocation: 3717 Broadlawn Dr" }] }),
+    markInspectionCompleted: async (t, w) => { marks.push([t, w]); return ["FT ok"]; },
+    ntfy: async (n) => notes.push(n),
+  };
+  const now = new Date("2026-07-01T08:00:00-07:00").getTime();
+  await sweepCompletedInspections({ pending: [] }, now, deps);
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0][0].file_number, "81031873");
+  assert.equal(marks[0][0].ia_firm, "PCAS");
+  assert.equal(marks[0][0].insured, "Yoav Avicasis");
+  assert.equal(marks[0][1].time_hhmm, "11:00");
+  // ledgered → second run no-op
+  await sweepCompletedInspections({ pending: [] }, now, deps);
+  assert.equal(marks.length, 1);
+});
+
+// ── D5: uniqueness parenthetical ────────────────────────────────────────────
+
+const { deriveCauseParenthetical } = await import("../scripts/pipeline/orchestrator.mjs");
+
+test("deriveCauseParenthetical: real June descriptions", () => {
+  assert.equal(deriveCauseParenthetical(
+    "A clogged sewer flooded the unit, causing damage and mold inside, on the wall between the primary bedroom bathroom & closet"),
+    "Sewer Backup");
+  assert.equal(deriveCauseParenthetical(
+    "The unit 204 above the insureds unit had a water over flow issue, so the water came down the ceiling, light fixture, smoke detection, walls and the unit"),
+    "Water From Unit Above");
+  assert.equal(deriveCauseParenthetical("slab leak under the kitchen"), "Slab Leak");
+  assert.equal(deriveCauseParenthetical("collapse from wieght of snow"), "Weight of Snow");
+  assert.equal(deriveCauseParenthetical("a tree fell on the fence and gate"), "Tree on Structure");
+  assert.equal(deriveCauseParenthetical("wind damage to shingles"), null);
+  assert.equal(deriveCauseParenthetical(null), null);
+});
